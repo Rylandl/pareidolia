@@ -25,6 +25,53 @@ length; it remains independently adjustable for stability audits. Fits are
 rejected when that context would extend beyond the loaded cuboid rather than
 silently using synthetic padding.
 
+## Cubical surface experiment
+
+The active architectural experiment represents locally planar interfaces as a
+cell complex rather than extending the legacy fragment-growth graph. Its core
+is dataset-independent and lives in `backend/cubical`:
+
+- every uncertain cell-centered plane is clipped into a deterministic three-
+  through six-vertex polygon on canonical global grid edges;
+- adjacent cells align their complete ordered trace sequences on the exact
+  shared face using uncertainty-normalized position, unsigned-normal, and
+  transported unsigned-fiber evidence;
+- statistically supported near-corner topology changes weld to the canonical
+  grid vertex, while inconsistent transitive corner cycles are deferred;
+- a retained join may not place two locally planar patches from one cell in a
+  surface component;
+- regular leaf blocks cache exterior traces and interior component incidence,
+  and hierarchical composition reproduces direct assembly on the analytic
+  tests; and
+- patch artifacts use versioned NumPy structures of arrays so later inference
+  can be sharded and vectorized without changing the geometry contract.
+
+The analytic smoke test is reproducible with:
+
+```bash
+python3 -m backend.cubical synthetic --verify-direct
+```
+
+The current real-data plumbing check adapts persisted Acus modes only as plane
+evidence proxies; it does **not** call them physical layers:
+
+```bash
+python3 -m backend.cubical acus-window \
+  --root work/cross-scroll-analysis-z512 \
+  --origin 109 86 0 --shape 16 16 14
+```
+
+That 16 × 16 × 14-cell run currently converts 11,065 inherited modes into
+8,173 core-owned polygons and completes adaptation, hierarchical assembly, and
+mesh/projection export in 17 seconds. It retains 7,727 joins, defers 520 joins
+that would cause a same-cell layer collision and 98 with an inconsistent
+crossing topology, and leaves 1,827 components. This is deliberately a baseline
+showing why the inherited three-mode local representation is insufficient. The
+next evidence adapter will retain local depth/orientation distributions and
+competing layer-count configurations before shared-face optimization. The full
+geometry and artifact contract is documented in
+[`docs/cubical-surfaces.md`](docs/cubical-surfaces.md).
+
 ## Current pilot
 
 - The tailnet launcher uses a full-resolution 256³ cuboid from PHerc. 358 when

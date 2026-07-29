@@ -1,0 +1,665 @@
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Iterable
+
+import numpy as np
+
+from .geometry import ClippedPatch, FaceTrace
+from .matching import (
+    TraceMatch,
+    TraceMatchSettings,
+    align_face_patches,
+)
+from .topology import Float3, GridEdge, GridFace, GridSpec, Int3, cell_face
+
+
+@dataclass(frozen=True, slots=True)
+class BlockBounds:
+    start_cell_xyz: Int3
+    stop_cell_xyz_exclusive: Int3
+
+    def __post_init__(self) -> None:
+        start = tuple(int(value) for value in self.start_cell_xyz)
+        stop = tuple(int(value) for value in self.stop_cell_xyz_exclusive)
+        if len(start) != 3 or len(stop) != 3:
+            raise ValueError("block bounds require XYZ triples")
+        if any(stop[axis] <= start[axis] for axis in range(3)):
+            raise ValueError("block bounds must have positive extent")
+        object.__setattr__(self, "start_cell_xyz", start)
+        object.__setattr__(self, "stop_cell_xyz_exclusive", stop)
+
+    @property
+    def shape_cells_xyz(self) -> Int3:
+        return tuple(
+            self.stop_cell_xyz_exclusive[axis] - self.start_cell_xyz[axis]
+            for axis in range(3)
+        )  # type: ignore[return-value]
+
+    def contains_cell(self, cell_xyz: Int3) -> bool:
+        return all(
+            self.start_cell_xyz[axis]
+            <= cell_xyz[axis]
+            < self.stop_cell_xyz_exclusive[axis]
+            for axis in range(3)
+        )
+
+    def contains_face_on_boundary(self, face: GridFace) -> bool:
+        coordinate = face.anchor_xyz[face.axis]
+        return coordinate in (
+            self.start_cell_xyz[face.axis],
+            self.stop_cell_xyz_exclusive[face.axis],
+        ) and all(
+            self.start_cell_xyz[axis]
+            <= face.anchor_xyz[axis]
+            < self.stop_cell_xyz_exclusive[axis]
+            for axis in range(3)
+            if axis != face.axis
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WeldedCrossing:
+    supporting_edges: tuple[GridEdge, ...]
+    edge: GridEdge | None
+    grid_vertex_xyz: Int3 | None
+    point_xyz: Float3
+    t: float | None
+    variance: float | None
+    observations: tuple[tuple[int, GridEdge], ...]
+    maximum_standardized_residual: float
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryTrace:
+    component_id: int
+    patch_id: int
+    trace: FaceTrace
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentSummary:
+    component_id: int
+    patch_ids: tuple[int, ...]
+    exterior_trace_count: int
+    unresolved_interior_trace_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredJoin:
+    match: TraceMatch
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceBlock:
+    grid: GridSpec
+    bounds: BlockBounds
+    patches: tuple[ClippedPatch, ...]
+    candidate_joins: tuple[TraceMatch, ...]
+    joins: tuple[TraceMatch, ...]
+    deferred_joins: tuple[DeferredJoin, ...]
+    component_by_patch: tuple[tuple[int, int], ...]
+    components: tuple[ComponentSummary, ...]
+    welded_crossings: tuple[WeldedCrossing, ...]
+    exterior_traces: tuple[BoundaryTrace, ...]
+    unresolved_interior_traces: tuple[BoundaryTrace, ...]
+
+    def component_for_patch(self, patch_id: int) -> int:
+        values = dict(self.component_by_patch)
+        if patch_id not in values:
+            raise KeyError(patch_id)
+        return values[patch_id]
+
+
+class _DisjointSet:
+    def __init__(self, values: Iterable[object]) -> None:
+        self.parent = {value: value for value in values}
+
+    def find(self, value: object) -> object:
+        parent = self.parent[value]
+        if parent != value:
+            self.parent[value] = self.find(parent)
+        return self.parent[value]
+
+    def union(self, first: object, second: object) -> None:
+        first_root = self.find(first)
+        second_root = self.find(second)
+        if first_root == second_root:
+            return
+        if repr(first_root) <= repr(second_root):
+            self.parent[second_root] = first_root
+        else:
+            self.parent[first_root] = second_root
+
+
+def _common_crossing_feature(edges: set[GridEdge]) -> object | None:
+    if len(edges) == 1:
+        return next(iter(edges))
+    shared_vertices = set.intersection(
+        *(set(edge.endpoint_vertices()) for edge in edges)
+    )
+    return next(iter(shared_vertices)) if len(shared_vertices) == 1 else None
+
+
+def _select_consistent_joins(
+    patches: tuple[ClippedPatch, ...], candidates: tuple[TraceMatch, ...]
+) -> tuple[tuple[TraceMatch, ...], tuple[DeferredJoin, ...]]:
+    patch_by_id = {value.patch_id: value for value in patches}
+    patch_set = _DisjointSet(patch_by_id)
+    component_cells: dict[object, set[Int3]] = {
+        patch_id: {patch.cell_xyz} for patch_id, patch in patch_by_id.items()
+    }
+    observations = [
+        (patch.patch_id, vertex.edge)
+        for patch in patches
+        for vertex in patch.vertices
+    ]
+    crossing_set = _DisjointSet(observations)
+    crossing_edges: dict[object, set[GridEdge]] = {
+        value: {value[1]} for value in observations
+    }
+    crossing_owners: dict[object, dict[int, GridEdge]] = {
+        value: {value[0]: value[1]} for value in observations
+    }
+
+    def crossing_pairs(match: TraceMatch) -> list[tuple[object, object]]:
+        return [
+            (
+                (match.first_patch_id, value.first_edge),
+                (match.second_patch_id, value.second_edge),
+            )
+            for value in match.endpoint_agreements
+        ]
+
+    def crossings_remain_feasible(match: TraceMatch) -> bool:
+        pairs = crossing_pairs(match)
+        roots = {
+            crossing_set.find(value) for pair in pairs for value in pair
+        }
+        adjacency: dict[object, set[object]] = {root: set() for root in roots}
+        for first, second in pairs:
+            first_root = crossing_set.find(first)
+            second_root = crossing_set.find(second)
+            adjacency[first_root].add(second_root)
+            adjacency[second_root].add(first_root)
+        remaining = set(roots)
+        while remaining:
+            seed = next(iter(remaining))
+            group = {seed}
+            frontier = [seed]
+            while frontier:
+                current = frontier.pop()
+                for neighbor in adjacency[current] - group:
+                    group.add(neighbor)
+                    frontier.append(neighbor)
+            remaining -= group
+            edges: set[GridEdge] = set()
+            owners: dict[int, GridEdge] = {}
+            for root in group:
+                edges.update(crossing_edges[root])
+                for patch_id, edge in crossing_owners[root].items():
+                    if patch_id in owners and owners[patch_id] != edge:
+                        return False
+                    owners[patch_id] = edge
+            if _common_crossing_feature(edges) is None:
+                return False
+        return True
+
+    def union_crossings(match: TraceMatch) -> None:
+        for first, second in crossing_pairs(match):
+            first_root = crossing_set.find(first)
+            second_root = crossing_set.find(second)
+            if first_root == second_root:
+                continue
+            edges = crossing_edges.pop(first_root) | crossing_edges.pop(second_root)
+            owners = crossing_owners.pop(first_root)
+            owners.update(crossing_owners.pop(second_root))
+            crossing_set.union(first_root, second_root)
+            root = crossing_set.find(first_root)
+            crossing_edges[root] = edges
+            crossing_owners[root] = owners
+
+    retained: list[TraceMatch] = []
+    deferred: list[DeferredJoin] = []
+    ordered = sorted(
+        candidates,
+        key=lambda value: (
+            -value.score,
+            value.negative_log_likelihood,
+            value.face.axis,
+            value.face.anchor_xyz,
+            value.first_patch_id,
+            value.second_patch_id,
+        ),
+    )
+    for match in ordered:
+        if not match.accepted:
+            deferred.append(DeferredJoin(match, "pair-gate"))
+            continue
+        first_root = patch_set.find(match.first_patch_id)
+        second_root = patch_set.find(match.second_patch_id)
+        if first_root != second_root and (
+            component_cells[first_root] & component_cells[second_root]
+        ):
+            deferred.append(DeferredJoin(match, "component-cell-collision"))
+            continue
+        if not crossings_remain_feasible(match):
+            deferred.append(DeferredJoin(match, "crossing-topology-cycle"))
+            continue
+        union_crossings(match)
+        if first_root != second_root:
+            cells = component_cells.pop(first_root) | component_cells.pop(second_root)
+            patch_set.union(first_root, second_root)
+            component_cells[patch_set.find(first_root)] = cells
+        retained.append(match)
+    retained.sort(
+        key=lambda value: (
+            value.face.axis,
+            value.face.anchor_xyz,
+            value.first_patch_id,
+            value.second_patch_id,
+        )
+    )
+    deferred.sort(
+        key=lambda value: (
+            value.match.face.axis,
+            value.match.face.anchor_xyz,
+            value.match.first_patch_id,
+            value.match.second_patch_id,
+        )
+    )
+    return tuple(retained), tuple(deferred)
+
+
+def _patch_catalog(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+) -> tuple[tuple[ClippedPatch, ...], dict[int, ClippedPatch]]:
+    values = tuple(sorted(patches, key=lambda value: value.patch_id))
+    by_id: dict[int, ClippedPatch] = {}
+    for patch in values:
+        if patch.patch_id in by_id:
+            raise ValueError(f"duplicate patch ID {patch.patch_id}")
+        if not grid.contains_cell(patch.cell_xyz) or not bounds.contains_cell(
+            patch.cell_xyz
+        ):
+            raise ValueError(f"patch {patch.patch_id} lies outside its block")
+        by_id[patch.patch_id] = patch
+    return values, by_id
+
+
+def _trace_endpoint_lookup(trace: FaceTrace) -> dict[GridEdge, object]:
+    return {trace.first.edge: trace.first, trace.second.edge: trace.second}
+
+
+def _summarize_block(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+    candidate_joins: Iterable[TraceMatch],
+) -> SurfaceBlock:
+    patch_values, patch_by_id = _patch_catalog(grid, bounds, patches)
+    candidate_values = tuple(
+        sorted(
+            candidate_joins,
+            key=lambda value: (
+                value.face.axis,
+                value.face.anchor_xyz,
+                value.first_patch_id,
+                value.second_patch_id,
+            ),
+        )
+    )
+    join_values, deferred_values = _select_consistent_joins(
+        patch_values, candidate_values
+    )
+    patch_set = _DisjointSet(patch_by_id)
+    crossing_observations = [
+        (patch.patch_id, vertex.edge)
+        for patch in patch_values
+        for vertex in patch.vertices
+    ]
+    crossing_set = _DisjointSet(crossing_observations)
+    joined_trace_keys: set[tuple[int, GridFace]] = set()
+    for join in join_values:
+        if not join.accepted:
+            raise ValueError("surface blocks can contain only accepted joins")
+        if join.first_patch_id not in patch_by_id or join.second_patch_id not in patch_by_id:
+            raise ValueError("join references a patch outside the block")
+        first_patch = patch_by_id[join.first_patch_id]
+        second_patch = patch_by_id[join.second_patch_id]
+        first_trace = first_patch.trace_on(join.face)
+        second_trace = second_patch.trace_on(join.face)
+        if first_trace is None or second_trace is None:
+            raise ValueError("join references a face not crossed by both patches")
+        first_endpoints = _trace_endpoint_lookup(first_trace)
+        second_endpoints = _trace_endpoint_lookup(second_trace)
+        patch_set.union(join.first_patch_id, join.second_patch_id)
+        if len(join.endpoint_agreements) != 2:
+            raise ValueError("accepted join does not contain two endpoint agreements")
+        for agreement in join.endpoint_agreements:
+            if (
+                agreement.first_edge not in first_endpoints
+                or agreement.second_edge not in second_endpoints
+            ):
+                raise ValueError("accepted join endpoint is absent from its trace")
+            crossing_set.union(
+                (join.first_patch_id, agreement.first_edge),
+                (join.second_patch_id, agreement.second_edge),
+            )
+        joined_trace_keys.add((join.first_patch_id, join.face))
+        joined_trace_keys.add((join.second_patch_id, join.face))
+
+    root_members: dict[object, list[int]] = defaultdict(list)
+    for patch_id in patch_by_id:
+        root_members[patch_set.find(patch_id)].append(patch_id)
+    component_by_patch: dict[int, int] = {}
+    for members in root_members.values():
+        component_id = min(members)
+        for patch_id in members:
+            component_by_patch[patch_id] = component_id
+
+    crossing_values: dict[tuple[int, GridEdge], object] = {}
+    for patch in patch_values:
+        for vertex in patch.vertices:
+            crossing_values[(patch.patch_id, vertex.edge)] = vertex
+    crossing_groups: dict[object, list[tuple[int, GridEdge]]] = defaultdict(list)
+    for observation in crossing_observations:
+        crossing_groups[crossing_set.find(observation)].append(observation)
+    welded: list[WeldedCrossing] = []
+    for observations in crossing_groups.values():
+        edges = {value[1] for value in observations}
+        vertices = [crossing_values[value] for value in observations]
+        if len(edges) == 1:
+            edge = next(iter(edges))
+            variances = np.asarray(
+                [max(float(value.variance), 1.0e-12) for value in vertices]
+            )
+            weights = 1.0 / variances
+            coordinates = np.asarray([float(value.t) for value in vertices])
+            coordinate = float(np.sum(weights * coordinates) / np.sum(weights))
+            fused_variance = float(1.0 / np.sum(weights))
+            standardized = np.abs(coordinates - coordinate) / np.sqrt(
+                variances + fused_variance
+            )
+            point = edge.point_world(grid, coordinate)
+            welded.append(
+                WeldedCrossing(
+                    supporting_edges=(edge,),
+                    edge=edge,
+                    grid_vertex_xyz=None,
+                    point_xyz=tuple(float(value) for value in point),
+                    t=coordinate,
+                    variance=fused_variance,
+                    observations=tuple(sorted(observations)),
+                    maximum_standardized_residual=float(np.max(standardized)),
+                )
+            )
+        else:
+            common_vertices = set.intersection(
+                *(set(edge.endpoint_vertices()) for edge in edges)
+            )
+            if len(common_vertices) != 1:
+                raise RuntimeError(
+                    "a multi-edge welded crossing does not share one grid vertex"
+                )
+            grid_vertex = next(iter(common_vertices))
+            standardized = []
+            for vertex in vertices:
+                start, stop = vertex.edge.endpoint_vertices()
+                coordinate = (
+                    float(vertex.t)
+                    if grid_vertex == start
+                    else 1.0 - float(vertex.t)
+                )
+                standardized.append(
+                    coordinate
+                    / math.sqrt(max(float(vertex.variance), 1.0e-12))
+                )
+            point = grid.vertex_world(grid_vertex)
+            welded.append(
+                WeldedCrossing(
+                    supporting_edges=tuple(sorted(edges)),
+                    edge=None,
+                    grid_vertex_xyz=grid_vertex,
+                    point_xyz=tuple(float(value) for value in point),
+                    t=None,
+                    variance=None,
+                    observations=tuple(sorted(observations)),
+                    maximum_standardized_residual=float(np.max(standardized)),
+                )
+            )
+    welded.sort(
+        key=lambda value: (
+            value.supporting_edges[0].axis,
+            value.supporting_edges[0].anchor_xyz,
+            value.t if value.t is not None else -1.0,
+        )
+    )
+
+    exterior: list[BoundaryTrace] = []
+    unresolved: list[BoundaryTrace] = []
+    for patch in patch_values:
+        component_id = component_by_patch[patch.patch_id]
+        for trace in patch.traces:
+            value = BoundaryTrace(component_id, patch.patch_id, trace)
+            if bounds.contains_face_on_boundary(trace.face):
+                exterior.append(value)
+            elif (patch.patch_id, trace.face) not in joined_trace_keys:
+                unresolved.append(value)
+    exterior.sort(
+        key=lambda value: (
+            value.trace.face.axis,
+            value.trace.face.anchor_xyz,
+            value.component_id,
+            value.patch_id,
+        )
+    )
+    unresolved.sort(
+        key=lambda value: (
+            value.trace.face.axis,
+            value.trace.face.anchor_xyz,
+            value.component_id,
+            value.patch_id,
+        )
+    )
+    exterior_counts = defaultdict(int)
+    unresolved_counts = defaultdict(int)
+    for value in exterior:
+        exterior_counts[value.component_id] += 1
+    for value in unresolved:
+        unresolved_counts[value.component_id] += 1
+    components = tuple(
+        ComponentSummary(
+            component_id=min(members),
+            patch_ids=tuple(sorted(members)),
+            exterior_trace_count=exterior_counts[min(members)],
+            unresolved_interior_trace_count=unresolved_counts[min(members)],
+        )
+        for members in sorted(root_members.values(), key=lambda value: min(value))
+    )
+    return SurfaceBlock(
+        grid=grid,
+        bounds=bounds,
+        patches=patch_values,
+        candidate_joins=candidate_values,
+        joins=join_values,
+        deferred_joins=deferred_values,
+        component_by_patch=tuple(sorted(component_by_patch.items())),
+        components=components,
+        welded_crossings=tuple(welded),
+        exterior_traces=tuple(exterior),
+        unresolved_interior_traces=tuple(unresolved),
+    )
+
+
+def assemble_surface_block(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+    settings: TraceMatchSettings | None = None,
+) -> SurfaceBlock:
+    """Assemble one selected patch configuration in a regular cell block."""
+
+    patch_values, _ = _patch_catalog(grid, bounds, patches)
+    by_cell: dict[Int3, list[ClippedPatch]] = defaultdict(list)
+    for patch in patch_values:
+        by_cell[patch.cell_xyz].append(patch)
+    joins: list[TraceMatch] = []
+    for cell in sorted(by_cell):
+        for axis in range(3):
+            neighbor = list(cell)
+            neighbor[axis] += 1
+            neighbor_tuple = tuple(neighbor)
+            if not bounds.contains_cell(neighbor_tuple) or neighbor_tuple not in by_cell:
+                continue
+            face = cell_face(cell, axis, 1)
+            alignment = align_face_patches(
+                by_cell[cell],
+                by_cell[neighbor_tuple],
+                face,
+                settings,
+                grid=grid,
+            )
+            joins.extend(alignment.matches)
+    return _summarize_block(grid, bounds, patch_values, joins)
+
+
+def _shared_block_face(
+    first: BlockBounds, second: BlockBounds
+) -> tuple[int, int, bool]:
+    candidates: list[tuple[int, int, bool]] = []
+    for axis in range(3):
+        other_match = all(
+            first.start_cell_xyz[other] == second.start_cell_xyz[other]
+            and first.stop_cell_xyz_exclusive[other]
+            == second.stop_cell_xyz_exclusive[other]
+            for other in range(3)
+            if other != axis
+        )
+        if not other_match:
+            continue
+        if first.stop_cell_xyz_exclusive[axis] == second.start_cell_xyz[axis]:
+            candidates.append((axis, first.stop_cell_xyz_exclusive[axis], True))
+        if second.stop_cell_xyz_exclusive[axis] == first.start_cell_xyz[axis]:
+            candidates.append((axis, second.stop_cell_xyz_exclusive[axis], False))
+    if len(candidates) != 1:
+        raise ValueError("blocks must tile one complete shared rectangular face")
+    return candidates[0]
+
+
+def merge_surface_blocks(
+    first: SurfaceBlock,
+    second: SurfaceBlock,
+    settings: TraceMatchSettings | None = None,
+) -> SurfaceBlock:
+    """Compose adjacent blocks by matching only their cached exterior traces."""
+
+    if first.grid != second.grid:
+        raise ValueError("surface blocks must use the same grid")
+    if {value.patch_id for value in first.patches} & {
+        value.patch_id for value in second.patches
+    }:
+        raise ValueError("surface blocks contain overlapping patch IDs")
+    axis, coordinate, first_is_lower = _shared_block_face(first.bounds, second.bounds)
+    lower = first if first_is_lower else second
+    upper = second if first_is_lower else first
+    lower_by_face: dict[GridFace, list[ClippedPatch]] = defaultdict(list)
+    upper_by_face: dict[GridFace, list[ClippedPatch]] = defaultdict(list)
+    patch_by_id = {
+        value.patch_id: value for value in (*first.patches, *second.patches)
+    }
+    for boundary in lower.exterior_traces:
+        if (
+            boundary.trace.face.axis == axis
+            and boundary.trace.face.anchor_xyz[axis] == coordinate
+        ):
+            lower_by_face[boundary.trace.face].append(patch_by_id[boundary.patch_id])
+    for boundary in upper.exterior_traces:
+        if (
+            boundary.trace.face.axis == axis
+            and boundary.trace.face.anchor_xyz[axis] == coordinate
+        ):
+            upper_by_face[boundary.trace.face].append(patch_by_id[boundary.patch_id])
+    seam_joins: list[TraceMatch] = []
+    for face in sorted(set(lower_by_face) | set(upper_by_face)):
+        alignment = align_face_patches(
+            lower_by_face.get(face, ()),
+            upper_by_face.get(face, ()),
+            face,
+            settings,
+            grid=first.grid,
+        )
+        seam_joins.extend(alignment.matches)
+    start = tuple(
+        min(first.bounds.start_cell_xyz[axis_index], second.bounds.start_cell_xyz[axis_index])
+        for axis_index in range(3)
+    )
+    stop = tuple(
+        max(
+            first.bounds.stop_cell_xyz_exclusive[axis_index],
+            second.bounds.stop_cell_xyz_exclusive[axis_index],
+        )
+        for axis_index in range(3)
+    )
+    return _summarize_block(
+        first.grid,
+        BlockBounds(start, stop),
+        (*first.patches, *second.patches),
+        (*first.candidate_joins, *second.candidate_joins, *seam_joins),
+    )
+
+
+def assemble_surface_hierarchy(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+    *,
+    maximum_leaf_shape_cells_xyz: Int3 = (8, 8, 8),
+    settings: TraceMatchSettings | None = None,
+) -> SurfaceBlock:
+    """Recursively assemble regular leaves, then compose only cached seams."""
+
+    maximum_leaf = tuple(int(value) for value in maximum_leaf_shape_cells_xyz)
+    if len(maximum_leaf) != 3 or any(value <= 0 for value in maximum_leaf):
+        raise ValueError("maximum leaf shape must be a positive XYZ triple")
+    patch_values = tuple(patches)
+
+    def recurse(
+        current_bounds: BlockBounds, current_patches: tuple[ClippedPatch, ...]
+    ) -> SurfaceBlock:
+        shape = current_bounds.shape_cells_xyz
+        ratios = [shape[axis] / maximum_leaf[axis] for axis in range(3)]
+        axis = int(np.argmax(ratios))
+        if ratios[axis] <= 1.0:
+            return assemble_surface_block(
+                grid, current_bounds, current_patches, settings
+            )
+        split = current_bounds.start_cell_xyz[axis] + shape[axis] // 2
+        first_stop = list(current_bounds.stop_cell_xyz_exclusive)
+        first_stop[axis] = split
+        second_start = list(current_bounds.start_cell_xyz)
+        second_start[axis] = split
+        first_bounds = BlockBounds(
+            current_bounds.start_cell_xyz, tuple(first_stop)
+        )
+        second_bounds = BlockBounds(
+            tuple(second_start), current_bounds.stop_cell_xyz_exclusive
+        )
+        first_patches = tuple(
+            value for value in current_patches if value.cell_xyz[axis] < split
+        )
+        second_patches = tuple(
+            value for value in current_patches if value.cell_xyz[axis] >= split
+        )
+        return merge_surface_blocks(
+            recurse(first_bounds, first_patches),
+            recurse(second_bounds, second_patches),
+            settings,
+        )
+
+    return recurse(bounds, patch_values)
