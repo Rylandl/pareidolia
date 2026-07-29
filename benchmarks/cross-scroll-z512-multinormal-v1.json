@@ -1,0 +1,364 @@
+{
+  "identity": {
+    "version": 1,
+    "name": "cross-scroll-z512-multinormal",
+    "sourceIdentity": {
+      "source": "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy",
+      "sourceBytes": 31014445696,
+      "sourceMtimeNs": 1785284177375754850,
+      "settings": {
+        "cubeSize": 64,
+        "scale": 1.25,
+        "candidateSpacing": 4,
+        "needleLength": 16.0,
+        "halo": 16,
+        "gridStride": 32,
+        "tileCore": 128,
+        "binSize": 32,
+        "maxNeedlesPerBin": 32,
+        "maxNeedles": 160,
+        "fixedStrengthScale": 0.049903104081749916
+      },
+      "version": 1
+    }
+  },
+  "scope": "frozen multi-normal evidence, flake, independent sheetlet graph, and secondary-carrier construction metrics; excludes legacy single-normal carrier descendants",
+  "metrics": {
+    "sourceIdentity": {
+      "source": "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy",
+      "sourceBytes": 31014445696,
+      "sourceMtimeNs": 1785284177375754850,
+      "settings": {
+        "cubeSize": 64,
+        "scale": 1.25,
+        "candidateSpacing": 4,
+        "needleLength": 16.0,
+        "halo": 16,
+        "gridStride": 32,
+        "tileCore": 128,
+        "binSize": 32,
+        "maxNeedlesPerBin": 32,
+        "maxNeedles": 160,
+        "fixedStrengthScale": 0.049903104081749916
+      },
+      "version": 1
+    },
+    "analysis": {
+      "gridShapeZYX": [
+        14,
+        242,
+        242
+      ],
+      "validCellCount": 251742,
+      "needleCount": 4244755
+    },
+    "normalFamilies": {
+      "secondaryFittedCellCount": 240328,
+      "standaloneCandidateCellCount": 21621,
+      "includedSecondaryCellCount": 9560,
+      "includedSecondaryCellFraction": 0.03798,
+      "candidateComponentCount": 11772,
+      "includedComponentCount": 1123,
+      "alignedCandidateEdgeCount": 11549,
+      "largestIncludedComponentSize": 397,
+      "medianIncludedCoverage": 0.1966,
+      "medianIncludedConfidence": 0.5732,
+      "medianIncludedAmbiguousFraction": 0.0565,
+      "medianIncludedOverlapFraction": 0.2279,
+      "includedCellsByPlane": [
+        610,
+        670,
+        752,
+        738,
+        742,
+        722,
+        713,
+        718,
+        707,
+        751,
+        738,
+        641,
+        601,
+        457
+      ]
+    },
+    "flakeAudit": {
+      "primaryFlakeCount": 714987,
+      "secondaryFlakeCount": 9685,
+      "primaryNumericMismatchCount": 0,
+      "primaryMembershipMismatchCount": 0,
+      "crossFamilySharedNeedleCount": 0
+    },
+    "sheetletGraph": {
+      "linkedNodeCount": 641195,
+      "retainedLinkCount": 792749,
+      "componentCount": 65476,
+      "largestComponentSize": 586,
+      "longSpanComponentCount": 538,
+      "allAxialPlaneComponentCount": 241,
+      "allSixPlaneComponentCount": 3237,
+      "cellCollisionCount": 0,
+      "medianEdgeResidualVoxels": 0.705,
+      "medianFiberAngleDeg": 1.068,
+      "medianNormalBendDeg": 5.662,
+      "secondaryLinkedNodeCount": 4298,
+      "secondaryLinkedNodeFraction": 0.4441
+    },
+    "secondarySeeds": {
+      "candidateCount": 63,
+      "nodeCount": 358,
+      "cellCount": 358,
+      "carrierHeightResidualVoxels": {
+        "minimum": 0.0,
+        "p10": 0.017,
+        "p25": 0.06,
+        "median": 0.217,
+        "p75": 0.625,
+        "p90": 1.608,
+        "maximum": 5.991
+      },
+      "carrierNormalResidualDeg": {
+        "minimum": 0.0,
+        "p10": 0.286,
+        "p25": 0.713,
+        "median": 2.088,
+        "p75": 4.63,
+        "p90": 6.754,
+        "maximum": 14.085
+      },
+      "grossSupportedAreaSquareVoxels": 114736.0,
+      "supportedAreaSquareVoxels": {
+        "minimum": 400.0,
+        "p10": 496.0,
+        "p25": 768.0,
+        "median": 1024.0,
+        "p75": 2384.0,
+        "p90": 4598.4,
+        "maximum": 7520.0
+      },
+      "fitFactor": {
+        "minimum": 0.6589,
+        "p10": 0.8404,
+        "p25": 0.9054,
+        "median": 0.9387,
+        "p75": 0.9887,
+        "p90": 0.9987,
+        "maximum": 0.9999
+      },
+      "bestTextureScore": {
+        "minimum": 0.0,
+        "p10": 0.0,
+        "p25": 0.0,
+        "median": 0.3315,
+        "p75": 0.6735,
+        "p90": 0.8565,
+        "maximum": 0.9966
+      }
+    },
+    "declaredCriteria": {
+      "note": "Neighbor agreement controls secondary-family inclusion and is not reused as an evaluation criterion. Holdout replication is reported separately and is not inferred by this construction audit.",
+      "criteria": {
+        "primaryFlakesExactlyPreserved": true,
+        "crossFamilyNeedleOwnershipIsDisjoint": true,
+        "sheetletGraphHasNoWithinComponentCellCollisions": true,
+        "secondaryNodesParticipateInGraph": true,
+        "medianSecondaryCarrierHeightResidualAtMost3Voxels": true,
+        "medianSecondaryCarrierNormalResidualAtMost6Deg": true,
+        "retainsAtLeast98PercentOfLongSpanComponents": true,
+        "retainsAtLeast98PercentOfAllPlaneComponents": true
+      },
+      "allConstructionCriteriaPass": true
+    }
+  },
+  "artifacts": [
+    {
+      "path": "analysis.json",
+      "bytes": 1338,
+      "sha256": "bc6d94663a8275a1cbef455ad12080b3c4963c56a52227948d32b1228c528a59"
+    },
+    {
+      "path": "normal-families-v3.json",
+      "bytes": 39610,
+      "sha256": "6cb8b7df64bc15ccb9194a89c85ab2b242c9ca0ec7ca2be84825e47ac77c2503"
+    },
+    {
+      "path": "normal-families-v3.npy",
+      "bytes": 73791472,
+      "sha256": "4b96ae5dc1a2de0dfc0c226f104261e94b042fef156c134adcc8bf0ec0cd27e3"
+    },
+    {
+      "path": "sheetlets-explore-v5.json",
+      "bytes": 106703,
+      "sha256": "a7731e580a26752cf7672344106bec7c554028af46171ee69b621abbc70c5a4d"
+    },
+    {
+      "path": "sheetlets-explore-v5-candidates.json",
+      "bytes": 8262084,
+      "sha256": "eaab56fd48c11016318c873aa0aa847305f7ead0ea5d3990be1844c761537cb8"
+    },
+    {
+      "path": "sheetlets-explore-v5-components.npz",
+      "bytes": 3002102,
+      "sha256": "0607f309ca406efde653c79f6cb5b305518a63ff994b310cb0788bdbc4890217"
+    },
+    {
+      "path": "sheetlets-explore-v5-edges.npz",
+      "bytes": 19453060,
+      "sha256": "688f35865a08eb5ffa4841b88e6f6e5380a8a8fb70fe136b3f65969b84c0aa7c"
+    },
+    {
+      "path": "sheetlet-carrier-screen-v5.json",
+      "bytes": 17162360,
+      "sha256": "a4e8eb4667f3bc126c9c1a41e6785c3125a657f8cae132fe474d9290cb57434d"
+    },
+    {
+      "path": "normal-family-evaluation-v1.json",
+      "bytes": 25195,
+      "sha256": "b6c34c492e3cd87b4482e07de4d096fe90ec933155c223411dd146af8367f8f7"
+    },
+    {
+      "path": "flakes-v5-z0-k3.json",
+      "bytes": 46449961,
+      "sha256": "6f7359caed883e60c68d19747d4596df90e086f09e1efcbfca774a6e919ec6b0"
+    },
+    {
+      "path": "flakes-v5-z0-k3-members.npz",
+      "bytes": 1059420,
+      "sha256": "c08fb682be9e136faab92701ef7cb4962986a12699947a5cdafed49d967740bb"
+    },
+    {
+      "path": "flakes-v5-z1-k3.json",
+      "bytes": 46547064,
+      "sha256": "1ba73e7aaea16883d570c1d5e35b41559ceb702440de54fb0c3c1345d3947d8d"
+    },
+    {
+      "path": "flakes-v5-z1-k3-members.npz",
+      "bytes": 1065039,
+      "sha256": "aadaa01ad6d666d016550523c43a4e0e980a616f90949d27c134439ded08417d"
+    },
+    {
+      "path": "flakes-v5-z2-k3.json",
+      "bytes": 46920901,
+      "sha256": "cc227c8ad74b01969251c47b54cf430e8429f80020126518cd7a68cdffaa6dbd"
+    },
+    {
+      "path": "flakes-v5-z2-k3-members.npz",
+      "bytes": 1084280,
+      "sha256": "5477a7041e1f6d4ab107c0118f5e390bfc9719d1fa0555620014ed22477efd9a"
+    },
+    {
+      "path": "flakes-v5-z3-k3.json",
+      "bytes": 46686716,
+      "sha256": "d64e481f0ffa3f2a5e1c688bf86988e0df807c91ea0b66514d32030f0bc2d655"
+    },
+    {
+      "path": "flakes-v5-z3-k3-members.npz",
+      "bytes": 1084401,
+      "sha256": "1cb71cd3b6194c30984e1f7bd8cc7c622a7b2552c2626b345c8db06b3917dfdb"
+    },
+    {
+      "path": "flakes-v5-z4-k3.json",
+      "bytes": 46237019,
+      "sha256": "8121b75ba1c2d91930eb7dfd311495acff762f41879de9ec37579b23a179d118"
+    },
+    {
+      "path": "flakes-v5-z4-k3-members.npz",
+      "bytes": 1060435,
+      "sha256": "c613b6ddbcebc3736880d60ab297bbc7baa6bfd22120d1428ae4610f46000a0d"
+    },
+    {
+      "path": "flakes-v5-z5-k3.json",
+      "bytes": 46188106,
+      "sha256": "8d433694c1cd58651459a576acf96cb73913e58d46b750f23cd1b19283fc4e6f"
+    },
+    {
+      "path": "flakes-v5-z5-k3-members.npz",
+      "bytes": 1053743,
+      "sha256": "cf5baaa400348304659ba043265735fb1fcfc391adf4e11a046f606f87d8ddb1"
+    },
+    {
+      "path": "flakes-v5-z6-k3.json",
+      "bytes": 46131844,
+      "sha256": "a02ef36ce93ff1030e4231a0959e9b58b8d8d9c6551a647381724a616a52fe75"
+    },
+    {
+      "path": "flakes-v5-z6-k3-members.npz",
+      "bytes": 1066302,
+      "sha256": "4726035c65114d673dafa274b9a8976e03b613d7a05b716c27e882663b47cfff"
+    },
+    {
+      "path": "flakes-v5-z7-k3.json",
+      "bytes": 45874162,
+      "sha256": "757b1cda1467b0d76082547f2ea49b4ebf16dbdcf2049ddb6d1e0ef194cb0646"
+    },
+    {
+      "path": "flakes-v5-z7-k3-members.npz",
+      "bytes": 1062802,
+      "sha256": "6a548d02c4f4308baff3272742980b56eff1c9d88a142443da2c47f75d77a18f"
+    },
+    {
+      "path": "flakes-v5-z8-k3.json",
+      "bytes": 45445758,
+      "sha256": "b7906effa2a216385538bc33ea9fc4e9f51f0b889207ba2197a629c83849736d"
+    },
+    {
+      "path": "flakes-v5-z8-k3-members.npz",
+      "bytes": 1042566,
+      "sha256": "c0f97020490bb003974af67bc08398f176b8ebbdcf84dbc64e973aa23305b46e"
+    },
+    {
+      "path": "flakes-v5-z9-k3.json",
+      "bytes": 45499457,
+      "sha256": "b166001211e8dc7eabcafc11e8c099c7266deb4dcd29c7b8ab743650ac3c841f"
+    },
+    {
+      "path": "flakes-v5-z9-k3-members.npz",
+      "bytes": 1049182,
+      "sha256": "fc15d18f190b61265832ac23fd587603c0dbe2d66236508a9414460e9d5bbae4"
+    },
+    {
+      "path": "flakes-v5-z10-k3.json",
+      "bytes": 46013787,
+      "sha256": "dc30b1b7b44a580d11607ed062276791d8930af7eb1ff34d8deed4f809ac9667"
+    },
+    {
+      "path": "flakes-v5-z10-k3-members.npz",
+      "bytes": 1070122,
+      "sha256": "8d57d172946f8c8651b1f11ef330e852744fc1ecaa9092ebf4f7fa7b92978f5e"
+    },
+    {
+      "path": "flakes-v5-z11-k3.json",
+      "bytes": 45810842,
+      "sha256": "d03b78b076510e53ee610282c757e8bc922356547886969452ef8400dadfbc79"
+    },
+    {
+      "path": "flakes-v5-z11-k3-members.npz",
+      "bytes": 1074630,
+      "sha256": "da25f83259105d8d8874b1218bcf7edaa722caf525e926a75d9dad115e736700"
+    },
+    {
+      "path": "flakes-v5-z12-k3.json",
+      "bytes": 45611150,
+      "sha256": "78ac3b9093bcd84a6fca91170170577e248417becddb66df4c230fd82841271b"
+    },
+    {
+      "path": "flakes-v5-z12-k3-members.npz",
+      "bytes": 1061172,
+      "sha256": "311be5c8957398cf179d987d4a71595138be092551ad953add3b32f96a581973"
+    },
+    {
+      "path": "flakes-v5-z13-k3.json",
+      "bytes": 45459425,
+      "sha256": "a9c18f4a16f1325ff53550b84abdc56b0c55a374771e584ff7bfd9503bf854cb"
+    },
+    {
+      "path": "flakes-v5-z13-k3-members.npz",
+      "bytes": 1060565,
+      "sha256": "3a4e39607565a986b43995b563378929bcc1b89d53ec8d8977d3831321603fcd"
+    }
+  ],
+  "stats": {
+    "artifactCount": 37,
+    "artifactBytes": 781614775
+  }
+}

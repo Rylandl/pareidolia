@@ -56,6 +56,14 @@ from backend.slab_normal_families import (
     _normal_family_assignment,
     _union_components,
 )
+from backend.slab_material_intervals import (
+    LABEL_AIR,
+    LABEL_CONTESTED_MATERIAL,
+    LABEL_SINGLY_CLAIMED_MATERIAL,
+    _annotate_profile,
+    _smoothed_material_mask,
+)
+from backend.slab_monotone_layers import _box_sums, _monotone_partial_match
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -66,6 +74,85 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_material_mask_closes_only_the_declared_air_gap(self) -> None:
+        intensity = np.asarray([0, 20, 0, 20, 0, 0], dtype=np.uint8)
+        material = _smoothed_material_mask(
+            intensity,
+            10.0,
+            smoothing_kernel=[1.0],
+            maximum_bridged_air_gap_samples=1,
+        )
+        np.testing.assert_array_equal(
+            material,
+            np.asarray([False, True, True, True, False, False]),
+        )
+
+    def test_material_claim_overlay_separates_assignment_from_contact(self) -> None:
+        depth = np.arange(-4.0, 5.0, dtype=np.float32)
+        material = np.asarray(
+            [False, True, True, True, False, True, True, True, False]
+        )
+        annotated = _annotate_profile(
+            material,
+            depth,
+            np.asarray([-2.0, 1.0, 3.0, 12.0], dtype=np.float32),
+            claim_support_tolerance=1.0,
+            claim_cluster_gap=1.0,
+        )
+        labels = annotated["labels"]
+        self.assertEqual(int(labels[0]), LABEL_AIR)
+        self.assertTrue(
+            np.all(labels[1:4] == LABEL_SINGLY_CLAIMED_MATERIAL)
+        )
+        self.assertTrue(np.all(labels[5:8] == LABEL_CONTESTED_MATERIAL))
+        self.assertEqual(
+            annotated["claimIntervalIndex"].tolist(), [0, 1, 1, -1]
+        )
+        self.assertEqual(
+            annotated["claimClusterIndex"].tolist(), [0, 0, 1, -1]
+        )
+        self.assertEqual(
+            annotated["intervals"][0]["apparentCtThicknessVoxels"], 3.0
+        )
+        self.assertTrue(
+            np.isnan(
+                annotated["intervals"][1]["apparentCtThicknessVoxels"]
+            )
+        )
+
+    def test_boundary_truncated_material_has_no_apparent_thickness(self) -> None:
+        annotated = _annotate_profile(
+            np.asarray([True, True, False, False]),
+            np.arange(4, dtype=np.float32),
+            np.asarray([0.5], dtype=np.float32),
+        )
+        self.assertTrue(annotated["intervals"][0]["boundaryTruncated"])
+        self.assertTrue(
+            np.isnan(
+                annotated["intervals"][0]["apparentCtThicknessVoxels"]
+            )
+        )
+
+    def test_monotone_partial_match_allows_birth_without_crossing(self) -> None:
+        compatibility = {
+            (0, 10): (0.82,),
+            (0, 11): (0.95,),
+            (1, 10): (0.95,),
+            (1, 11): (0.82,),
+            (2, 11): (0.84,),
+        }
+        matched = _monotone_partial_match(
+            [0, 1, 2], [10, 11], compatibility, 0.60, 0.02
+        )
+        self.assertEqual(matched, [(1, 10), (2, 11)])
+
+    def test_dense_window_box_sum_uses_exact_extents(self) -> None:
+        values = np.zeros((2, 4, 5), dtype=np.uint8)
+        values[:, 1:3, 2:5] = 1
+        sums = _box_sums(values, (2, 2, 3))
+        self.assertEqual(sums.shape, (1, 3, 3))
+        self.assertEqual(int(np.max(sums)), 12)
+
     def test_secondary_normal_family_is_standalone_partitioned_and_spatial(self) -> None:
         rng = np.random.default_rng(7)
         directions = []

@@ -217,6 +217,34 @@ silently using synthetic padding.
   preservation, CT screen results, and the predeclared construction gates. As
   throughout this pipeline, these are surface hypotheses rather than claimed
   physical papyrus identities.
+- `python3 scripts/science-ci.py --root
+  work/cross-scroll-analysis-z512 --verify-artifacts` freezes and checks the
+  active multi-normal science state before architectural experiments. The
+  committed benchmark content-hashes 37 active artifacts (781.6 MB), preserves
+  all primary values and memberships, requires disjoint family ownership and
+  zero cell collisions, and guards the established long-span and secondary-fit
+  results. It intentionally excludes stale single-normal carrier descendants.
+- `python3 scripts/build-material-intervals.py --root
+  work/cross-scroll-analysis-z512` samples native CT from -32 through +32
+  voxels along 261,302 local normal-family hypotheses. Material is thresholded
+  before consulting any flake; a separate overlay records air, unassigned,
+  singly claimed, and contested material without assigning sheet IDs. The full
+  census takes 26 seconds. It finds 96.32% material samples, 243,069 fully dense
+  windows, 234,496 contested profiles, and only 72 non-boundary singly claimed
+  intervals eligible for an apparent-thickness statistic. A deterministic
+  threshold sweep shows that apparent separators at higher cutoffs come with
+  substantial loss of supported flake evidence, so CT air gaps are retained as
+  accountability constraints rather than promoted to layers.
+- `python3 scripts/prototype-monotone-layers.py --root
+  work/cross-scroll-analysis-z512` synchronizes relative unsigned-normal signs
+  and applies non-crossing partial sequence alignment in the densest 32 x 32 x
+  14-cell primary-family window. It preserves 49,549 of 49,745 current links,
+  removes all 149 pairwise order crossings, adds 112 non-crossing links, and
+  leaves the 0.73-voxel / 1.08-degree median geometry unchanged. Branch count
+  changes only from 3,361 to 3,349, establishing that missing continuation
+  edges—not fixed ordinal mistakes—are now the main fragmentation problem.
+  The revised evidence and identity contracts are documented in
+  `docs/design-revision.md`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened
