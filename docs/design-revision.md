@@ -31,12 +31,16 @@ a graph component a physical papyrus sheet.
 3. **Local surface branches**
    - Flakes are linked by finite-patch edge agreement and transported fiber
      direction. A changing normal is curvature, not an identity failure.
-   - Relative normal signs may be synchronized for ordering, but each connected
-     region retains an arbitrary sign. Inward/outward and recto/verso are later
-     physical interpretations.
-   - Neighboring flake sequences use order-preserving partial matching.
-     Missing modes are explicit births/deaths; equal ordinal numbers are not
-     required, and crossings are forbidden.
+   - Normal and fiber directions remain unsigned axes. For each adjacent cell,
+     both relative depth orientations are solved independently. The higher-value
+     order-preserving partial match wins; an exact score tie retains only links
+     present in both orientations.
+   - A retained link stores relative parity between two raw depth coordinates,
+     not an absolute side. Parity transforms with either input coordinate and
+     therefore does not encode inward/outward or recto/verso.
+   - Missing modes are explicit births/deaths. Collision-safe links are processed
+     in descending score, and a link that closes a parity-inconsistent cycle is
+     explicitly deferred.
    - Collision-safe graph components are local surface branches only.
 
 4. **Sparse association**
@@ -48,6 +52,9 @@ a graph component a physical papyrus sheet.
    - Pairwise-incoherent joins are deferred. If individually coherent joins make
      an incoherent transitive association, the weakest retained construction
      edge is removed until every output association passes the carrier gate.
+   - Branch-relative gauges are aligned only through parity votes in cells two
+     branches actually share. Tied or frustrated parity observations do not
+     become hard order edges.
    - Explicit window origins produce separate, hash-identified artifacts.
      Reconciliation uses stable source-flake identities in the geometric
      overlap: raw matches, collision-pruned edges, and branch joins are compared
@@ -71,6 +78,9 @@ a graph component a physical papyrus sheet.
    - A bidirectional sampled-clearance sweep is reported descriptively. It is
      not called papyrus thickness, and shared-cell depth order distinguishes
      an ordered near-contact from an unexplained boundary approach.
+   - Any local association involved in a support-skirt or evidence-core mesh
+     intersection is excluded from the consensus join graph and preserved in a
+     separate quarantine catalog.
 
 ## Current z512 findings
 
@@ -95,72 +105,59 @@ claim support has already fallen to 78.27%. Air/material thresholding is
 therefore useful for accountability and outlier handling, not as the layer
 solver.
 
-The first monotone prototype uses the densest 32 x 32 x 14-cell primary-family
-window. Relative signs form one connected region with 0.83% weighted sign
-frustration. Compared with the active graph it:
+The original window-wide sign synchronization was removed after a full overlap
+census showed that crop-dependent spanning trees could orient different parts
+of the same unsigned line field differently. Those disagreements were
+algorithmic gauge instability, not physical normal evidence. The replacement
+axial matcher is invariant to flipping either cell's normal/depth coordinate.
 
-- preserves 49,549 of 49,745 retained links;
-- removes all 149 pairwise order crossings;
-- adds 112 compatible non-crossing links;
-- leaves median edge residual and fiber disagreement unchanged at about 0.73
-  voxels and 1.08 degrees; and
-- changes 3,361 local branches into 3,349, with the largest branch changing
-  from 372 to 361 flakes.
+In a representative 32 x 32 x 14-cell dense window, the axial solve produces
+47,515 raw non-crossing links. Collision pruning retains 45,535 and explicit
+parity-cycle pruning removes another 238, leaving 45,297 links and 4,005 linked
+branches. A neighboring independent solve shares 10,495 flakes and 11,476 raw
+links. Every stable identity, raw depth, raw link, and relative parity agrees
+exactly. Only the later collision/parity graph solve is crop-dependent: 70
+retained links differ, for 99.36% retained-edge agreement.
 
-This is a useful negative result: the current pairwise geometry is already
-almost order-consistent, so ordinal mistakes are not the main source of
-fragmentation. The next useful solve is branch-level sparse association across
-missing continuation edges, with order feasibility and material accountability
-as constraints. It should not be another local ordinal rematcher or a dense
-global surface fit.
+The complete 242 x 242 x 14-cell census uses 51 occupied 32 x 32 x 14 windows,
+24-cell XY strides, and 86 face-overlap reconciliations. Forty-nine possible
+windows contain no primary claim and are skipped. A fresh four-worker pass
+takes 310 seconds and visits 1,251,591 window-local flake observations while
+covering all 704,145 unique primary flakes. Its central result is exact raw
+invariance:
 
-The first branch-association solve implements that next step in the same window.
-It evaluates 75,118 spatial endpoint pairs, retains 1,775 geometry hits, and
-aggregates them into 1,499 branch-pair candidates in 12.5 seconds. At the
-selected 0.45 score threshold, 56 joins survive the main-window solve and 45
-are unanimous wherever observed by the four overlapping subwindows. Exact MLS
-reconstruction defers 11 of those joins: one fails only the 3-voxel median
-height gate, four fail only the 6-degree median normal gate, and six fail both.
-The high-level endpoint score alone is not sufficient—the strongest rejected
-join scores 0.843—so this reconstruction gate is materially useful.
+- all 818,414 unique raw matches are accepted by every observing window;
+- all 435,661 multiply observed raw matches have unanimous relative parity;
+- repeated edge scores have a zero range to floating-point precision;
+- collision/parity pruning leaves 2,148 context-dependent retained edges out of
+  785,595 unique retained edges; and
+- no absolute normal sign or side exists in the schema.
 
-The remaining 34 joins form 33 associations over 67 original branches. Every
-association passes exact reconstruction without requiring transitive pruning.
-The largest joins three branches and 219 flakes with 2.33-voxel median height
-residual and 4.26-degree median normal residual. These are deliberately modest,
-chunk-local surface associations; 3,282 linked branches remain explicitly
-unassociated, and no output identity is promoted to a physical sheet.
+The local branch-association passes retain 650 exact-coherent join occurrences
+and defer 542 pair candidates at the exact MLS gate. Cross-association integrity
+finds seven intersecting local carrier pairs, five within both evidence cores.
+Those pairs implicate 14 local associations and 14 accepted join occurrences.
+The integrity quarantine removes 12 unique endpoint pairs from consensus while
+leaving them fully traceable. Of the remaining joins, 125 are observed and
+accepted in at least two windows; single-window joins are not called
+overlap-validated.
 
-The first joint integrity audit triangulates all 33 accepted association
-carriers into 84,272 finite surface triangles and checks 29,844 sampled points
-within 24 voxels of their supporting flakes. It finds zero surface
-intersections, zero within-association cell collisions, and only one pair of
-carriers within 12 voxels. That pair approaches to 5.67 voxels in the sampled
-grids, but the closest displacement is primarily normal (5.25 voxels), the
-normals and fibers agree within 4.53 and 3.55 degrees, and their one shared cell
-preserves an 8.68-voxel depth order. It is therefore retained as an explicit
-ordered near-contact rather than treated as a crossing or an automatic merge.
+The unanimous raw catalog supports one whole-volume sparse graph solve without
+claiming a global surface. It completes in 12.1 seconds. Starting from 818,414
+edges, descending-score cell-collision pruning rejects 29,151 and parity-cycle
+consistency rejects 5,417 more. The final 783,846-edge graph has:
 
-An adjacent-window pilot now exercises the chunk contract rather than merely
-stating it. The east 32 x 32 x 14-cell neighbor shares 10,602 flake hypotheses
-with the dense window. Every shared identity, relative normal sign, oriented
-depth, and all 12,957 raw non-crossing matches agree exactly. Collision-safe
-component pruning retains 12,570 edges in both windows but makes 40
-context-dependent choices (99.68% agreement); eight accepted branch-boundary
-joins agree and five are one-window-only. Those 45 decisions are recorded as
-deferred construction state rather than silently committed.
+- 704,145 nodes, of which 636,717 are linked;
+- 63,783 linked collision-free branches;
+- zero within-component cell collisions;
+- a largest branch of 586 flakes;
+- 531 branches spanning at least 11 of 14 axial planes; and
+- 235 branches spanning all 14 planes.
 
-The orthogonal overlap finds the important failure mode. Evidence identities
-still agree exactly, but 493 flake hypotheses in 170 cells receive a different
-relative sign after the best whole-overlap binary alignment. Nearly all belong
-to one connected 169-cell region spanning `x117–129`, `y100–105`, and the 14
-axial planes. Raw matches remain 99.76% consistent and retained edges 99.41%
-consistent, but the sign region, 31 raw edges, 72 collision-pruned edges, and
-five branch joins are explicitly deferred. A third centered window confirms
-that this is genuine sign-synchronization context dependence, not changing
-flake evidence or score drift. The overlap artifact stores stable node IDs,
-aligned-depth differences, exact edge disagreements, and connected cell bounds
-so a larger local re-solve can target only the ambiguous region.
+This is the first region-wide sparse construction result. Components remain
+surface branches rather than sheets; the next association stage may consume
+only overlap-validated, integrity-clean gap joins and must repeat collision and
+exact-geometry checks after any transitive merge.
 
 ## Reproducible commands
 
@@ -191,6 +188,12 @@ so a larger local re-solve can target only the ambiguous region.
 .venv/bin/python scripts/reconcile-overlapping-windows.py \
   --root work/cross-scroll-analysis-z512 \
   --target-window-origin-cell-xyz 141 74 0
+
+.venv/bin/python scripts/run-window-schedule.py \
+  --root work/cross-scroll-analysis-z512 --maximum-workers 4
+
+.venv/bin/python scripts/build-global-monotone-graph.py \
+  --root work/cross-scroll-analysis-z512
 ```
 
 The large NumPy products remain ignored under `work/`. Their summaries contain

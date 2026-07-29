@@ -17,7 +17,7 @@ from .slab_branch_association import (
 from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 
 
-WINDOW_RECONCILIATION_VERSION = 1
+WINDOW_RECONCILIATION_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -102,6 +102,35 @@ def _edge_set(
         if first not in shared_identity or second not in shared_identity:
             continue
         output.add((min(first, second), max(first, second)))
+    return output
+
+
+def _edge_parity_map(
+    arrays: dict[str, np.ndarray],
+    node_identity: np.ndarray,
+    shared_identity: set[int],
+    retained_only: bool = True,
+) -> dict[tuple[int, int], int]:
+    selected = (
+        arrays["retained"]
+        if retained_only
+        else np.ones(len(arrays["source"]), dtype=bool)
+    )
+    output: dict[tuple[int, int], int] = {}
+    for source, target, parity in zip(
+        arrays["source"][selected],
+        arrays["target"][selected],
+        arrays["relativeParity"][selected],
+    ):
+        first = int(node_identity[int(source)])
+        second = int(node_identity[int(target)])
+        if first not in shared_identity or second not in shared_identity:
+            continue
+        key = (min(first, second), max(first, second))
+        value = int(parity)
+        if key in output and output[key] != value:
+            raise ValueError("one monotone edge has conflicting relative parity")
+        output[key] = value
     return output
 
 
@@ -304,35 +333,41 @@ def reconcile_overlapping_windows(
     target_overlap_identity = set(int(value) for value in target_identity[target_inside])
     shared_identity = set(int(value) for value in shared)
 
-    sign_product = (
-        source_monotone["normalSign"][source_index].astype(np.int8)
-        * target_monotone["normalSign"][target_index].astype(np.int8)
-    )
-    positive = int(np.count_nonzero(sign_product > 0))
-    negative = int(np.count_nonzero(sign_product < 0))
-    relative_sign = 1 if positive >= negative else -1
-    sign_disagreement = sign_product != relative_sign
-    sign_disagreement_cells = source_monotone["cellIndex"][
-        source_index[sign_disagreement]
-    ]
-    sign_regions = _cell_regions(sign_disagreement_cells)
-    aligned_depth_difference = np.abs(
-        source_monotone["orientedDepth"][source_index]
-        - relative_sign * target_monotone["orientedDepth"][target_index]
+    raw_depth_difference = np.abs(
+        source_monotone["rawDepth"][source_index]
+        - target_monotone["rawDepth"][target_index]
     )
 
-    source_raw_edges = _edge_set(
+    source_raw_parity = _edge_parity_map(
         source_monotone, source_identity, shared_identity, retained_only=False
     )
-    target_raw_edges = _edge_set(
+    target_raw_parity = _edge_parity_map(
         target_monotone, target_identity, shared_identity, retained_only=False
     )
+    source_raw_edges = set(source_raw_parity)
+    target_raw_edges = set(target_raw_parity)
     shared_raw_edges = source_raw_edges & target_raw_edges
+    raw_parity_disagreement = {
+        value
+        for value in shared_raw_edges
+        if source_raw_parity[value] != target_raw_parity[value]
+    }
     source_only_raw_edges = source_raw_edges - target_raw_edges
     target_only_raw_edges = target_raw_edges - source_raw_edges
-    source_edges = _edge_set(source_monotone, source_identity, shared_identity)
-    target_edges = _edge_set(target_monotone, target_identity, shared_identity)
+    source_retained_parity = _edge_parity_map(
+        source_monotone, source_identity, shared_identity
+    )
+    target_retained_parity = _edge_parity_map(
+        target_monotone, target_identity, shared_identity
+    )
+    source_edges = set(source_retained_parity)
+    target_edges = set(target_retained_parity)
     shared_edges = source_edges & target_edges
+    retained_parity_disagreement = {
+        value
+        for value in shared_edges
+        if source_retained_parity[value] != target_retained_parity[value]
+    }
     source_only_edges = source_edges - target_edges
     target_only_edges = target_edges - source_edges
 
@@ -359,8 +394,13 @@ def reconcile_overlapping_windows(
         sharedNodeIdentity=shared.astype(np.uint64),
         sourceNodeIndex=source_index.astype(np.uint32),
         targetNodeIndex=target_index.astype(np.uint32),
-        signDisagreement=sign_disagreement,
-        alignedDepthDifferenceVoxels=aligned_depth_difference.astype(np.float32),
+        rawDepthDifferenceVoxels=raw_depth_difference.astype(np.float32),
+        rawMonotoneParityDisagreementIdentity=_edge_array(
+            raw_parity_disagreement
+        ),
+        retainedMonotoneParityDisagreementIdentity=_edge_array(
+            retained_parity_disagreement
+        ),
         sourceOnlyRawMonotoneEdgeIdentity=_edge_array(source_only_raw_edges),
         targetOnlyRawMonotoneEdgeIdentity=_edge_array(target_only_raw_edges),
         sourceOnlyMonotoneEdgeIdentity=_edge_array(source_only_edges),
@@ -368,14 +408,18 @@ def reconcile_overlapping_windows(
         sourceOnlyAcceptedEndpointIdentity=_edge_array(source_only_endpoints),
         targetOnlyAcceptedEndpointIdentity=_edge_array(target_only_endpoints),
     )
-    raw_monotone_disagreement = len(source_only_raw_edges) + len(
-        target_only_raw_edges
+    raw_monotone_disagreement = (
+        len(source_only_raw_edges)
+        + len(target_only_raw_edges)
+        + len(raw_parity_disagreement)
     )
-    monotone_disagreement = len(source_only_edges) + len(target_only_edges)
+    monotone_disagreement = (
+        len(source_only_edges)
+        + len(target_only_edges)
+        + len(retained_parity_disagreement)
+    )
     association_disagreement = len(source_only_endpoints) + len(target_only_endpoints)
-    if np.any(sign_disagreement):
-        classification = "deferred-normal-sign-overlap"
-    elif raw_monotone_disagreement:
+    if raw_monotone_disagreement:
         classification = "deferred-monotone-match-overlap"
     elif monotone_disagreement:
         classification = "deferred-collision-context-overlap"
@@ -392,9 +436,9 @@ def reconcile_overlapping_windows(
                 "stable flake identities and decisions wholly inside the intersection "
                 "of two independently solved local windows"
             ),
-            "signMeaning": (
-                "normal signs are aligned by one relative binary flip for comparison; "
-                "the aligned sign still has no physical side meaning"
+            "directionMeaning": (
+                "normal and fiber directions remain unsigned; only relative edge "
+                "parity is compared and no physical side is assigned"
             ),
             "commitRule": (
                 "only overlap decisions present in both windows are agreement evidence; "
@@ -409,10 +453,10 @@ def reconcile_overlapping_windows(
                 "partition comparison is contextual diagnostics because paths outside "
                 "the overlap can legitimately change local component labels"
             ),
-            "deferredSignMeaning": (
-                "cells whose relative sign differs after the best whole-overlap "
-                "binary alignment are localized ambiguity regions, not physical "
-                "normal-side claims"
+            "parityMeaning": (
+                "edge parity is a gauge-covariant relation between two raw cell depth "
+                "axes; branch-local node parity is intentionally not compared across "
+                "independently solved windows"
             ),
         },
         "sourceWindow": source_window,
@@ -423,7 +467,6 @@ def reconcile_overlapping_windows(
             "shapeCellsXYZ": (high - low).astype(int).tolist(),
         },
         "classification": classification,
-        "deferredNormalSignRegions": sign_regions[:24],
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),
             "cacheHit": False,
@@ -436,28 +479,19 @@ def reconcile_overlapping_windows(
             "targetOnlyOverlapNodeCount": len(
                 target_overlap_identity - source_overlap_identity
             ),
-            "relativeNormalSign": relative_sign,
-            "normalSignDisagreementCount": int(np.count_nonzero(sign_disagreement)),
-            "normalSignDisagreementCellCount": len(
-                {tuple(int(item) for item in value) for value in sign_disagreement_cells}
-            ),
-            "normalSignDisagreementRegionCount": len(sign_regions),
-            "largestNormalSignDisagreementRegionCellCount": (
-                int(sign_regions[0]["cellCount"]) if sign_regions else 0
-            ),
-            "normalSignDisagreementFraction": round(
-                float(np.mean(sign_disagreement)) if len(shared) else 0.0, 6
-            ),
-            "maximumAlignedDepthDifferenceVoxels": round(
-                float(np.max(aligned_depth_difference, initial=0.0)), 6
+            "maximumRawDepthDifferenceVoxels": round(
+                float(np.max(raw_depth_difference, initial=0.0)), 6
             ),
             "sourceRawMonotoneEdgeCount": len(source_raw_edges),
             "targetRawMonotoneEdgeCount": len(target_raw_edges),
             "sharedRawMonotoneEdgeCount": len(shared_raw_edges),
             "sourceOnlyRawMonotoneEdgeCount": len(source_only_raw_edges),
             "targetOnlyRawMonotoneEdgeCount": len(target_only_raw_edges),
+            "sharedRawMonotoneParityDisagreementCount": len(
+                raw_parity_disagreement
+            ),
             "rawMonotoneEdgeAgreementFraction": round(
-                len(shared_raw_edges)
+                (len(shared_raw_edges) - len(raw_parity_disagreement))
                 / max(len(source_raw_edges | target_raw_edges), 1),
                 6,
             ),
@@ -466,8 +500,13 @@ def reconcile_overlapping_windows(
             "sharedMonotoneEdgeCount": len(shared_edges),
             "sourceOnlyMonotoneEdgeCount": len(source_only_edges),
             "targetOnlyMonotoneEdgeCount": len(target_only_edges),
+            "sharedRetainedMonotoneParityDisagreementCount": len(
+                retained_parity_disagreement
+            ),
             "monotoneEdgeAgreementFraction": round(
-                len(shared_edges) / max(len(source_edges | target_edges), 1), 6
+                (len(shared_edges) - len(retained_parity_disagreement))
+                / max(len(source_edges | target_edges), 1),
+                6,
             ),
             "sourceAcceptedEndpointCount": len(source_endpoints),
             "targetAcceptedEndpointCount": len(target_endpoints),

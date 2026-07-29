@@ -236,51 +236,51 @@ silently using synthetic padding.
   substantial loss of supported flake evidence, so CT air gaps are retained as
   accountability constraints rather than promoted to layers.
 - `python3 scripts/prototype-monotone-layers.py --root
-  work/cross-scroll-analysis-z512` synchronizes relative unsigned-normal signs
-  and applies non-crossing partial sequence alignment in the densest 32 x 32 x
-  14-cell primary-family window. It preserves 49,549 of 49,745 current links,
-  removes all 149 pairwise order crossings, adds 112 non-crossing links, and
-  leaves the 0.73-voxel / 1.08-degree median geometry unchanged. Branch count
-  changes only from 3,361 to 3,349, establishing that missing continuation
-  edges—not fixed ordinal mistakes—are now the main fragmentation problem.
-  The revised evidence and identity contracts are documented in
-  `docs/design-revision.md`.
+  work/cross-scroll-analysis-z512` applies reversal-invariant partial sequence
+  alignment in a 32 x 32 x 14-cell primary-family window. Both relative depth
+  orientations are solved for every adjacent cell; exact-score ties retain
+  only orientation-invariant links. The chosen link carries relative parity,
+  never an absolute normal side. Collision-safe links are then processed in
+  descending score and the weakest edge in every parity-inconsistent cycle is
+  explicitly deferred. A representative dense window retains 45,297 links,
+  rejects 238 parity-cycle edges, and has zero pairwise order crossings.
 - `python3 scripts/associate-monotone-branches.py --root
   work/cross-scroll-analysis-z512` scores compatible facing endpoints of those
-  local branches, enforces material support, cell-depth order, collision safety,
-  and agreement across overlapping subwindows, then applies the active MLS fit
-  as a same-sample construction gate. The 12.5-second solve reduces 45
-  overlap-stable joins to 34 exact-coherent joins in 33 associations. All final
-  associations pass the 3-voxel / 6-degree median carrier gates; the largest
-  combines three original branches and 219 flakes at 2.33 voxels / 4.26
-  degrees. Eleven apparently strong joins are explicitly deferred by exact
-  geometry, including the highest-scoring reject at 0.843. Association IDs are
-  chunk-local surface hypotheses, never page identities. The aligned candidate,
-  decision, exact-residual, branch, and flake arrays are stored under
-  `work/cross-scroll-analysis-z512/branch-association-window-v1`.
+  local branches. Independent branch gauges are aligned only through parity
+  votes in cells the branches actually share; tied or frustrated order
+  observations are omitted from the hard order graph. Material support,
+  collision safety, overlapping subwindows, and the active MLS reconstruction
+  remain construction gates. In the representative dense window, 54 stable
+  candidates become 32 exact-coherent joins in 28 associations; 22 are
+  explicitly deferred by the 3-voxel / 6-degree median carrier gate.
 - `python3 scripts/audit-branch-association-integrity.py --root
   work/cross-scroll-analysis-z512` reconstructs and triangulates every accepted
-  merged association, then reports exact mesh intersections separately from a
-  descriptive sampled-clearance sweep. The 5.1-second audit checks 84,272
-  triangles and 29,844 evidence-core points with zero intersections and zero
-  within-association cell collisions. Only one carrier pair comes within 12
-  voxels; it is a consistently ordered near-contact at 5.67 sampled voxels, not
-  a crossing or an automatic merge. Intersection coordinates, pair clearance,
-  normal/fiber alignment, and shared-cell order remain available in
-  `work/cross-scroll-analysis-z512/branch-association-integrity-v1`.
-- The monotone, branch-association, and integrity commands accept
-  `--window-origin-cell-xyz X Y Z`, producing coexistable, hash-identified
-  local artifacts. `python3 scripts/reconcile-overlapping-windows.py --root
-  work/cross-scroll-analysis-z512 --target-window-origin-cell-xyz 141 74 0`
-  compares the dense window with its overlapping east neighbor by stable flake
-  identity. All 10,602 shared flakes, signs, depths, and 12,957 raw monotone
-  matches agree exactly. Later collision pruning makes 40 context-dependent
-  edge choices (99.68% retained-edge agreement), while eight branch joins agree
-  and five remain deferred. The south overlap localizes a genuine relative-sign
-  ambiguity to 170 cells, 169 of them connected, while raw matches still agree
-  at 99.76%. Reconciliation artifacts preserve the ambiguous flake IDs, cell
-  regions, raw/retained edge differences, and one-window-only joins; none are
-  silently promoted to a cross-window association.
+  merged association and reports support-skirt and evidence-core intersections
+  separately. The representative dense solve has zero intersections and one
+  consistently ordered near-contact. Integrity remains a veto rather than a
+  score: tiled associations involved in any mesh intersection are retained in
+  a quarantine catalog and excluded from consensus joins.
+- `python3 scripts/run-window-schedule.py --root
+  work/cross-scroll-analysis-z512 --maximum-workers 4` runs the same bounded
+  solve over every occupied tile. The 242 x 242 x 14 grid requires 51 occupied
+  windows and 86 face-overlap reconciliations; 49 empty windows are skipped
+  without losing a claim. A fresh four-worker pass takes 310 seconds and covers
+  all 704,145 primary flakes. All 818,414 raw matches and all relative parities
+  agree in every observing window. Later collision/parity pruning leaves 2,148
+  context-dependent retained edges. Of 521 local accepted join pairs, the
+  integrity veto quarantines 12 unique pairs from 14 local association
+  occurrences; 125 remaining joins are both overlap-observed and unanimous.
+  The resumable manifest and consensus arrays are stored in
+  `tiled-window-schedule-v4`.
+- `python3 scripts/build-global-monotone-graph.py --root
+  work/cross-scroll-analysis-z512` consumes only unanimous raw matches and
+  parities. The 12.1-second whole-volume sparse solve retains 783,846 edges
+  after 29,151 cell-collision and 5,417 parity-cycle rejections. It produces
+  63,783 linked branches and 636,717 linked flakes with zero cell collisions;
+  the largest branch has 586 flakes, 531 branches span at least 11 axial
+  planes, and 235 span all 14. Every repeated edge-score observation is exactly
+  equal. These remain sparse local surface branches, not pages or sheets.
+  Detailed contracts and findings are in `docs/design-revision.md`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

@@ -17,7 +17,7 @@ from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_sheetlet_carriers import build_mls_carrier
 
 
-ASSOCIATION_INTEGRITY_VERSION = 1
+ASSOCIATION_INTEGRITY_VERSION = 2
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "maximumEvidenceCoreDistanceVoxels": 24.0,
@@ -140,7 +140,7 @@ def _surface_geometry(
     member_indices: np.ndarray,
     flakes: list[dict[str, Any]],
     cell: np.ndarray,
-    oriented_depth: np.ndarray,
+    aligned_depth: np.ndarray,
     carrier_settings: dict[str, Any],
     settings: dict[str, Any],
 ) -> dict[str, Any]:
@@ -205,7 +205,7 @@ def _surface_geometry(
     cell_depth: dict[tuple[int, int, int], list[float]] = defaultdict(list)
     for member_index in member_indices:
         key = tuple(int(value) for value in cell[int(member_index)])
-        cell_depth[key].append(float(oriented_depth[int(member_index)]))
+        cell_depth[key].append(float(aligned_depth[int(member_index)]))
     within_cell_collision_count = sum(
         max(len(values) - 1, 0) for values in cell_depth.values()
     )
@@ -676,9 +676,21 @@ def association_integrity_audit(
     flakes = _load_flakes(root, monotone)
     branch = monotone["component"].astype(np.int32)
     cell = monotone["cellIndex"].astype(np.int32)
-    oriented_depth = monotone["orientedDepth"].astype(np.float32)
     with np.load(branch_artifact_path) as payload:
-        branch_association = np.asarray(payload["branchAssociation"], dtype=np.int32)
+        branch_artifact = {
+            key: np.asarray(payload[key]) for key in payload.files
+        }
+    branch_association = np.asarray(
+        branch_artifact["branchAssociation"], dtype=np.int32
+    )
+    branch_order_gauge = np.asarray(
+        branch_artifact["branchOrderGauge"], dtype=np.int8
+    )
+    aligned_depth = (
+        monotone["rawDepth"].astype(np.float32)
+        * monotone["branchParity"].astype(np.int8)
+        * branch_order_gauge[branch]
+    )
     association_branch_count = np.bincount(branch_association)
     association_ids = np.flatnonzero(association_branch_count >= 2)
     flake_association = branch_association[branch]
@@ -691,7 +703,7 @@ def association_integrity_audit(
                 member_indices,
                 flakes,
                 cell,
-                oriented_depth,
+                aligned_depth,
                 branch_summary["settings"],
                 resolved,
             )

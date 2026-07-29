@@ -20,7 +20,7 @@ from .slab_sheetlet_carriers import build_mls_carrier
 from .slab_sheetlet_explore import score_flake_pair_groups
 
 
-BRANCH_ASSOCIATION_VERSION = 1
+BRANCH_ASSOCIATION_VERSION = 2
 
 DECISION_BELOW_THRESHOLD = 0
 DECISION_MATERIAL_DEFERRED = 1
@@ -207,7 +207,6 @@ def _endpoint_geometry(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     centers = np.asarray([flake["center"] for flake in flakes], dtype=np.float32)
     normals = np.asarray([flake["normal"] for flake in flakes], dtype=np.float32)
-    normals *= arrays["normalSign"][:, None]
     source = arrays["source"][arrays["retained"]].astype(np.int32)
     target = arrays["target"][arrays["retained"]].astype(np.int32)
     neighbor = np.full(len(flakes), -1, dtype=np.int32)
@@ -401,23 +400,146 @@ def _aggregate_candidates(
 
 def _order_condensation(
     cell: np.ndarray,
-    oriented_depth: np.ndarray,
+    raw_depth: np.ndarray,
     branch: np.ndarray,
+    node_parity: np.ndarray | None = None,
 ) -> dict[str, Any]:
     branch_count = int(np.max(branch, initial=-1)) + 1
-    adjacency = [set() for _ in range(branch_count)]
-    reverse = [set() for _ in range(branch_count)]
     by_cell: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for node, value in enumerate(cell):
         by_cell[tuple(int(item) for item in value)].append(node)
+
+    branch_gauge = np.ones(branch_count, dtype=np.int8)
+    branch_parity_ambiguous = np.zeros(branch_count, dtype=bool)
+    parity_constraint_count = 0
+    parity_frustrated_constraint_count = 0
+    parity_unresolved_constraint_count = 0
+    parity_tied_branch_pair_count = 0
+    parity_frustrated_branch_pair_count = 0
+    parity_component_count = branch_count
+    branch_roots = np.arange(branch_count, dtype=np.int32)
+    if node_parity is not None:
+        node_parity = np.asarray(node_parity, dtype=np.int8)
+        if len(node_parity) != len(branch) or np.any(np.abs(node_parity) != 1):
+            raise ValueError("node parity must contain one +/-1 value per node")
+        parent = np.arange(branch_count, dtype=np.int32)
+        size = np.ones(branch_count, dtype=np.int32)
+        parity_to_parent = np.ones(branch_count, dtype=np.int8)
+
+        def find_with_parity(index: int) -> tuple[int, int]:
+            trail = []
+            cursor = index
+            parity = 1
+            while int(parent[cursor]) != cursor:
+                trail.append(cursor)
+                parity *= int(parity_to_parent[cursor])
+                cursor = int(parent[cursor])
+            root = cursor
+            running = parity
+            for node in trail:
+                edge = int(parity_to_parent[node])
+                parent[node] = root
+                parity_to_parent[node] = running
+                running //= edge
+            return root, parity
+
+        def merge(first: int, second: int, relative: int) -> bool:
+            first_root, first_parity = find_with_parity(first)
+            second_root, second_parity = find_with_parity(second)
+            if first_root == second_root:
+                return first_parity * second_parity == relative
+            if int(size[first_root]) < int(size[second_root]):
+                first_root, second_root = second_root, first_root
+            parent[second_root] = first_root
+            parity_to_parent[second_root] = relative * first_parity * second_parity
+            size[first_root] += size[second_root]
+            return True
+
+        pair_votes: dict[tuple[int, int], list[int]] = defaultdict(
+            lambda: [0, 0]
+        )
+        for nodes in by_cell.values():
+            for first_offset, first_node in enumerate(nodes):
+                first_branch = int(branch[first_node])
+                for second_node in nodes[first_offset + 1 :]:
+                    second_branch = int(branch[second_node])
+                    if first_branch == second_branch:
+                        continue
+                    parity_constraint_count += 1
+                    relative = int(node_parity[first_node] * node_parity[second_node])
+                    key = (
+                        min(first_branch, second_branch),
+                        max(first_branch, second_branch),
+                    )
+                    pair_votes[key][int(relative > 0)] += 1
+        majority_edges = []
+        for (first_branch, second_branch), (negative, positive) in pair_votes.items():
+            if positive == negative:
+                parity_tied_branch_pair_count += 1
+                continue
+            relative = 1 if positive > negative else -1
+            majority_edges.append(
+                (
+                    abs(positive - negative),
+                    positive + negative,
+                    first_branch,
+                    second_branch,
+                    relative,
+                )
+            )
+        for _, _, first_branch, second_branch, relative in sorted(
+            majority_edges, reverse=True
+        ):
+            first_root, _ = find_with_parity(first_branch)
+            second_root, _ = find_with_parity(second_branch)
+            if first_root != second_root:
+                merge(first_branch, second_branch, relative)
+
+        for branch_index in range(branch_count):
+            root, gauge = find_with_parity(branch_index)
+            branch_roots[branch_index] = root
+            branch_gauge[branch_index] = gauge
+        parity_component_count = len(np.unique(branch_roots))
+        for _, _, first_branch, second_branch, relative in majority_edges:
+            if branch_roots[first_branch] != branch_roots[second_branch]:
+                continue
+            parity_frustrated_branch_pair_count += int(
+                int(branch_gauge[first_branch] * branch_gauge[second_branch])
+                != relative
+            )
+
+    if node_parity is None:
+        aligned_depth = np.asarray(raw_depth, dtype=np.float32)
+    else:
+        aligned_depth = (
+            np.asarray(raw_depth, dtype=np.float32)
+            * node_parity
+            * branch_gauge[branch.astype(np.int64)]
+        )
+    adjacency = [set() for _ in range(branch_count)]
+    reverse = [set() for _ in range(branch_count)]
     for nodes in by_cell.values():
-        nodes.sort(key=lambda node: (float(oriented_depth[node]), node))
+        nodes.sort(key=lambda node: (float(aligned_depth[node]), node))
         for position, source_node in enumerate(nodes):
             source_branch = int(branch[source_node])
             for target_node in nodes[position + 1 :]:
                 target_branch = int(branch[target_node])
                 if source_branch == target_branch:
                     continue
+                if node_parity is not None:
+                    if branch_roots[source_branch] != branch_roots[target_branch]:
+                        parity_unresolved_constraint_count += 1
+                        continue
+                    required = int(
+                        node_parity[source_node] * node_parity[target_node]
+                    )
+                    aligned = int(
+                        branch_gauge[source_branch]
+                        * branch_gauge[target_branch]
+                    )
+                    if required != aligned:
+                        parity_frustrated_constraint_count += 1
+                        continue
                 adjacency[source_branch].add(target_branch)
                 reverse[target_branch].add(source_branch)
 
@@ -472,6 +594,9 @@ def _order_condensation(
         "branchScc": branch_scc,
         "sccSizes": scc_sizes_array,
         "dag": dag_list,
+        "branchGauge": branch_gauge,
+        "branchParityAmbiguous": branch_parity_ambiguous,
+        "alignedDepth": aligned_depth,
         "stats": {
             "branchCount": branch_count,
             "orderEdgeCount": sum(len(values) for values in adjacency),
@@ -479,8 +604,20 @@ def _order_condensation(
             "cyclicSccCount": int(np.count_nonzero(scc_sizes_array > 1)),
             "branchCountInCyclicScc": int(np.sum(scc_sizes_array[scc_sizes_array > 1])),
             "largestCyclicSccSize": int(np.max(scc_sizes_array, initial=0)),
+            "parityConstraintCount": parity_constraint_count,
+            "parityFrustratedConstraintCount": parity_frustrated_constraint_count,
+            "parityUnresolvedConstraintCount": parity_unresolved_constraint_count,
+            "parityTiedBranchPairCount": parity_tied_branch_pair_count,
+            "parityFrustratedBranchPairCount": (
+                parity_frustrated_branch_pair_count
+            ),
+            "parityInteractionComponentCount": parity_component_count,
+            "parityAmbiguousBranchCount": int(
+                np.count_nonzero(branch_parity_ambiguous)
+            ),
             "constraint": (
-                "depth order within each cell; cyclic regions are explicit order "
+                "unsigned branch gauges are aligned only through shared-cell parity; "
+                "parity-frustrated and cyclic order regions remain explicit "
                 "ambiguities and are deferred rather than collapsed"
             ),
         },
@@ -508,6 +645,9 @@ def _solve_candidates(
     branch_scc = order["branchScc"]
     scc_sizes = order["sccSizes"]
     dag = order["dag"]
+    parity_ambiguous = order.get(
+        "branchParityAmbiguous", np.zeros(len(branch_scc), dtype=bool)
+    )
     scc_count = len(scc_sizes)
     parent = np.arange(scc_count, dtype=np.int32)
     group_size = np.ones(scc_count, dtype=np.int32)
@@ -554,6 +694,11 @@ def _solve_candidates(
             continue
         source_branch = int(candidate["branchSource"])
         target_branch = int(candidate["branchTarget"])
+        if bool(parity_ambiguous[source_branch]) or bool(
+            parity_ambiguous[target_branch]
+        ):
+            decisions[candidate_index] = DECISION_ORDER_AMBIGUOUS
+            continue
         source_scc = int(branch_scc[source_branch])
         target_scc = int(branch_scc[target_branch])
         if int(scc_sizes[source_scc]) > 1 or int(scc_sizes[target_scc]) > 1:
@@ -1069,7 +1214,12 @@ def associate_monotone_branches(
         float(resolved["minimumHitScore"]),
     )
     main_candidates = _aggregate_candidates(hits)
-    order = _order_condensation(cell, arrays["orientedDepth"], branch)
+    order = _order_condensation(
+        cell,
+        arrays["rawDepth"],
+        branch,
+        arrays["branchParity"],
+    )
     branch_count = int(np.max(branch, initial=-1)) + 1
     branch_cells = _branch_cell_sets(cell, branch, branch_count)
     subwindows = _subwindows(
@@ -1158,6 +1308,8 @@ def associate_monotone_branches(
         candidateFinalDecision=exact["decisions"],
         branchScc=order["branchScc"],
         sccSize=order["sccSizes"],
+        branchOrderGauge=order["branchGauge"],
+        branchOrderParityAmbiguous=order["branchParityAmbiguous"],
         branchAssociation=exact["final"]["branchGroup"],
         flakeAssociation=flake_association.astype(np.uint32),
     )
@@ -1181,8 +1333,9 @@ def associate_monotone_branches(
                 "adds join score; continuity through contested bulk is not join evidence"
             ),
             "orderRole": (
-                "cell-depth order is a hard non-collapse constraint; cyclic order "
-                "regions and overlap disagreements are explicitly deferred"
+                "branch-relative gauges are aligned only by parity votes in shared "
+                "cells; gauge-unresolved, parity-frustrated, cyclic-order, and "
+                "overlap-disagreement constraints are explicitly deferred"
             ),
             "exactGeometryRole": (
                 "the same-sample MLS carrier fit is a construction gate, not an "

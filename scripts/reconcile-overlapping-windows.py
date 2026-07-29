@@ -37,9 +37,6 @@ def main() -> None:
                 "contract": result["contract"],
                 "overlap": result["overlap"],
                 "classification": result["classification"],
-                "deferredNormalSignRegions": result[
-                    "deferredNormalSignRegions"
-                ],
                 "stats": result["stats"],
                 "artifact": result["artifact"],
             },

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ from .slab_sheetlet_explore import (
 )
 
 
-MONOTONE_LAYER_VERSION = 1
+MONOTONE_LAYER_VERSION = 2
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "windowCellsXYZ": [32, 32, 14],
@@ -180,84 +180,6 @@ def _cell_catalog(
     return dict(by_cell), pairs
 
 
-def _relative_normal_signs(
-    flakes: list[dict[str, Any]],
-    by_cell: dict[tuple[int, int, int], list[int]],
-    cell_pairs: list[tuple[tuple[int, int, int], tuple[int, int, int], int]],
-) -> tuple[dict[tuple[int, int, int], int], dict[str, Any]]:
-    cells = sorted(by_cell)
-    cell_id = {cell: index for index, cell in enumerate(cells)}
-    normals = np.asarray(
-        [flakes[by_cell[cell][0]]["normal"] for cell in cells], dtype=np.float32
-    )
-    normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1.0e-8)
-    edges = []
-    for first, second, _ in cell_pairs:
-        dot = float(np.dot(normals[cell_id[first]], normals[cell_id[second]]))
-        edges.append(
-            (cell_id[first], cell_id[second], 1 if dot >= 0.0 else -1, abs(dot))
-        )
-
-    parent = np.arange(len(cells), dtype=np.int32)
-    size = np.ones(len(cells), dtype=np.int32)
-
-    def find(index: int) -> int:
-        while int(parent[index]) != index:
-            parent[index] = parent[int(parent[index])]
-            index = int(parent[index])
-        return index
-
-    tree: list[list[tuple[int, int]]] = [[] for _ in cells]
-    for first, second, relative, _ in sorted(edges, key=lambda value: value[3], reverse=True):
-        root_first, root_second = find(first), find(second)
-        if root_first == root_second:
-            continue
-        if int(size[root_first]) < int(size[root_second]):
-            root_first, root_second = root_second, root_first
-        parent[root_second] = root_first
-        size[root_first] += size[root_second]
-        tree[first].append((second, relative))
-        tree[second].append((first, relative))
-
-    signs = np.zeros(len(cells), dtype=np.int8)
-    component_count = 0
-    for root in range(len(cells)):
-        if signs[root]:
-            continue
-        component_count += 1
-        signs[root] = 1
-        queue = deque([root])
-        while queue:
-            current = queue.popleft()
-            for neighbor, relative in tree[current]:
-                if signs[neighbor]:
-                    continue
-                signs[neighbor] = signs[current] * relative
-                queue.append(neighbor)
-    disagreement = np.asarray(
-        [signs[first] * signs[second] != relative for first, second, relative, _ in edges],
-        dtype=bool,
-    )
-    weights = np.asarray([value[3] for value in edges], dtype=np.float32)
-    angles = np.degrees(np.arccos(np.clip(weights, 0.0, 1.0)))
-    output = {cell: int(signs[index]) for index, cell in enumerate(cells)}
-    return output, {
-        "cellCount": len(cells),
-        "adjacentCellEdgeCount": len(edges),
-        "connectedRegionCount": component_count,
-        "frustratedEdgeCount": int(np.count_nonzero(disagreement)),
-        "frustratedEdgeFraction": round(float(np.mean(disagreement)) if len(edges) else 0.0, 6),
-        "frustratedWeightFraction": round(
-            float(np.sum(weights[disagreement])) / max(float(np.sum(weights)), 1.0e-8), 6
-        ),
-        "neighborAxialNormalAngleDeg": _quantiles(angles),
-        "signMeaning": (
-            "arbitrary relative orientation per connected region; no inward, outward, "
-            "recto, verso, or physical side meaning"
-        ),
-    }
-
-
 def _all_pair_metrics(
     flakes: list[dict[str, Any]],
     by_cell: dict[tuple[int, int, int], list[int]],
@@ -286,13 +208,13 @@ def _all_pair_metrics(
     return output
 
 
-def _monotone_partial_match(
+def _monotone_partial_match_with_score(
     source_sequence: list[int],
     target_sequence: list[int],
     compatibility: dict[tuple[int, int], tuple[float, ...]],
     minimum_score: float,
     gap_penalty: float,
-) -> list[tuple[int, int]]:
+) -> tuple[list[tuple[int, int]], float]:
     """Maximum-score non-crossing partial match with explicit births/deaths."""
     source_count, target_count = len(source_sequence), len(target_sequence)
     score = np.full((source_count + 1, target_count + 1), -np.inf, dtype=np.float64)
@@ -347,31 +269,168 @@ def _monotone_partial_match(
         else:
             raise RuntimeError("partial-match backtracking reached an invalid state")
     matches.reverse()
+    return matches, float(score[source_count, target_count])
+
+
+def _monotone_partial_match(
+    source_sequence: list[int],
+    target_sequence: list[int],
+    compatibility: dict[tuple[int, int], tuple[float, ...]],
+    minimum_score: float,
+    gap_penalty: float,
+) -> list[tuple[int, int]]:
+    matches, _ = _monotone_partial_match_with_score(
+        source_sequence,
+        target_sequence,
+        compatibility,
+        minimum_score,
+        gap_penalty,
+    )
     return matches
 
 
-def _ordered_sequences(
+def _raw_depth_sequences(
     flakes: list[dict[str, Any]],
     by_cell: dict[tuple[int, int, int], list[int]],
-    normal_sign: dict[tuple[int, int, int], int],
 ) -> tuple[dict[tuple[int, int, int], list[int]], np.ndarray, np.ndarray]:
-    oriented_depth = np.asarray(
-        [
-            float(flake["depthOffset"])
-            * normal_sign[tuple(int(value) for value in flake["cellIndex"])]
-            for flake in flakes
-        ],
-        dtype=np.float32,
+    raw_depth = np.asarray(
+        [float(flake["depthOffset"]) for flake in flakes], dtype=np.float32
     )
     sequences = {
-        cell: sorted(indices, key=lambda index: (float(oriented_depth[index]), index))
+        cell: sorted(indices, key=lambda index: (float(raw_depth[index]), index))
         for cell, indices in by_cell.items()
     }
     ordinal = np.zeros(len(flakes), dtype=np.uint8)
     for indices in sequences.values():
         for rank, index in enumerate(indices):
             ordinal[index] = rank
-    return sequences, oriented_depth, ordinal
+    return sequences, raw_depth, ordinal
+
+
+def _axial_monotone_match(
+    source_sequence: list[int],
+    target_sequence: list[int],
+    compatibility: dict[tuple[int, int], tuple[float, ...]],
+    minimum_score: float,
+    gap_penalty: float,
+    geometric_tie_parity: int,
+    score_tolerance: float = 1.0e-9,
+) -> dict[str, Any]:
+    forward, forward_score = _monotone_partial_match_with_score(
+        source_sequence,
+        target_sequence,
+        compatibility,
+        minimum_score,
+        gap_penalty,
+    )
+    reverse, reverse_score = _monotone_partial_match_with_score(
+        source_sequence,
+        list(reversed(target_sequence)),
+        compatibility,
+        minimum_score,
+        gap_penalty,
+    )
+    margin = forward_score - reverse_score
+    if margin > score_tolerance:
+        matches = forward
+        parity = 1
+        decision = "objective-forward"
+        deferred = 0
+    elif margin < -score_tolerance:
+        matches = reverse
+        parity = -1
+        decision = "objective-reverse"
+        deferred = 0
+    else:
+        forward_set = set(forward)
+        reverse_set = set(reverse)
+        matches = [value for value in forward if value in reverse_set]
+        parity = 1 if geometric_tie_parity >= 0 else -1
+        decision = "geometry-tie"
+        deferred = len(forward_set ^ reverse_set)
+    return {
+        "matches": matches,
+        "relativeParity": parity,
+        "objectiveMargin": abs(margin),
+        "decision": decision,
+        "deferredAlternativeLinkCount": deferred,
+        "forwardScore": forward_score,
+        "reverseScore": reverse_score,
+    }
+
+
+def _parity_consistent_links(
+    node_count: int,
+    sources: np.ndarray,
+    targets: np.ndarray,
+    relative_parity: np.ndarray,
+    scores: np.ndarray,
+    initially_retained: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    parent = np.arange(node_count, dtype=np.int32)
+    size = np.ones(node_count, dtype=np.int32)
+    parity_to_parent = np.ones(node_count, dtype=np.int8)
+    retained = np.zeros(len(sources), dtype=bool)
+    frustrated = np.zeros(len(sources), dtype=bool)
+
+    def find_with_parity(index: int) -> tuple[int, int]:
+        trail = []
+        cursor = index
+        parity = 1
+        while int(parent[cursor]) != cursor:
+            trail.append(cursor)
+            parity *= int(parity_to_parent[cursor])
+            cursor = int(parent[cursor])
+        root = cursor
+        running = parity
+        for node in trail:
+            edge = int(parity_to_parent[node])
+            parent[node] = root
+            parity_to_parent[node] = running
+            running //= edge
+        return root, parity
+
+    def merge(source: int, target: int, relative: int) -> bool:
+        source_root, source_parity = find_with_parity(source)
+        target_root, target_parity = find_with_parity(target)
+        if source_root == target_root:
+            return source_parity * target_parity == relative
+        if int(size[source_root]) < int(size[target_root]):
+            source_root, target_root = target_root, source_root
+        root_parity = relative * source_parity * target_parity
+        parent[target_root] = source_root
+        parity_to_parent[target_root] = root_parity
+        size[source_root] += size[target_root]
+        return True
+
+    edge_order = np.argsort(-np.asarray(scores), kind="stable")
+    for edge_index in edge_order:
+        if not bool(initially_retained[edge_index]):
+            continue
+        if merge(
+            int(sources[edge_index]),
+            int(targets[edge_index]),
+            int(relative_parity[edge_index]),
+        ):
+            retained[edge_index] = True
+        else:
+            frustrated[edge_index] = True
+
+    node_parity = np.ones(node_count, dtype=np.int8)
+    roots = np.empty(node_count, dtype=np.int32)
+    for node in range(node_count):
+        roots[node], value = find_with_parity(node)
+        node_parity[node] = value
+    return retained, node_parity, frustrated, {
+        "initiallyRetainedLinkCount": int(np.count_nonzero(initially_retained)),
+        "retainedParityConsistentLinkCount": int(np.count_nonzero(retained)),
+        "frustratedCycleLinkCount": int(np.count_nonzero(frustrated)),
+        "parityComponentCount": len(np.unique(roots)),
+        "parityMeaning": (
+            "relative branch gauge only; flipping any input normal/depth axis changes "
+            "stored parity coordinates but not the represented unsigned geometry"
+        ),
+    }
 
 
 def _current_window_links(
@@ -426,19 +485,39 @@ def _crossing_count(
     targets: np.ndarray,
     flakes: list[dict[str, Any]],
     ordinal: np.ndarray,
+    relative_parity: np.ndarray | None = None,
 ) -> int:
-    groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[tuple[int, int]]] = defaultdict(list)
-    for source, target in zip(sources, targets):
+    groups: dict[
+        tuple[tuple[int, ...], tuple[int, ...]], list[tuple[int, int, int]]
+    ] = defaultdict(list)
+    parity_values = (
+        np.asarray(relative_parity, dtype=np.int8)
+        if relative_parity is not None
+        else np.zeros(len(sources), dtype=np.int8)
+    )
+    for source, target, parity in zip(sources, targets, parity_values):
         source_cell = tuple(int(value) for value in flakes[int(source)]["cellIndex"])
         target_cell = tuple(int(value) for value in flakes[int(target)]["cellIndex"])
         groups[(source_cell, target_cell)].append(
-            (int(ordinal[int(source)]), int(ordinal[int(target)]))
+            (
+                int(ordinal[int(source)]),
+                int(ordinal[int(target)]),
+                int(parity),
+            )
         )
     crossings = 0
     for matches in groups.values():
+        forward = 0
+        reverse = 0
         for first_index, first in enumerate(matches):
             for second in matches[first_index + 1 :]:
-                crossings += int((first[0] - second[0]) * (first[1] - second[1]) < 0)
+                product = (first[0] - second[0]) * (first[1] - second[1])
+                forward += int(product < 0)
+                reverse += int(product > 0)
+        if relative_parity is None:
+            crossings += min(forward, reverse)
+        elif matches:
+            crossings += forward if matches[0][2] > 0 else reverse
     return crossings
 
 
@@ -533,31 +612,61 @@ def prototype_monotone_layers(
         root, window, float(resolved["minimumFlakeQuality"])
     )
     by_cell, cell_pairs = _cell_catalog(flakes)
-    normal_sign, sign_stats = _relative_normal_signs(flakes, by_cell, cell_pairs)
-    sequences, oriented_depth, ordinal = _ordered_sequences(
-        flakes, by_cell, normal_sign
-    )
+    sequences, raw_depth, ordinal = _raw_depth_sequences(flakes, by_cell)
     compatibility = _all_pair_metrics(
         flakes, by_cell, cell_pairs, float(resolved["edgePaddingVoxels"])
     )
-    selected_pairs = []
+    selected_pairs: list[tuple[int, int]] = []
+    selected_parity = []
+    selected_margin = []
+    selected_parity_source = []
     unmatched_source_count = 0
     unmatched_target_count = 0
     linked_cell_pair_count = 0
+    objective_forward_cell_pair_count = 0
+    objective_reverse_cell_pair_count = 0
+    geometry_tie_cell_pair_count = 0
+    deferred_orientation_alternative_count = 0
     for first, second, _ in cell_pairs:
-        matches = _monotone_partial_match(
+        first_normal = np.asarray(
+            flakes[by_cell[first][0]]["normal"], dtype=np.float32
+        )
+        second_normal = np.asarray(
+            flakes[by_cell[second][0]]["normal"], dtype=np.float32
+        )
+        axial = _axial_monotone_match(
             sequences[first],
             sequences[second],
             compatibility,
             float(resolved["minimumLinkScore"]),
             float(resolved["gapPenalty"]),
+            1 if float(np.dot(first_normal, second_normal)) >= 0.0 else -1,
         )
+        matches = axial["matches"]
         selected_pairs.extend(matches)
+        selected_parity.extend([int(axial["relativeParity"])] * len(matches))
+        selected_margin.extend([float(axial["objectiveMargin"])] * len(matches))
+        selected_parity_source.extend(
+            [int(axial["decision"] != "geometry-tie")] * len(matches)
+        )
         linked_cell_pair_count += int(bool(matches))
         unmatched_source_count += len(sequences[first]) - len(matches)
         unmatched_target_count += len(sequences[second]) - len(matches)
+        objective_forward_cell_pair_count += int(
+            axial["decision"] == "objective-forward"
+        )
+        objective_reverse_cell_pair_count += int(
+            axial["decision"] == "objective-reverse"
+        )
+        geometry_tie_cell_pair_count += int(axial["decision"] == "geometry-tie")
+        deferred_orientation_alternative_count += int(
+            axial["deferredAlternativeLinkCount"]
+        )
     sources = np.asarray([value[0] for value in selected_pairs], dtype=np.uint32)
     targets = np.asarray([value[1] for value in selected_pairs], dtype=np.uint32)
+    relative_parity = np.asarray(selected_parity, dtype=np.int8)
+    orientation_margin = np.asarray(selected_margin, dtype=np.float32)
+    parity_objective_resolved = np.asarray(selected_parity_source, dtype=bool)
     metrics = np.asarray(
         [compatibility[(int(source), int(target))] for source, target in selected_pairs],
         dtype=np.float32,
@@ -569,9 +678,31 @@ def prototype_monotone_layers(
         + grid_shape_zyx[2]
         * (cell[:, 1].astype(np.int64) + grid_shape_zyx[1] * cell[:, 2].astype(np.int64))
     )
-    component, component_sizes, degree, retained = _components_without_cell_collisions(
+    _, _, _, collision_retained = _components_without_cell_collisions(
         len(flakes), cell_code, sources, targets, scores
     )
+    retained, branch_parity, parity_frustrated, parity_stats = (
+        _parity_consistent_links(
+            len(flakes),
+            sources,
+            targets,
+            relative_parity,
+            scores,
+            collision_retained,
+        )
+    )
+    component, component_sizes, degree, retained_again = (
+        _components_without_cell_collisions(
+            len(flakes),
+            cell_code,
+            sources[retained],
+            targets[retained],
+            scores[retained],
+        )[:4]
+    )
+    if not np.all(retained_again):
+        raise RuntimeError("parity filtering violated collision-safe graph invariants")
+    branch_gauge_depth = raw_depth * branch_parity
     current = _current_window_links(root, flakes)
     current_pairs = {
         (int(source), int(target))
@@ -597,12 +728,12 @@ def prototype_monotone_layers(
     ]
     linked = component_sizes[component] >= 2
     linked_component_sizes = component_sizes[component_sizes >= 2]
-    shifted = ordinal[sources] != ordinal[targets]
-    current_shifted = ordinal[current["source"]] != ordinal[current["target"]]
     current_crossings = _crossing_count(
         current["source"], current["target"], flakes, ordinal
     )
-    monotone_crossings = _crossing_count(sources, targets, flakes, ordinal)
+    monotone_crossings = _crossing_count(
+        sources, targets, flakes, ordinal, relative_parity
+    )
 
     artifact_temporary = artifact_path.with_suffix(".npz.tmp")
     with artifact_temporary.open("wb") as handle:
@@ -611,17 +742,19 @@ def prototype_monotone_layers(
             sourceZIndex=np.asarray([flake["sourceZIndex"] for flake in flakes], dtype=np.uint8),
             sourceFlakeId=np.asarray([flake["sourceFlakeId"] for flake in flakes], dtype=np.uint32),
             cellIndex=cell.astype(np.uint16),
-            normalSign=np.asarray(
-                [normal_sign[tuple(int(value) for value in flake["cellIndex"])] for flake in flakes],
-                dtype=np.int8,
-            ),
-            orientedDepth=oriented_depth,
-            ordinal=ordinal,
+            rawDepth=raw_depth,
+            rawOrdinal=ordinal,
+            branchParity=branch_parity,
+            branchGaugeDepth=branch_gauge_depth,
             component=component.astype(np.uint32),
             componentSize=component_sizes[component].astype(np.uint32),
             degree=degree,
             source=sources,
             target=targets,
+            relativeParity=relative_parity,
+            parityObjectiveResolved=parity_objective_resolved,
+            orientationObjectiveMargin=orientation_margin,
+            parityFrustrated=parity_frustrated,
             axis=metrics[:, 5].astype(np.uint8) if len(metrics) else np.empty(0, dtype=np.uint8),
             score=scores,
             edgeResidual=metrics[:, 1] if len(metrics) else np.empty(0, dtype=np.float32),
@@ -634,11 +767,16 @@ def prototype_monotone_layers(
     result = {
         "identity": identity,
         "contract": {
-            "normalSign": sign_stats["signMeaning"],
+            "normalDirection": (
+                "all normal and fiber directions remain unsigned axes; no inward, "
+                "outward, recto, verso, or physical side is assigned"
+            ),
+            "parity": parity_stats["parityMeaning"],
             "matching": (
-                "order-preserving partial sequence alignment of local primary-family "
-                "flake depths; unmatched modes are explicit births/deaths and ordinal "
-                "equality is not required"
+                "both relative depth orientations are solved for every adjacent cell; "
+                "the better order-preserving partial match is retained, exact-score "
+                "ties retain only orientation-invariant links, and unmatched modes "
+                "remain explicit births/deaths"
             ),
             "branchIdentity": (
                 "collision-safe local surface branch only; component IDs are not "
@@ -660,15 +798,23 @@ def prototype_monotone_layers(
             "linkedCellPairCount": linked_cell_pair_count,
             "rawMonotoneLinkCount": len(sources),
             "retainedMonotoneLinkCount": int(np.count_nonzero(retained)),
-            "collisionRejectedLinkCount": int(len(retained) - np.count_nonzero(retained)),
+            "collisionRejectedLinkCount": int(
+                len(collision_retained) - np.count_nonzero(collision_retained)
+            ),
+            "parityFrustratedLinkCount": int(np.count_nonzero(parity_frustrated)),
             "unmatchedSourceModeCountAcrossPairs": unmatched_source_count,
             "unmatchedTargetModeCountAcrossPairs": unmatched_target_count,
-            "ordinalShiftLinkCount": int(np.count_nonzero(shifted & retained)),
+            "orientationDecision": {
+                "objectiveForwardCellPairCount": objective_forward_cell_pair_count,
+                "objectiveReverseCellPairCount": objective_reverse_cell_pair_count,
+                "geometryTieCellPairCount": geometry_tie_cell_pair_count,
+                "deferredAlternativeLinkCount": deferred_orientation_alternative_count,
+            },
             "pairwiseOrderCrossingCount": monotone_crossings,
             "retainedEdgeResidualVoxels": _quantiles(metrics[retained, 1] if len(metrics) else np.empty(0)),
             "retainedFiberAngleDeg": _quantiles(metrics[retained, 2] if len(metrics) else np.empty(0)),
             "retainedNormalBendDeg": _quantiles(metrics[retained, 3] if len(metrics) else np.empty(0)),
-            "normalSignSynchronization": sign_stats,
+            "paritySynchronization": parity_stats,
             "branchCount": len(linked_component_sizes),
             "linkedFlakeCount": int(np.count_nonzero(linked)),
             "largestBranchSize": int(np.max(linked_component_sizes, initial=0)),
@@ -679,8 +825,7 @@ def prototype_monotone_layers(
                 "currentLinksRetainedByWindowCollisionAudit": int(
                     np.count_nonzero(current_retained_again)
                 ),
-                "currentOrdinalShiftLinkCount": int(np.count_nonzero(current_shifted)),
-                "currentPairwiseOrderCrossingCount": current_crossings,
+                "currentMinimumAxialPairwiseOrderCrossingCount": current_crossings,
                 "currentBranchCount": len(current_linked_component_sizes),
                 "currentLargestBranchSize": int(
                     np.max(current_linked_component_sizes, initial=0)

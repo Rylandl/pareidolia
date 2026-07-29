@@ -64,7 +64,12 @@ from backend.slab_material_intervals import (
     _annotate_profile,
     _smoothed_material_mask,
 )
-from backend.slab_monotone_layers import _box_sums, _monotone_partial_match
+from backend.slab_monotone_layers import (
+    _axial_monotone_match,
+    _box_sums,
+    _monotone_partial_match,
+    _parity_consistent_links,
+)
 from backend.slab_branch_association import (
     CANDIDATE_DTYPE,
     DECISION_EXACT_GROUP_PRUNED,
@@ -84,6 +89,14 @@ from backend.slab_window_reconciliation import (
     _cell_regions,
     _partition_overlap_stats,
 )
+from backend.slab_window_scheduler import (
+    _aggregate_pairs,
+    _axis_origins,
+    _integrity_path,
+    _integrity_quarantine_mask,
+    _neighbor_pairs,
+    _window_components,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -94,6 +107,108 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_window_scheduler_end_aligns_axis_coverage(self) -> None:
+        origins = _axis_origins(242, 32, 24)
+        self.assertEqual(origins, [0, 24, 48, 72, 96, 120, 144, 168, 192, 210])
+        covered = np.zeros(242, dtype=bool)
+        for origin in origins:
+            covered[origin : origin + 32] = True
+        self.assertTrue(np.all(covered))
+
+    def test_window_scheduler_only_reconciles_face_neighbors(self) -> None:
+        windows = [
+            {
+                "originCellXYZ": origin,
+                "stopCellXYZExclusive": [value + 32 for value in origin],
+            }
+            for origin in ([0, 0, 0], [24, 0, 0], [0, 24, 0], [24, 24, 0])
+        ]
+        pairs = _neighbor_pairs(windows)
+        self.assertEqual(len(pairs), 4)
+        self.assertNotIn(([0, 0, 0], [24, 24, 0]), pairs)
+
+    def test_window_scheduler_defers_nonunanimous_overlap_pairs(self) -> None:
+        node_identity = np.asarray([10, 20, 30], dtype=np.uint64)
+        node_window_mask = np.asarray([3, 3, 1], dtype=np.uint64)
+        pairs = _aggregate_pairs(
+            [
+                np.asarray([[10, 20], [10, 30]], dtype=np.uint64),
+                np.empty((0, 2), dtype=np.uint64),
+            ],
+            node_identity,
+            node_window_mask,
+        )
+        np.testing.assert_array_equal(pairs["observationCount"], [2, 1])
+        np.testing.assert_array_equal(pairs["acceptanceCount"], [1, 1])
+        np.testing.assert_array_equal(pairs["unanimous"], [False, True])
+        np.testing.assert_array_equal(pairs["overlapValidated"], [True, False])
+
+    def test_window_scheduler_defers_relative_parity_disagreement(self) -> None:
+        pairs = _aggregate_pairs(
+            [
+                np.asarray([[10, 20]], dtype=np.uint64),
+                np.asarray([[10, 20]], dtype=np.uint64),
+            ],
+            np.asarray([10, 20], dtype=np.uint64),
+            np.asarray([3, 3], dtype=np.uint64),
+            [
+                np.asarray([1], dtype=np.int8),
+                np.asarray([-1], dtype=np.int8),
+            ],
+        )
+        np.testing.assert_array_equal(pairs["consensusParity"], [0])
+        np.testing.assert_array_equal(pairs["parityUnanimous"], [False])
+
+    def test_window_scheduler_quarantines_intersecting_association_joins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = [24, 48, 0]
+            np.savez_compressed(
+                _integrity_path(root, origin),
+                associationSource=np.asarray([7], dtype=np.uint32),
+                associationTarget=np.asarray([9], dtype=np.uint32),
+                intersectingTrianglePairCount=np.asarray([3], dtype=np.uint32),
+                evidenceCoreIntersectingTrianglePairCount=np.asarray(
+                    [1], dtype=np.uint32
+                ),
+            )
+            quarantine, stats = _integrity_quarantine_mask(
+                root,
+                origin,
+                {"component": np.asarray([0, 1, 2, 3], dtype=np.uint32)},
+                {
+                    "candidateNodeSource": np.asarray([0, 2], dtype=np.uint32),
+                    "candidateNodeTarget": np.asarray([1, 3], dtype=np.uint32),
+                    "branchAssociation": np.asarray([7, 7, 8, 8], dtype=np.uint32),
+                },
+                np.asarray([True, True]),
+            )
+        np.testing.assert_array_equal(quarantine, [True, False])
+        self.assertEqual(stats["violatingAssociationCount"], 2)
+        self.assertEqual(stats["evidenceCoreViolatingAssociationCount"], 2)
+        self.assertEqual(stats["quarantinedJoinCount"], 1)
+
+    def test_window_scheduler_connects_reconciled_windows(self) -> None:
+        windows = [
+            {"originCellXYZ": [0, 0, 0]},
+            {"originCellXYZ": [24, 0, 0]},
+            {"originCellXYZ": [48, 0, 0]},
+        ]
+        reconciliations = [
+            {
+                "sourceWindow": {"originCellXYZ": [0, 0, 0]},
+                "targetWindow": {"originCellXYZ": [24, 0, 0]},
+                "stats": {"sharedNodeCount": 100},
+            },
+            {
+                "sourceWindow": {"originCellXYZ": [24, 0, 0]},
+                "targetWindow": {"originCellXYZ": [48, 0, 0]},
+                "stats": {"sharedNodeCount": 80},
+            },
+        ]
+        component = _window_components(windows, reconciliations)
+        np.testing.assert_array_equal(component, [0, 0, 0])
+
     def test_material_mask_closes_only_the_declared_air_gap(self) -> None:
         intensity = np.asarray([0, 20, 0, 20, 0, 0], dtype=np.uint8)
         material = _smoothed_material_mask(
@@ -165,6 +280,50 @@ class RectifierTests(unittest.TestCase):
             [0, 1, 2], [10, 11], compatibility, 0.60, 0.02
         )
         self.assertEqual(matched, [(1, 10), (2, 11)])
+
+    def test_axial_monotone_match_is_invariant_to_depth_axis_flip(self) -> None:
+        compatibility = {
+            (0, 10): (0.9,),
+            (0, 11): (0.65,),
+            (1, 10): (0.65,),
+            (1, 11): (0.9,),
+        }
+        original = _axial_monotone_match(
+            [0, 1], [10, 11], compatibility, 0.6, 0.02, 1
+        )
+        flipped = _axial_monotone_match(
+            [0, 1], [11, 10], compatibility, 0.6, 0.02, -1
+        )
+        self.assertEqual(original["matches"], [(0, 10), (1, 11)])
+        self.assertEqual(flipped["matches"], original["matches"])
+        self.assertEqual(original["relativeParity"], 1)
+        self.assertEqual(flipped["relativeParity"], -1)
+
+    def test_axial_monotone_tie_defers_orientation_specific_links(self) -> None:
+        compatibility = {
+            (0, 10): (0.9,),
+            (0, 11): (0.9,),
+        }
+        matched = _axial_monotone_match(
+            [0], [10, 11], compatibility, 0.6, 0.02, 1
+        )
+        self.assertEqual(matched["decision"], "geometry-tie")
+        self.assertEqual(matched["matches"], [])
+        self.assertEqual(matched["deferredAlternativeLinkCount"], 2)
+
+    def test_parity_cycle_rejects_weakest_inconsistent_link(self) -> None:
+        retained, node_parity, frustrated, stats = _parity_consistent_links(
+            3,
+            np.asarray([0, 1, 0], dtype=np.uint32),
+            np.asarray([1, 2, 2], dtype=np.uint32),
+            np.asarray([1, 1, -1], dtype=np.int8),
+            np.asarray([0.9, 0.8, 0.7], dtype=np.float32),
+            np.ones(3, dtype=bool),
+        )
+        np.testing.assert_array_equal(retained, [True, True, False])
+        np.testing.assert_array_equal(frustrated, [False, False, True])
+        np.testing.assert_array_equal(node_parity, [1, 1, 1])
+        self.assertEqual(stats["frustratedCycleLinkCount"], 1)
 
     def test_dense_window_box_sum_uses_exact_extents(self) -> None:
         values = np.zeros((2, 4, 5), dtype=np.uint8)
