@@ -13,6 +13,18 @@ from .block import (
     assemble_surface_block,
     merge_surface_blocks,
 )
+from .contracts import (
+    ExtractionTileSpec,
+    RawAcusSettings,
+    ReconstructionWindow,
+    ShardSpec,
+    VolumeSource,
+    VoxelBounds,
+    extraction_tiles_for_shard,
+    plan_extraction_tiles,
+    plan_shards,
+)
+from .evidence import CellEvidenceTable
 from .geometry import (
     ClippedPatch,
     DegeneratePlaneIntersection,
@@ -30,6 +42,10 @@ from .matching import (
     align_face_patches,
     match_face_traces,
 )
+from .pipeline import run_raw_acus_pipeline
+from .raw_acus import AcusCalibration, NeedleTable
+from .selection import ConfigurationSelection, optimize_configurations
+from .stratigraphy import ConfigurationTable
 from .topology import GridEdge, GridFace, GridSpec
 from .synthetic import SyntheticScene, SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, read_patch_shard, write_patch_shard
@@ -40,14 +56,25 @@ __all__ = [
     "DeferredJoin",
     "EdgeCrossing",
     "EndpointAgreement",
+    "ExtractionTileSpec",
     "FaceTrace",
     "GridEdge",
     "GridFace",
     "GridSpec",
     "BlockBounds",
+    "AcusCalibration",
     "AcusAdapterSettings",
     "AcusWindowScene",
     "PlaneEstimate",
+    "RawAcusSettings",
+    "ReconstructionWindow",
+    "ShardSpec",
+    "VolumeSource",
+    "VoxelBounds",
+    "NeedleTable",
+    "CellEvidenceTable",
+    "ConfigurationTable",
+    "ConfigurationSelection",
     "FaceAlignment",
     "TraceMatch",
     "TraceMatchSettings",
@@ -64,6 +91,11 @@ __all__ = [
     "match_face_traces",
     "load_acus_flake_window",
     "merge_surface_blocks",
+    "optimize_configurations",
+    "extraction_tiles_for_shard",
+    "plan_extraction_tiles",
+    "plan_shards",
     "read_patch_shard",
     "write_patch_shard",
+    "run_raw_acus_pipeline",
 ]

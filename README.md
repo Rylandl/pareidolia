@@ -52,8 +52,31 @@ The analytic smoke test is reproducible with:
 python3 -m backend.cubical synthetic --verify-direct
 ```
 
-The current real-data plumbing check adapts persisted Acus modes only as plane
-evidence proxies; it does **not** call them physical layers:
+The native-CT path now runs Acus itself and does not consume the persisted
+needle, flake, graph, or component caches:
+
+```bash
+python3 -m backend.cubical full-acus \
+  --compute gpu \
+  --voxel-origin 3520 2784 160 \
+  --shape 8 8 6 \
+  --shard-shape 4 4 3 \
+  --output /mnt/t5/pareidolia/raw-acus-8x8x6-v1
+```
+
+It retains full normal-by-depth-by-unsigned-orientation evidence and native CT
+profiles, constructs top-M physically constrained layer-count alternatives,
+selects configurations using shared-face agreement, and only then performs
+topology-safe hierarchical surface assembly. The first fresh 384-cell GPU
+pilot completes in 30.5 seconds, selects 1,247 patches, retains 1,284 joins,
+and has a largest current component of 71 patches. Its complete contract,
+artifacts, exact shard-invariance result, measured storage, and scaling
+boundary are documented in
+[`docs/raw-acus-cubical-pipeline.md`](docs/raw-acus-cubical-pipeline.md).
+
+The earlier real-data plumbing check remains available as a historical geometry
+comparison. It adapts persisted Acus modes only as plane evidence proxies and
+does **not** call them physical layers:
 
 ```bash
 python3 -m backend.cubical acus-window \
@@ -67,9 +90,7 @@ mesh/projection export in 17 seconds. It retains 7,727 joins, defers 520 joins
 that would cause a same-cell layer collision and 98 with an inconsistent
 crossing topology, and leaves 1,827 components. This is deliberately a baseline
 showing why the inherited three-mode local representation is insufficient. The
-next evidence adapter will retain local depth/orientation distributions and
-competing layer-count configurations before shared-face optimization. The full
-geometry and artifact contract is documented in
+full geometry and artifact contract is documented in
 [`docs/cubical-surfaces.md`](docs/cubical-surfaces.md).
 
 ## Current pilot

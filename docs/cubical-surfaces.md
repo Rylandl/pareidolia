@@ -74,9 +74,10 @@ ancestor block summaries.
 
 ## Processing stages
 
-1. An evidence adapter proposes several local stratigraphic configurations per
-   cell. The first Acus adapter will use needle depth/orientation and native CT;
-   synthetic generators exercise the same interface.
+1. The raw Acus adapter derives finite-support needles directly from native CT,
+   retains normal-by-depth-by-unsigned-orientation likelihoods and CT material
+   profiles, and proposes several physical stratigraphic configurations per
+   cell. Synthetic generators exercise the same downstream interface.
 2. Plane hypotheses are clipped into cell patches and invalid geometry is
    rejected deterministically.
 3. Shared-face trace sequences are aligned with uncertainty-normalized costs.
@@ -87,5 +88,6 @@ ancestor block summaries.
 7. Papyrus-specific sheet packets add thickness, paired-ply, fiber, and air-gap
    factors without changing the geometric representation.
 
-The initial implementation deliberately validates stages 2--5 on analytic
-surfaces before introducing CT-specific thresholds.
+The geometry stages are validated independently on analytic surfaces. The
+native-CT implementation and its measured pilot are documented in
+[`raw-acus-cubical-pipeline.md`](raw-acus-cubical-pipeline.md).

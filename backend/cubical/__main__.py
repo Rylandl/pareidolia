@@ -10,7 +10,9 @@ import numpy as np
 
 from .acus_adapter import AcusAdapterSettings, load_acus_flake_window
 from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarchy
+from .contracts import RawAcusSettings, ReconstructionWindow
 from .export import write_block_obj, write_block_projection_png
+from .pipeline import run_raw_acus_pipeline
 from .synthetic import SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, write_patch_shard
 from .topology import GridSpec
@@ -291,6 +293,31 @@ def _acus_window(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _full_acus(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    settings = RawAcusSettings(**settings_values)
+    summary = run_raw_acus_pipeline(
+        args.source,
+        args.output,
+        ReconstructionWindow(tuple(args.voxel_origin), tuple(args.shape)),
+        metadata_path=args.metadata,
+        settings=settings,
+        shard_shape_cells_xyz=tuple(args.shard_shape),
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        compute=args.compute,
+        force=args.force,
+        maximum_preview_components=args.maximum_preview_components,
+        local_only=args.local_only,
+        only_shard_ids=args.only_shard,
+        limit_shards=args.limit_shards,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Dataset-independent cubical surface reconstruction tools."
@@ -334,6 +361,77 @@ def main() -> None:
     )
     acus.add_argument("--compressed", action="store_true")
     acus.set_defaults(handler=_acus_window)
+    full_acus = subparsers.add_parser(
+        "full-acus",
+        description=(
+            "Run the cubical pipeline from native CT voxels. This command does "
+            "not consume legacy needle, flake, graph, or component artifacts."
+        ),
+    )
+    full_acus.add_argument(
+        "--source",
+        type=Path,
+        default=Path(
+            "/mnt/t5/acus-cross-scroll/"
+            "pherc0358-z7168-d512-yfull-xfull.npy"
+        ),
+    )
+    full_acus.add_argument("--metadata", type=Path)
+    full_acus.add_argument(
+        "--voxel-origin",
+        nargs=3,
+        type=int,
+        default=(3520, 2784, 160),
+        metavar=("X", "Y", "Z"),
+        help="source-local voxel coordinate of the first cubical cell corner",
+    )
+    full_acus.add_argument(
+        "--shape",
+        nargs=3,
+        type=int,
+        default=(8, 8, 6),
+        metavar=("X", "Y", "Z"),
+        help="number of owned cubical cells",
+    )
+    full_acus.add_argument(
+        "--shard-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    full_acus.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    full_acus.add_argument(
+        "--compute", choices=("auto", "gpu", "cpu"), default="auto"
+    )
+    full_acus.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional RawAcusSettings keyword object for reproducible experiments",
+    )
+    full_acus.add_argument(
+        "--output", type=Path, default=Path("work/raw-acus-cubical-v1")
+    )
+    full_acus.add_argument("--maximum-preview-components", type=int, default=128)
+    full_acus.add_argument(
+        "--local-only",
+        action="store_true",
+        help="bake resumable raw evidence and stratigraphies without global selection",
+    )
+    full_acus.add_argument(
+        "--only-shard",
+        action="append",
+        help="process one planned shard id (repeatable); implies local-only behavior",
+    )
+    full_acus.add_argument(
+        "--limit-shards",
+        type=int,
+        help="process at most this many incomplete local shards in this invocation",
+    )
+    full_acus.add_argument(
+        "--force",
+        action="store_true",
+        help="rebake this pipeline's own matching artifacts from native CT",
+    )
+    full_acus.set_defaults(handler=_full_acus)
     args = parser.parse_args()
     args.handler(args)
 

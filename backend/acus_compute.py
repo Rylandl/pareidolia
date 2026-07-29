@@ -255,6 +255,81 @@ def _trilinear_gpu(array: Any, xyz: Any) -> Any:
     return cp.where(valid, values, 0.0).reshape(shape)
 
 
+def _largest_symmetric_eigenpair_gpu(matrices: Any) -> tuple[Any, Any, Any]:
+    """Analytic eigenvalues and largest eigenvector for batched symmetric 3x3s.
+
+    This deliberately avoids cuSOLVER. Besides its large workspace, loading
+    cuSOLVER pulls in a tightly version-coupled cuSPARSE/nvJitLink stack that
+    is unnecessary for these tiny covariance matrices.
+    """
+
+    xx = matrices[..., 0, 0]
+    xy = matrices[..., 0, 1]
+    xz = matrices[..., 0, 2]
+    yy = matrices[..., 1, 1]
+    yz = matrices[..., 1, 2]
+    zz = matrices[..., 2, 2]
+    trace_third = (xx + yy + zz) / 3.0
+    axx = xx - trace_third
+    ayy = yy - trace_third
+    azz = zz - trace_third
+    p = cp.sqrt(
+        cp.maximum(
+            (
+                axx * axx
+                + ayy * ayy
+                + azz * azz
+                + 2.0 * (xy * xy + xz * xz + yz * yz)
+            )
+            / 6.0,
+            0.0,
+        )
+    )
+    p_safe = cp.maximum(p, 1.0e-12)
+    determinant = (
+        axx * (ayy * azz - yz * yz)
+        - xy * (xy * azz - yz * xz)
+        + xz * (xy * yz - ayy * xz)
+    )
+    phase = cp.arccos(cp.clip(determinant / (2.0 * p_safe**3), -1.0, 1.0)) / 3.0
+    largest = trace_third + 2.0 * p * cp.cos(phase)
+    smallest = trace_third + 2.0 * p * cp.cos(phase + 2.0 * math.pi / 3.0)
+    middle = 3.0 * trace_third - smallest - largest
+    eigenvalues = cp.sort(cp.stack([smallest, middle, largest], axis=-1), axis=-1)
+    selected = eigenvalues[..., 2]
+
+    r0x, r0y, r0z = xx - selected, xy, xz
+    r1x, r1y, r1z = xy, yy - selected, yz
+    r2x, r2y, r2z = xz, yz, zz - selected
+    cross01 = cp.stack(
+        [r0y * r1z - r0z * r1y, r0z * r1x - r0x * r1z, r0x * r1y - r0y * r1x],
+        axis=-1,
+    )
+    cross02 = cp.stack(
+        [r0y * r2z - r0z * r2y, r0z * r2x - r0x * r2z, r0x * r2y - r0y * r2x],
+        axis=-1,
+    )
+    cross12 = cp.stack(
+        [r1y * r2z - r1z * r2y, r1z * r2x - r1x * r2z, r1x * r2y - r1y * r2x],
+        axis=-1,
+    )
+    candidates = cp.stack([cross01, cross02, cross12], axis=-2)
+    norm2 = cp.sum(candidates * candidates, axis=-1)
+    best = cp.argmax(norm2, axis=-1)
+    direction = cp.take_along_axis(
+        candidates, best[..., None, None], axis=-2
+    )[..., 0, :]
+    norm = cp.sqrt(cp.sum(direction * direction, axis=-1, keepdims=True))
+    fallback = cp.zeros_like(direction)
+    fallback[..., 0] = 1.0
+    direction = cp.where(
+        norm > 1.0e-12,
+        direction / cp.maximum(norm, 1.0e-12),
+        fallback,
+    )
+    return eigenvalues.astype(cp.float32), direction.astype(cp.float32), norm[..., 0]
+
+
 def _gpu_block_candidates(
     score: Any,
     core_local_zyx: tuple[int, int, int, int, int, int],
@@ -285,7 +360,8 @@ def _gpu_block_candidates(
         .transpose(0, 2, 4, 1, 3, 5)
         .reshape(*block_shape, spacing**3)
     )
-    flat = cp.argmax(blocks, axis=-1)
+    ranking_blocks = cp.rint(blocks * 10_000.0)
+    flat = cp.argmax(ranking_blocks, axis=-1)
     values = cp.take_along_axis(blocks, flat[..., None], axis=-1)[..., 0]
     dz = flat // (spacing * spacing)
     dy = (flat // spacing) % spacing
@@ -324,13 +400,32 @@ def _gpu_block_candidates(
     ).astype(cp.int64)
     if not int(values.size):
         return values, local_points, bin_ids
-    order = cp.lexsort((-values, bin_ids))
+    # Quantized response plus explicit spatial tie keys makes the retained
+    # per-bin set invariant to harmless kernel-roundoff changes caused by a
+    # differently sized containing shard. CuPy requires one stacked key array.
+    ordering_response = cp.rint(values * 10_000.0)
+    order = cp.lexsort(
+        cp.stack(
+            (
+                global_points[:, 2],
+                global_points[:, 1],
+                global_points[:, 0],
+                -ordering_response,
+                bin_ids,
+            ),
+            axis=0,
+        )
+    )
     ordered_bins = bin_ids[order]
     group_start = cp.concatenate(
         [cp.ones(1, dtype=cp.bool_), ordered_bins[1:] != ordered_bins[:-1]]
     )
     positions = cp.arange(len(order), dtype=cp.int64)
-    starts = cp.maximum.accumulate(cp.where(group_start, positions, 0))
+    # CuPy 14 does not implement ``maximum.accumulate``. Indexing the compact
+    # group-start array by cumulative group id yields the same within-bin rank
+    # entirely on device.
+    group_ids = cp.cumsum(group_start, dtype=cp.int64) - 1
+    starts = cp.flatnonzero(group_start)[group_ids]
     selected = order[(positions - starts) < maximum_per_bin]
     return values[selected], local_points[selected], bin_ids[selected]
 
@@ -376,8 +471,7 @@ def _gpu_refine_needles(
     covariance = cp.matmul(
         cp.transpose(centered * weights[:, :, None], (0, 2, 1)), centered
     ) / safe_weight[:, None, None]
-    eigenvalues, eigenvectors = cp.linalg.eigh(covariance)
-    direction = eigenvectors[:, :, 2]
+    eigenvalues, direction, _ = _largest_symmetric_eigenpair_gpu(covariance)
     reference = direction_field[
         points_zyx[:, 0], points_zyx[:, 1], points_zyx[:, 2]
     ]
