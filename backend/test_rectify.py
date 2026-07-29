@@ -39,6 +39,10 @@ from backend.slab_carrier_bridges import (
     _bridge_endpoint_scores,
     _ct_bridge_evidence,
 )
+from backend.slab_carrier_gaps import (
+    _axial_angle_difference,
+    _internal_gap_components,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     _macro_radial_fit,
@@ -48,6 +52,20 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_carrier_gap_components_exclude_open_boundaries(self) -> None:
+        mask = np.zeros((24, 28), dtype=bool)
+        mask[2:22, 3:25] = True
+        mask[8:14, 10:18] = False
+        mask[2:12, 20:25] = False
+        gaps = _internal_gap_components(
+            mask, pixel_step=2.0, minimum_area_square_voxels=32.0
+        )
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0]["pixelCount"], 48)
+        self.assertEqual(gaps[0]["areaSquareVoxels"], 192.0)
+        self.assertEqual(gaps[0]["bboxYX"], [8, 14, 10, 18])
+        self.assertAlmostEqual(_axial_angle_difference(178.0, 2.0), 4.0)
+
     def test_vectorized_needle_refinement_matches_scalar_path(self) -> None:
         z, y, _ = np.indices((32, 32, 32), dtype=np.float32)
         score = (

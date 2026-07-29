@@ -184,6 +184,23 @@ silently using synthetic padding.
   as provisional CT-only continuations. The largest exact joined carrier has
   965 flakes with 2.069-voxel median height residual and 4.446° median normal
   residual.
+- `python3 scripts/fill-sheetlet-gaps.py --root
+  work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
+  the final carriers. It projects every flake hypothesis into each flattened
+  hole, applies the existing height, normal, fiber, score-margin, ownership,
+  and one-flake-per-cell rules, and separately samples CT texture along an
+  expanded carrier without treating that texture as permission to fill. The
+  first run accepts only three unclaimed flakes, all in rank 3's 9,860-square-
+  voxel enclosed gap. They make 665 of 1,812 gap pixels newly supported while
+  changing exact median carrier residual only from 1.622 to 1.635 voxels and
+  normal residual from 3.784° to 3.791°. Rank 2 contains four compatible gap
+  flakes, but all are owned by other carriers and remain untouched. Other
+  holes frequently peak 5–6 voxels off the predicted surface or carry a nearly
+  orthogonal fiber family. Ranks 11 and 12 instead have near-depth,
+  direction-matched CT texture but no compatible flake hypothesis, making them
+  focused candidates for denser local Acus re-analysis rather than permissive
+  CT-only filling. Gap maps and exact previews are stored under
+  `work/cross-scroll-analysis-z512/sheetlet-gaps-v1`.
 
 The included bounded Zarr importer reads raw, uncompressed Zarr v2 chunks into
 a local `.npy` cuboid. Whole-scroll multiscale navigation and demand-loaded
