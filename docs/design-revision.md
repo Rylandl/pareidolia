@@ -317,6 +317,51 @@ fifty-two of the 153 retained joins have both endpoints in contested material,
 so the result remains geometry-conditioned gap closure rather than independent
 evidence for a physical sheet.
 
+## Fragment-termination census and targeted Acus queue
+
+The next stage diagnoses why substantial v6 fragments stop before changing any
+association rule. The census is deliberately restricted to degree-one nodes in
+the global monotone graph whose final association contains at least 25 flakes.
+It reconciles all 47,981 local candidate occurrences with the novel global
+boundary candidates and the final complete-branch decisions. The category on a
+termination records the furthest stage reached by current evidence: no
+compatible candidate, weak geometry, material deferral, local-order failure,
+overlap instability, exact geometry failure, collision, integrity quarantine,
+or an accepted continuation. This is a pipeline diagnosis, not a claim that a
+termination is a physical papyrus edge.
+
+There are 32,112 definite ends in scope. Only 319 are endpoints of a continuation
+already accepted by v6, leaving 31,793 unresolved. Of these, 31,374 have a
+stable outward tangent. Grouping adjacent cells only within one final
+association and only when outward tangents have cosine at least 0.50 produces
+26,078 termination regions; 419 ends without a usable tangent remain in the
+endpoint artifact but are not assigned a spatial target. The cluster-level
+breakdown is:
+
+- 13,294 with no compatible candidate, 10,954 with only weak geometry, and two
+  with unresolved overlap support;
+- 1,471 order-ambiguous and 131 order-blocked;
+- 97 rejected by complete-branch geometry, five by collision, and six by the
+  integrity quarantine; and
+- 118 deferred by the material model.
+
+The follow-up queue projects each evidence-poor region 32 voxels along its
+outward tangent and samples a 32-cubed CT neighborhood. Among the 512
+highest-priority samples, 507 are nontruncated and exceed the deliberately loose
+0.35 material-fraction gate; their median material fraction is 0.9998. A cap of
+two targets per association then selects 128 targets across 68 associations.
+Every selected target is in the weak-geometry class: these have an observed
+nearby continuation that failed the present geometric path and are therefore a
+higher-yield dense-Acus experiment than order or integrity failures. The latter
+remain separate ranked review queues rather than being silently converted into
+reanalysis requests.
+
+The initial cold census takes 32.2 seconds and a forced rerun with the filesystem
+cache warm takes 6.9 seconds. Exact endpoint classifications, cluster geometry,
+target coordinates, CT metrics, priorities, and queue membership are stored in
+`fragment-termination-census-v1.npz`; the compact contract, counts, and ranked
+queues are in `fragment-termination-census-v1.json`.
+
 This remains a deliberately narrow region-wide construction result, not a sheet
 census. Unassociated global branches are outside the carrier-intersection audit,
 and no provenance tier is relabeled as independent replication. Output
@@ -376,6 +421,9 @@ physical papyrus layers.
 
 .venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512 --clean-only
+
+.venv/bin/python scripts/census-fragment-terminations.py \
+  --root work/cross-scroll-analysis-z512
 ```
 
 The large NumPy products remain ignored under `work/`. Their summaries contain

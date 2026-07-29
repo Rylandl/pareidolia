@@ -354,6 +354,23 @@ silently using synthetic padding.
   Because 152 of the 153 retained joins have both endpoints in contested
   material, this remains geometry-conditioned gap closure rather than
   independent physical-sheet evidence.
+- `python3 scripts/census-fragment-terminations.py --root
+  work/cross-scroll-analysis-z512` turns the final v6 catalog into a bounded
+  follow-up queue instead of adding another speculative association tier. It
+  reconciles every local-window, global-boundary, and complete-branch decision
+  at the 32,112 definite degree-one ends of associations with at least 25
+  flakes. Of 31,793 unresolved ends, 31,374 have a usable outward tangent and
+  form 26,078 same-association, direction-consistent termination regions; 419
+  remain explicitly unclustered. The regions split into 24,250 that never
+  reach an accepted geometric continuation, 1,602 order failures, 108
+  downstream geometry/collision/integrity failures, and 118 material deferrals.
+  Sampling the 512 highest-priority evidence-poor targets finds 507 in dense,
+  nontruncated CT. The capped queue selects 128 weak-geometry targets across 68
+  associations, at most two per association; order and downstream failures are
+  kept in separate review queues. The initial cold run takes 32.2 seconds and a
+  forced warm-cache rerun 6.9 seconds; both write
+  `fragment-termination-census-v1`. Absence of a candidate is not interpreted
+  as a physical sheet edge.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

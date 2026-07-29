@@ -72,8 +72,10 @@ from backend.slab_monotone_layers import (
 )
 from backend.slab_branch_association import (
     CANDIDATE_DTYPE,
+    DECISION_BELOW_THRESHOLD,
     DECISION_EXACT_GROUP_PRUNED,
     DECISION_EXACT_PAIR_DEFERRED as LOCAL_DECISION_EXACT_PAIR_DEFERRED,
+    DECISION_ORDER_AMBIGUOUS,
     DECISION_ORDER_BLOCKED,
     DECISION_RETAINED,
     DEFAULT_SETTINGS,
@@ -105,6 +107,7 @@ from backend.slab_global_branch_association import (
     GRAPH_RETAINED,
     DECISION_EXACT_PAIR_DEFERRED,
     DECISION_INPUT_BRANCH_CARRIER_DEFERRED,
+    DECISION_RETAINED as GLOBAL_DECISION_RETAINED,
     PROVENANCE_DIRECTIONAL_BOUNDARY,
     PROVENANCE_CONTEXT_DISPUTED,
     PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY,
@@ -135,6 +138,15 @@ from backend.slab_global_boundary_candidates import (
     _score_boundary_pair_arrays,
     _stream_boundary_hits,
 )
+from backend.slab_fragment_termination_census import (
+    CATEGORY_CONTINUED as TERMINATION_CONTINUED,
+    CATEGORY_GEOMETRY_REJECTED as TERMINATION_GEOMETRY_REJECTED,
+    CATEGORY_ORDER_UNRESOLVED as TERMINATION_ORDER_UNRESOLVED,
+    CATEGORY_OVERLAP_UNRESOLVED as TERMINATION_OVERLAP_UNRESOLVED,
+    _cluster_termination_regions,
+    _global_candidate_category,
+    _local_candidate_category,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -145,6 +157,58 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_termination_evidence_preserves_failure_stage(self) -> None:
+        self.assertEqual(
+            _local_candidate_category(
+                DECISION_ORDER_AMBIGUOUS,
+                DECISION_BELOW_THRESHOLD,
+                False,
+            ),
+            TERMINATION_ORDER_UNRESOLVED,
+        )
+        self.assertEqual(
+            _local_candidate_category(
+                DECISION_RETAINED,
+                DECISION_BELOW_THRESHOLD,
+                False,
+            ),
+            TERMINATION_OVERLAP_UNRESOLVED,
+        )
+        self.assertEqual(
+            _global_candidate_category(DECISION_EXACT_PAIR_DEFERRED),
+            TERMINATION_GEOMETRY_REJECTED,
+        )
+        self.assertEqual(
+            _global_candidate_category(GLOBAL_DECISION_RETAINED),
+            TERMINATION_CONTINUED,
+        )
+
+    def test_termination_clusters_require_association_and_direction_agreement(
+        self,
+    ) -> None:
+        cluster = _cluster_termination_regions(
+            np.asarray([4, 4, 4, 5, 4]),
+            np.asarray(
+                [[0, 0, 0], [1, 0, 0], [1, 1, 0], [1, 0, 0], [2, 0, 0]]
+            ),
+            np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ]
+            ),
+            np.asarray([True, True, True, True, False]),
+            1,
+            0.5,
+        )
+        self.assertEqual(int(cluster[0]), int(cluster[1]))
+        self.assertNotEqual(int(cluster[1]), int(cluster[2]))
+        self.assertNotEqual(int(cluster[1]), int(cluster[3]))
+        self.assertEqual(int(cluster[4]), -1)
+
     def test_boundary_exposure_rejects_an_already_occupied_open_cone(self) -> None:
         usable, outward, concentration, neighbor_count, maximum_forward = (
             _boundary_outward(
