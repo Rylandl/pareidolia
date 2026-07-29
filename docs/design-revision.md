@@ -48,6 +48,10 @@ a graph component a physical papyrus sheet.
    - Pairwise-incoherent joins are deferred. If individually coherent joins make
      an incoherent transitive association, the weakest retained construction
      edge is removed until every output association passes the carrier gate.
+   - Explicit window origins produce separate, hash-identified artifacts.
+     Reconciliation uses stable source-flake identities in the geometric
+     overlap: raw matches, collision-pruned edges, and branch joins are compared
+     separately, and any one-window-only decision remains deferred.
    - A completeness prior applies only to flakes with a calibrated reliability
      estimate. Every solve retains an explicit outlier/unassigned state.
    - Secondary-normal fragments remain separate branches until the association
@@ -137,6 +141,27 @@ normals and fibers agree within 4.53 and 3.55 degrees, and their one shared cell
 preserves an 8.68-voxel depth order. It is therefore retained as an explicit
 ordered near-contact rather than treated as a crossing or an automatic merge.
 
+An adjacent-window pilot now exercises the chunk contract rather than merely
+stating it. The east 32 x 32 x 14-cell neighbor shares 10,602 flake hypotheses
+with the dense window. Every shared identity, relative normal sign, oriented
+depth, and all 12,957 raw non-crossing matches agree exactly. Collision-safe
+component pruning retains 12,570 edges in both windows but makes 40
+context-dependent choices (99.68% agreement); eight accepted branch-boundary
+joins agree and five are one-window-only. Those 45 decisions are recorded as
+deferred construction state rather than silently committed.
+
+The orthogonal overlap finds the important failure mode. Evidence identities
+still agree exactly, but 493 flake hypotheses in 170 cells receive a different
+relative sign after the best whole-overlap binary alignment. Nearly all belong
+to one connected 169-cell region spanning `x117–129`, `y100–105`, and the 14
+axial planes. Raw matches remain 99.76% consistent and retained edges 99.41%
+consistent, but the sign region, 31 raw edges, 72 collision-pruned edges, and
+five branch joins are explicitly deferred. A third centered window confirms
+that this is genuine sign-synchronization context dependence, not changing
+flake evidence or score drift. The overlap artifact stores stable node IDs,
+aligned-depth differences, exact edge disagreements, and connected cell bounds
+so a larger local re-solve can target only the ambiguous region.
+
 ## Reproducible commands
 
 ```bash
@@ -154,6 +179,18 @@ ordered near-contact rather than treated as a crossing or an automatic merge.
 
 .venv/bin/python scripts/audit-branch-association-integrity.py \
   --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/prototype-monotone-layers.py \
+  --root work/cross-scroll-analysis-z512 \
+  --window-origin-cell-xyz 141 74 0
+
+.venv/bin/python scripts/associate-monotone-branches.py \
+  --root work/cross-scroll-analysis-z512 \
+  --window-origin-cell-xyz 141 74 0
+
+.venv/bin/python scripts/reconcile-overlapping-windows.py \
+  --root work/cross-scroll-analysis-z512 \
+  --target-window-origin-cell-xyz 141 74 0
 ```
 
 The large NumPy products remain ignored under `work/`. Their summaries contain

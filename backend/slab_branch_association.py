@@ -15,7 +15,7 @@ from .slab_material_intervals import (
     LABEL_CONTESTED_MATERIAL,
     MATERIAL_INTERVAL_VERSION,
 )
-from .slab_monotone_layers import MONOTONE_LAYER_VERSION
+from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_sheetlet_carriers import build_mls_carrier
 from .slab_sheetlet_explore import score_flake_pair_groups
 
@@ -992,11 +992,14 @@ def associate_monotone_branches(
     output_root: str | Path,
     force: bool = False,
     settings: dict[str, Any] | None = None,
+    window_origin_cell_xyz: tuple[int, int, int] | list[int] | None = None,
 ) -> dict[str, Any]:
     root = Path(output_root)
     resolved = {**DEFAULT_SETTINGS, **(settings or {})}
-    monotone_summary_path = root / f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}.json"
-    monotone_path = root / f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}.npz"
+    suffix = window_artifact_suffix(window_origin_cell_xyz)
+    monotone_stem = f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}{suffix}"
+    monotone_summary_path = root / f"{monotone_stem}.json"
+    monotone_path = root / f"{monotone_stem}.npz"
     monotone_summary = json.loads(monotone_summary_path.read_text())
     input_paths = [
         monotone_path,
@@ -1010,13 +1013,17 @@ def associate_monotone_branches(
             monotone_summary["window"]["stopCellXYZExclusive"][2],
         )
     )
-    identity = {
+    identity: dict[str, Any] = {
         "version": BRANCH_ASSOCIATION_VERSION,
         "monotoneIdentity": monotone_summary["identity"],
         "settings": resolved,
         "inputArtifacts": [_content_identity(path) for path in input_paths],
     }
-    stem = f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}"
+    if window_origin_cell_xyz is not None:
+        identity["windowOriginCellXYZ"] = [
+            int(value) for value in window_origin_cell_xyz
+        ]
+    stem = f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}{suffix}"
     summary_path = root / f"{stem}.json"
     artifact_path = root / f"{stem}.npz"
     if summary_path.is_file() and artifact_path.is_file() and not force:

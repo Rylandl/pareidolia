@@ -268,6 +268,19 @@ silently using synthetic padding.
   a crossing or an automatic merge. Intersection coordinates, pair clearance,
   normal/fiber alignment, and shared-cell order remain available in
   `work/cross-scroll-analysis-z512/branch-association-integrity-v1`.
+- The monotone, branch-association, and integrity commands accept
+  `--window-origin-cell-xyz X Y Z`, producing coexistable, hash-identified
+  local artifacts. `python3 scripts/reconcile-overlapping-windows.py --root
+  work/cross-scroll-analysis-z512 --target-window-origin-cell-xyz 141 74 0`
+  compares the dense window with its overlapping east neighbor by stable flake
+  identity. All 10,602 shared flakes, signs, depths, and 12,957 raw monotone
+  matches agree exactly. Later collision pruning makes 40 context-dependent
+  edge choices (99.68% retained-edge agreement), while eight branch joins agree
+  and five remain deferred. The south overlap localizes a genuine relative-sign
+  ambiguity to 170 cells, 169 of them connected, while raw matches still agree
+  at 99.76%. Reconciliation artifacts preserve the ambiguous flake IDs, cell
+  regions, raw/retained edge differences, and one-window-only joins; none are
+  silently promoted to a cross-window association.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

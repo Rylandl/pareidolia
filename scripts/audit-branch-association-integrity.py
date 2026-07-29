@@ -20,6 +20,7 @@ def main() -> None:
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--window-origin-cell-xyz", type=int, nargs=3)
     parser.add_argument(
         "--maximum-evidence-core-distance-voxels", type=float, default=24.0
     )
@@ -49,6 +50,7 @@ def main() -> None:
             ),
             "clearanceSweepVoxels": clearance_sweep,
         },
+        window_origin_cell_xyz=args.window_origin_cell_xyz,
     )
     print(
         json.dumps(

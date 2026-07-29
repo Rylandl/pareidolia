@@ -80,6 +80,10 @@ from backend.slab_association_integrity import (
     _shared_cell_order,
     _triangle_intersection,
 )
+from backend.slab_window_reconciliation import (
+    _cell_regions,
+    _partition_overlap_stats,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -348,6 +352,29 @@ class RectifierTests(unittest.TestCase):
         self.assertEqual(order["negativeOrderCount"], 1)
         self.assertEqual(order["positiveOrderCount"], 1)
         self.assertTrue(order["orderInversion"])
+
+    def test_window_partition_reconciliation_counts_context_splits(self) -> None:
+        stats = _partition_overlap_stats(
+            np.asarray([0, 0, 1, 1], dtype=np.uint32),
+            np.asarray([0, 0, 0, 1], dtype=np.uint32),
+        )
+        self.assertEqual(stats["sourceCoassignedPairCount"], 2)
+        self.assertEqual(stats["targetCoassignedPairCount"], 3)
+        self.assertEqual(stats["jointCoassignedPairCount"], 1)
+        self.assertEqual(stats["coassignmentUnionPairCount"], 4)
+        self.assertEqual(stats["coassignmentDisagreementPairCount"], 3)
+        self.assertEqual(stats["sourceSplitGroupCount"], 1)
+        self.assertEqual(stats["targetSplitGroupCount"], 1)
+        self.assertEqual(stats["nodeCountInContextSplit"], 4)
+
+        regions = _cell_regions(
+            np.asarray(
+                [[0, 0, 0], [1, 0, 0], [4, 3, 2]], dtype=np.int32
+            )
+        )
+        self.assertEqual([value["cellCount"] for value in regions], [2, 1])
+        self.assertEqual(regions[0]["originCellXYZ"], [0, 0, 0])
+        self.assertEqual(regions[0]["stopCellXYZExclusive"], [2, 1, 1])
 
     def test_secondary_normal_family_is_standalone_partitioned_and_spatial(self) -> None:
         rng = np.random.default_rng(7)

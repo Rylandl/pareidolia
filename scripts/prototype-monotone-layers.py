@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--window-cells-xyz", type=int, nargs=3, default=[32, 32, 14])
+    parser.add_argument("--window-origin-cell-xyz", type=int, nargs=3)
     parser.add_argument("--minimum-link-score", type=float, default=0.60)
     parser.add_argument("--gap-penalty", type=float, default=0.02)
     args = parser.parse_args()
@@ -32,6 +33,7 @@ def main() -> None:
             "minimumLinkScore": args.minimum_link_score,
             "gapPenalty": args.gap_penalty,
         },
+        window_origin_cell_xyz=args.window_origin_cell_xyz,
     )
     print(
         json.dumps(

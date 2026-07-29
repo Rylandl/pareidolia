@@ -32,6 +32,7 @@ def main() -> None:
         default=[0.25, 0.35, 0.45, 0.55],
     )
     parser.add_argument("--subwindow-cells-xy", type=int, nargs=2, default=[24, 24])
+    parser.add_argument("--window-origin-cell-xyz", type=int, nargs=3)
     parser.add_argument(
         "--maximum-exact-median-height-residual-voxels",
         type=float,
@@ -58,6 +59,7 @@ def main() -> None:
                 args.maximum_exact_median_normal_residual_deg
             ),
         },
+        window_origin_cell_xyz=args.window_origin_cell_xyz,
     )
     print(
         json.dumps(

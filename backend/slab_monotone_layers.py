@@ -104,6 +104,39 @@ def _densest_window(
     }
 
 
+def window_artifact_suffix(
+    origin_cell_xyz: tuple[int, int, int] | list[int] | None,
+) -> str:
+    if origin_cell_xyz is None:
+        return ""
+    x_index, y_index, z_index = (int(value) for value in origin_cell_xyz)
+    return f"-x{x_index}-y{y_index}-z{z_index}"
+
+
+def _explicit_window(
+    profiles: np.ndarray,
+    grid_shape_zyx: tuple[int, int, int],
+    window_shape_xyz: tuple[int, int, int],
+    origin_cell_xyz: tuple[int, int, int],
+) -> dict[str, Any]:
+    origin = np.asarray(origin_cell_xyz, dtype=np.int32)
+    shape = np.asarray(window_shape_xyz, dtype=np.int32)
+    grid_shape_xyz = np.asarray(grid_shape_zyx[::-1], dtype=np.int32)
+    if np.any(shape <= 0) or np.any(origin < 0) or np.any(origin + shape > grid_shape_xyz):
+        raise ValueError("explicit window lies outside the flake-count grid")
+    stop = origin + shape
+    primary = profiles["normalFamily"] == 0
+    cell = np.asarray(profiles["cellIndex"], dtype=np.int32)
+    inside = primary & np.all((cell >= origin) & (cell < stop), axis=1)
+    return {
+        "originCellXYZ": origin.astype(int).tolist(),
+        "stopCellXYZExclusive": stop.astype(int).tolist(),
+        "shapeCellsXYZ": shape.astype(int).tolist(),
+        "primaryFlakeClaimCount": int(np.sum(profiles["claimCount"][inside])),
+        "selection": "explicit axis-aligned cell window",
+    }
+
+
 def _load_window_flakes(
     root: Path,
     window: dict[str, Any],
@@ -439,6 +472,7 @@ def prototype_monotone_layers(
     output_root: str | Path,
     force: bool = False,
     settings: dict[str, Any] | None = None,
+    window_origin_cell_xyz: tuple[int, int, int] | list[int] | None = None,
 ) -> dict[str, Any]:
     root = Path(output_root)
     resolved = {**DEFAULT_SETTINGS, **(settings or {})}
@@ -457,14 +491,19 @@ def prototype_monotone_layers(
         for z_index in range(len(grid["z"]))
     )
     input_artifacts = [_content_identity(path) for path in input_paths]
-    identity = {
+    identity: dict[str, Any] = {
         "version": MONOTONE_LAYER_VERSION,
         "materialIdentity": material_summary["identity"],
         "sheetletGraphIdentity": graph_summary["identity"],
         "settings": resolved,
         "inputArtifacts": input_artifacts,
     }
-    stem = f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}"
+    if window_origin_cell_xyz is not None:
+        identity["windowOriginCellXYZ"] = [
+            int(value) for value in window_origin_cell_xyz
+        ]
+    suffix = window_artifact_suffix(window_origin_cell_xyz)
+    stem = f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}{suffix}"
     summary_path = root / f"{stem}.json"
     artifact_path = root / f"{stem}.npz"
     if summary_path.is_file() and artifact_path.is_file() and not force:
@@ -480,11 +519,16 @@ def prototype_monotone_layers(
         mmap_mode="r",
     )
     grid_shape_zyx = (len(grid["z"]), len(grid["y"]), len(grid["x"]))
-    window = _densest_window(
-        profiles,
-        grid_shape_zyx,
-        tuple(int(value) for value in resolved["windowCellsXYZ"]),
-    )
+    window_shape = tuple(int(value) for value in resolved["windowCellsXYZ"])
+    if window_origin_cell_xyz is None:
+        window = _densest_window(profiles, grid_shape_zyx, window_shape)
+    else:
+        window = _explicit_window(
+            profiles,
+            grid_shape_zyx,
+            window_shape,
+            tuple(int(value) for value in window_origin_cell_xyz),
+        )
     flakes = _load_window_flakes(
         root, window, float(resolved["minimumFlakeQuality"])
     )

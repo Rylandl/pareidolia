@@ -13,7 +13,7 @@ import numpy as np
 
 from .slab_branch_association import BRANCH_ASSOCIATION_VERSION
 from .slab_flakes import FLAKE_CACHE_VERSION
-from .slab_monotone_layers import MONOTONE_LAYER_VERSION
+from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_sheetlet_carriers import build_mls_carrier
 
 
@@ -633,16 +633,16 @@ def association_integrity_audit(
     output_root: str | Path,
     force: bool = False,
     settings: dict[str, Any] | None = None,
+    window_origin_cell_xyz: tuple[int, int, int] | list[int] | None = None,
 ) -> dict[str, Any]:
     root = Path(output_root)
     resolved = {**DEFAULT_SETTINGS, **(settings or {})}
-    branch_summary_path = (
-        root / f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}.json"
-    )
-    branch_artifact_path = (
-        root / f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}.npz"
-    )
-    monotone_path = root / f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}.npz"
+    suffix = window_artifact_suffix(window_origin_cell_xyz)
+    branch_stem = f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}{suffix}"
+    monotone_stem = f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}{suffix}"
+    branch_summary_path = root / f"{branch_stem}.json"
+    branch_artifact_path = root / f"{branch_stem}.npz"
+    monotone_path = root / f"{monotone_stem}.npz"
     branch_summary = json.loads(branch_summary_path.read_text())
     with np.load(monotone_path) as payload:
         monotone = {key: np.asarray(payload[key]) for key in payload.files}
@@ -652,13 +652,17 @@ def association_integrity_audit(
         root / f"flakes-v{FLAKE_CACHE_VERSION}-z{int(z_index)}-k3.json"
         for z_index in z_indices
     )
-    identity = {
+    identity: dict[str, Any] = {
         "version": ASSOCIATION_INTEGRITY_VERSION,
         "branchAssociationIdentity": branch_summary["identity"],
         "settings": resolved,
         "inputArtifacts": [_content_identity(path) for path in input_paths],
     }
-    stem = f"branch-association-integrity-v{ASSOCIATION_INTEGRITY_VERSION}"
+    if window_origin_cell_xyz is not None:
+        identity["windowOriginCellXYZ"] = [
+            int(value) for value in window_origin_cell_xyz
+        ]
+    stem = f"branch-association-integrity-v{ASSOCIATION_INTEGRITY_VERSION}{suffix}"
     summary_path = root / f"{stem}.json"
     artifact_path = root / f"{stem}.npz"
     if summary_path.is_file() and artifact_path.is_file() and not force:
