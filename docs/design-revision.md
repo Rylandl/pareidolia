@@ -362,6 +362,55 @@ target coordinates, CT metrics, priorities, and queue membership are stored in
 `fragment-termination-census-v1.npz`; the compact contract, counts, and ranked
 queues are in `fragment-termination-census-v1.json`.
 
+## Targeted dense Acus at open fragment termini
+
+The termination queue is evaluated by comparing two fits at the same spatial
+location. The control uses the existing whole-volume catalog: 4-voxel candidate
+spacing, at most 32 needles per 32-cubed catalog bin, and at most 160 needles in
+one 64-cubed fitting neighborhood. The dense path rereads the native CT with
+2-voxel candidate spacing, permits 256 candidates per catalog-sized bin and
+1,024 needles per target, and fits up to 12 depth/fiber modes. Needle length,
+halo, Hessian scale, normalization, fit geometry, and downstream score gates
+remain unchanged. Candidate blocks and 32-voxel retention bins are anchored to
+the global scan coordinates, so a target gives exactly the same result alone or
+when coalesced with a neighboring GPU crop.
+
+Endpoint resolution removes an important false target class before extraction.
+Forty of the 128 queued clusters have every one-cell outward member target
+already occupied by their own final v6 association. They are internal
+degree-one branch ends, not open association boundaries, and remain recorded as
+`association-covered-next-cell`. The other 88 targets are unique open
+association cells and coalesce into 81 crops of at most 3,932,160 voxels.
+
+Both catalogs are fit at each target's identical 64-cube center and scored
+against the same local association context. A pass requires a construction
+score of at least 0.55, a best-versus-second-mode margin of at least 0.04, and a
+margin of at least 0.04 over every final association with at least 25 flakes
+within four Acus cells. This is still local construction evidence. It is not a
+global ownership claim and does not mutate the graph.
+
+The full GTX 1080 run takes 46.9 seconds. Median usable needles increase from
+136 in the coarse catalog to 676 after dense extraction. The coarse control
+passes 26 of 88 targets and dense Acus passes 35. Twenty-four pass both; two
+coarse passes regress under dense extraction. Dense Acus contributes 11 passes
+that the control misses, while 44 targets remain below geometry threshold, six
+are ownership-ambiguous, and one has an unresolved mode margin.
+
+The 11 apparent recoveries are compared against every stored flake in the exact
+target cell with a 6-voxel position, 12-degree normal, and 12-degree fiber gate.
+Five match an existing mode owned by another small association. These are useful
+evidence for later association recovery but are not missing Acus observations.
+Six are new dense modes. Their association scores range from 0.598 to 0.887;
+the strongest has 0.553-voxel height, 1.76-degree normal, and 3.09-degree fiber
+residuals, with a 0.741 ownership margin. The six occur on six different final
+associations, so the result is not a repeated extension of one fragment.
+
+The artifact `fragment-termination-reanalysis-v1.json` contains all skipped
+targets, crop bounds and GPU diagnostics, coarse and dense modes, exact residuals,
+local competitor scores, stored-cell comparisons, classifications, and the
+ranked recovery list. No recovered mode is added to the flake catalog or final
+association graph.
+
 This remains a deliberately narrow region-wide construction result, not a sheet
 census. Unassociated global branches are outside the carrier-intersection audit,
 and no provenance tier is relabeled as independent replication. Output
@@ -423,6 +472,9 @@ physical papyrus layers.
   --root work/cross-scroll-analysis-z512 --clean-only
 
 .venv/bin/python scripts/census-fragment-terminations.py \
+  --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/reanalyze-fragment-terminations.py \
   --root work/cross-scroll-analysis-z512
 ```
 

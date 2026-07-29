@@ -371,6 +371,24 @@ silently using synthetic padding.
   forced warm-cache rerun 6.9 seconds; both write
   `fragment-termination-census-v1`. Absence of a candidate is not interpreted
   as a physical sheet edge.
+- `python3 scripts/reanalyze-fragment-terminations.py --root
+  work/cross-scroll-analysis-z512` performs the queued experiment rather than
+  changing the graph. Resolving each cluster through its actual endpoint shows
+  that 40 of the 128 nominal targets point into a cell already occupied by the
+  same final association; these internal branch ends are skipped explicitly.
+  The remaining 88 targets are packed into 81 bounded, globally phase-aligned
+  GPU crops. At each identical 64-cube location, the existing whole-volume
+  catalog and a fresh 2-voxel dense extraction receive the same 12-mode fit and
+  local ownership test. Median usable needles rise from 136 to 676. Coarse Acus
+  passes 26 targets and dense Acus passes 35: 24 are corroborated by both, two
+  regress, and dense adds 11 passes. Six are genuinely absent from the stored
+  target-cell modes; five strengthen a matching mode already owned by a small
+  separate fragment, identifying association rather than extraction work.
+  Forty-four remain below geometry threshold, six are ownership-ambiguous, and
+  one is mode-ambiguous. All 81 crops use the GTX 1080 and finish in 46.9
+  seconds. `fragment-termination-reanalysis-v1.json` preserves every crop,
+  coarse/dense mode, residual, competitor margin, and classification; none of
+  the recovered modes are inserted automatically.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

@@ -36,7 +36,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-GAP_REANALYSIS_VERSION = 3
+GAP_REANALYSIS_VERSION = 4
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -109,11 +109,13 @@ def _fit_sample_modes(
     cell_index: tuple[int, int, int],
     cube_size: int,
     maximum_cell_needles: int,
+    maximum_modes: int = 5,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     half_cube = cube_size * 0.5
     inside = np.all(np.abs(records["center"] - center) <= half_cube, axis=1)
     local = records[inside]
     local_ids = np.flatnonzero(inside)
+    available_needle_count = len(local)
     if len(local) > maximum_cell_needles:
         chosen = np.argpartition(local["score"], -maximum_cell_needles)[
             -maximum_cell_needles:
@@ -123,6 +125,7 @@ def _fit_sample_modes(
     normal, confidence, normal_stats = _cell_normal(local)
     if normal is None:
         return [], {
+            "availableNeedleCount": int(available_needle_count),
             "needleCount": int(len(local)),
             "normalConfidence": 0.0,
             **normal_stats,
@@ -136,18 +139,52 @@ def _fit_sample_modes(
         confidence,
         cell_index,
         cube_size,
-        5,
+        maximum_modes,
         4.0,
         12.0,
         5,
     )
     return fitted, {
+        "availableNeedleCount": int(available_needle_count),
         "needleCount": int(len(local)),
         "normalConfidence": round(confidence, 4),
         "medianPlaneResidualDeg": round(normal_stats["medianPlaneResidualDeg"], 3),
         "inlierFraction": round(normal_stats["inlierFraction"], 4),
         "modeCount": len(fitted),
     }
+
+
+def _aligned_target_bounds(
+    sample_points_xyz: np.ndarray,
+    cube_size: int,
+    halo: int,
+    source_shape_xyz: np.ndarray | tuple[int, int, int],
+    alignment: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    points = np.asarray(sample_points_xyz, dtype=np.float32)
+    source_shape = np.asarray(source_shape_xyz, dtype=np.int32)
+    half_cube = float(cube_size) * 0.5
+    low = np.floor(np.min(points, axis=0) - half_cube - halo).astype(np.int32)
+    high = np.ceil(
+        np.max(points, axis=0) + half_cube + halo + 1.0
+    ).astype(np.int32)
+    low = np.maximum(low, 0)
+    high = np.minimum(high, source_shape)
+    alignment = max(1, int(alignment))
+    for axis in range(3):
+        if int(low[axis]) > 0:
+            core_low = int(low[axis]) + int(halo)
+            core_low = (core_low // alignment) * alignment
+            low[axis] = max(0, core_low - int(halo))
+        if int(high[axis]) < int(source_shape[axis]):
+            core_high = int(high[axis]) - int(halo)
+            core_high = (
+                (core_high + alignment - 1) // alignment
+            ) * alignment
+            high[axis] = min(
+                int(source_shape[axis]), core_high + int(halo)
+            )
+    return low, high
 
 
 def _extract_target_needles(
@@ -162,15 +199,14 @@ def _extract_target_needles(
     scale = float(settings["scale"])
     needle_length = float(settings["needleLength"])
     halo = int(settings["halo"])
-    half_cube = cube_size * 0.5
-    low_xyz = np.floor(
-        np.min(sample_points_xyz, axis=0) - half_cube - halo
-    ).astype(np.int32)
-    high_xyz = np.ceil(
-        np.max(sample_points_xyz, axis=0) + half_cube + halo + 1.0
-    ).astype(np.int32)
-    low_xyz = np.maximum(low_xyz, 0)
-    high_xyz = np.minimum(high_xyz, np.asarray(source.shape[::-1], dtype=np.int32))
+    bin_size = int(settings["binSize"])
+    low_xyz, high_xyz = _aligned_target_bounds(
+        sample_points_xyz,
+        cube_size,
+        halo,
+        source.shape[::-1],
+        bin_size,
+    )
     raw = np.asarray(
         source[
             low_xyz[2] : high_xyz[2],
@@ -186,7 +222,6 @@ def _extract_target_needles(
     core_shape = tuple(int(value - 2 * halo) for value in data.shape)
     if min(core_shape) <= 0:
         raise ValueError("target gap crop is too small for the Acus halo")
-    bin_size = int(settings["binSize"])
     bin_shape = tuple(
         max(1, int(math.ceil(value / bin_size))) for value in core_shape
     )
@@ -260,6 +295,7 @@ def _extract_target_needles(
         "candidateCount": int(len(values)),
         "refinedNeedleCount": int(len(refined)),
         "deduplicatedNeedleCount": int(len(records)),
+        "candidateGridAlignmentVoxels": bin_size,
         "computeBackend": compute["backend"],
         "computeDevice": compute["device"],
         "computeFallbackReason": compute["fallbackReason"],

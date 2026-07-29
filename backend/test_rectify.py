@@ -147,6 +147,11 @@ from backend.slab_fragment_termination_census import (
     _global_candidate_category,
     _local_candidate_category,
 )
+from backend.slab_termination_reanalysis import (
+    _classify_comparison as _classify_termination_reanalysis,
+    _coalesce_target_crops,
+    _resolve_open_targets,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -157,6 +162,77 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_dense_termination_comparison_separates_new_and_stored_modes(
+        self,
+    ) -> None:
+        failed = {"passed": False, "failureReasons": ["score"]}
+        passed = {"passed": True, "failureReasons": []}
+        self.assertEqual(
+            _classify_termination_reanalysis(failed, passed, False),
+            "recovered-new-dense-mode",
+        )
+        self.assertEqual(
+            _classify_termination_reanalysis(failed, passed, True),
+            "recovered-stored-cell-mode",
+        )
+        self.assertEqual(
+            _classify_termination_reanalysis(passed, passed),
+            "corroborated-coarse-evidence",
+        )
+
+    def test_dense_termination_targets_use_an_open_member_endpoint(self) -> None:
+        resolved, skipped = _resolve_open_targets(
+            [
+                {
+                    "clusterIndex": 7,
+                    "associationId": 2,
+                    "associationNodeCount": 30,
+                    "endpointCount": 2,
+                    "denseAcusPriority": 4.0,
+                }
+            ],
+            np.asarray([7, 7], dtype=np.int32),
+            np.asarray([0, 1], dtype=np.uint32),
+            np.asarray([10, 11], dtype=np.uint64),
+            np.asarray([[0.0, 0.0, 0.0], [32.0, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            np.asarray([0.5, 0.8]),
+            np.asarray([0.2, 0.3]),
+            np.asarray([2, 2], dtype=np.uint32),
+            np.asarray([[0, 0, 0], [1, 0, 0]], dtype=np.int32),
+            (
+                np.asarray([0.0, 32.0, 64.0]),
+                np.asarray([0.0]),
+                np.asarray([0.0]),
+            ),
+            32.0,
+        )
+        self.assertFalse(skipped)
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["sourceEndpointIndex"], 1)
+        self.assertEqual(resolved[0]["targetCellIndex"], (2, 0, 0))
+
+    def test_dense_termination_crops_merge_only_bounded_overlap(self) -> None:
+        crops = _coalesce_target_crops(
+            np.asarray(
+                [
+                    [150.0, 150.0, 50.0],
+                    [190.0, 150.0, 50.0],
+                    [400.0, 400.0, 50.0],
+                ]
+            ),
+            64,
+            16,
+            (500, 500, 100),
+            4_000_000,
+            32,
+        )
+        self.assertEqual(len(crops), 2)
+        self.assertEqual(crops[0]["targetIndices"], [0, 1])
+        self.assertEqual(crops[1]["targetIndices"], [2])
+        self.assertLessEqual(crops[0]["voxelCount"], 4_000_000)
+        self.assertEqual((int(crops[0]["lowXYZ"][0]) + 16) % 32, 0)
+
     def test_termination_evidence_preserves_failure_stage(self) -> None:
         self.assertEqual(
             _local_candidate_category(
