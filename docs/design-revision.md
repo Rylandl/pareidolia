@@ -61,12 +61,14 @@ a graph component a physical papyrus sheet.
      separately. Window disagreement is retained as weaker provenance rather
      than relabeled as independent validation.
    - The whole-volume association solve keeps overlap-validated, unanimous
-     single-window, context-disputed, subwindow-unresolved, and locally exact-
-     deferred evidence in separate tiers. The last two enter through an explicit
-     candidate catalog only after passing local score, material, order, and
-     collision checks. Every novel endpoint pair must still pass complete-global-
-     branch reconstruction, collision safety, transitive reconstruction, and
-     mesh integrity. Local integrity quarantine remains a hard exclusion.
+     single-window, context-disputed, subwindow-unresolved, locally exact-
+     deferred, and directional-boundary evidence in separate tiers. The first
+     five originate in local windows. Directional-boundary discovery is a
+     lowest-priority construction heuristic for exposed degree-one through
+     degree-six graph nodes and cannot displace any local-evidence join.
+     Every novel pair must still pass complete-global-branch reconstruction,
+     collision safety, transitive reconstruction, and mesh integrity. Local
+     integrity quarantine remains a hard exclusion.
    - A completeness prior applies only to flakes with a calibrated reliability
      estimate. Every solve retains an explicit outlier/unassigned state.
    - Secondary-normal fragments remain separate branches until the association
@@ -230,11 +232,59 @@ Fresh candidate discovery takes 11.2 seconds and the five-tier solve 34.5
 seconds, reducing 63,783 linked branches to 63,196 branch groups. An
 `--accepted-only` compatibility solve exactly reproduces all 23 compared
 geometric and decision arrays from v3, including association identities;
-`--clean-only` retains the earlier two-tier scope. This remains a deliberately
-narrow region-wide construction result, not a sheet census. Unassociated global
-branches are outside the carrier-intersection audit, and no provenance tier is
-relabeled as independent replication. Output identities remain sparse exact-
-coherent surface hypotheses rather than pages or physical papyrus layers.
+`--clean-only` retains the earlier two-tier scope.
+
+The next audit asks whether local windows fail to propose plausible fragment
+boundaries. Repeating the original degree-one endpoint search over the complete
+global graph finds 27,446 scored branch pairs; 27,445 were already present in a
+local candidate list, and the only novel pair is below threshold. Window edges
+are therefore not the bottleneck under the old endpoint definition.
+
+The broader boundary model includes degree-one through degree-six nodes whose
+retained tangent-neighbor directions have a resultant concentration of at least
+0.25. The open direction is the opposite resultant, and no retained neighbor may
+already occupy that cone with cosine above 0.50. This is an edge-exposure
+heuristic, not a physical claim about papyrus boundaries. Of 636,717 eligible
+nodes, 426,766 are directionally exposed. A streamed vectorized search evaluates
+106,943,713 nearby node pairs, 15,356,504 of which mutually face; the active
+geometry model leaves 249,135 hits over 97,773 branch pairs. After removing every
+branch pair ever proposed locally, 68,899 scored pairs remain. Score, material,
+global order, and collision gates select only 276. Candidate discovery takes
+30.0 seconds and stores every decision and geometric diagnostic in
+`global-boundary-candidates-v3`.
+
+All local-evidence joins are constructed before this new tier, and exact or
+integrity pruning always sacrifices a directional-only edge before any local
+edge. The `--local-evidence-only` compatibility solve consequently matches all
+60 common v4 artifact arrays exactly. Complete-branch gates defer 139 of the 276
+because an input branch is not a coherent carrier and six more at pair geometry.
+One candidate creates a cell collision, one is removed by transitive exact
+reconstruction, and five are removed by cross-carrier integrity. The remaining
+124 directional joins are strictly additive to the 587 v4 joins.
+
+The v5 result has 711 joins in 672 associations over 1,383 branches and 14,509
+flakes: 637 pairs, 31 triples, and four four-branch groups. Final median carrier
+residuals are 1.24 voxels and 3.90 degrees, with maxima of 2.94 voxels and 5.99
+degrees. The final audit processes 699 overlapping carrier boxes, 172,091 broad-
+phase triangle pairs, and 4,086 narrow-phase pairs with zero intersections. The
+120 associations containing a directional join extend axial span in 74 cases;
+21 add at least ten flakes beyond their largest v4 input and one adds at least
+25. One hundred two of the 124 retained joins have both endpoints in contested
+material, so these remain geometry-conditioned constructions rather than
+replication evidence.
+
+At full-catalog scale v5 reduces 131,211 original components to 130,500 without
+changing the 586-flake maximum. Relative to v4 it adds 12 components at least 25
+flakes, eight at least 50, none at least 100, six spanning at least 11 planes,
+and three spanning all 14. The count at least ten decreases by one because two
+already-qualifying fragments merge. This is measurable gap closure without a
+giant transitive collapse.
+
+This remains a deliberately narrow region-wide construction result, not a sheet
+census. Unassociated global branches are outside the carrier-intersection audit,
+and no provenance tier is relabeled as independent replication. Output
+identities remain sparse exact-coherent surface hypotheses rather than pages or
+physical papyrus layers.
 
 ## Reproducible commands
 
@@ -275,8 +325,14 @@ coherent surface hypotheses rather than pages or physical papyrus layers.
 .venv/bin/python scripts/build-global-branch-candidates.py \
   --root work/cross-scroll-analysis-z512
 
+.venv/bin/python scripts/build-global-boundary-candidates.py \
+  --root work/cross-scroll-analysis-z512
+
 .venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/associate-global-branches.py \
+  --root work/cross-scroll-analysis-z512 --local-evidence-only
 
 .venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512 --accepted-only

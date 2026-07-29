@@ -79,6 +79,7 @@ from backend.slab_branch_association import (
     DEFAULT_SETTINGS,
     _audit_exact_candidate_pairs,
     _order_condensation,
+    _score_endpoint_hits,
     _solve_candidates,
     _solve_with_exact_geometry,
 )
@@ -104,19 +105,29 @@ from backend.slab_global_branch_association import (
     GRAPH_RETAINED,
     DECISION_EXACT_PAIR_DEFERRED,
     DECISION_INPUT_BRANCH_CARRIER_DEFERRED,
+    PROVENANCE_DIRECTIONAL_BOUNDARY,
     PROVENANCE_CONTEXT_DISPUTED,
     PROVENANCE_OVERLAP_VALIDATED,
     PROVENANCE_SINGLE_WINDOW,
     _aggregate_observations,
+    _candidate_order,
     _candidate_tier_selection,
     _pair_gate_state,
     _solve_candidate_graph,
     _weakest_integrity_candidates,
+    _weakest_retained_candidate,
 )
 from backend.slab_global_branch_candidates import (
     SOURCE_LOCAL_EXACT_DEFERRED,
     SOURCE_SUBWINDOW_UNRESOLVED,
     _candidate_evidence_source,
+)
+from backend.slab_global_boundary_candidates import (
+    _boundary_geometry_arrays,
+    _boundary_outward,
+    _expanded_cell_pairs,
+    _score_boundary_pair_arrays,
+    _stream_boundary_hits,
 )
 from backend.slab_analysis import (
     CELL_DTYPE,
@@ -128,6 +139,174 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_boundary_exposure_rejects_an_already_occupied_open_cone(self) -> None:
+        usable, outward, concentration, neighbor_count, maximum_forward = (
+            _boundary_outward(
+                [{"normal": [0.0, 0.0, 1.0]}],
+                np.asarray([0], dtype=np.uint32),
+                np.asarray(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [-1.0, 0.0, 0.0],
+                        [-2.0, 0.0, 0.0],
+                        [-3.0, 0.0, 0.0],
+                    ],
+                    dtype=np.float32,
+                ),
+                np.asarray([0, 0, 0, 0], dtype=np.uint32),
+                np.asarray([1, 2, 3, 4], dtype=np.uint32),
+                np.ones(4, dtype=bool),
+            )
+        )
+        self.assertTrue(bool(usable[0]))
+        self.assertEqual(int(neighbor_count[0]), 4)
+        self.assertAlmostEqual(float(concentration[0]), 0.5)
+        np.testing.assert_allclose(outward[0], [1.0, 0.0, 0.0])
+        self.assertAlmostEqual(float(maximum_forward[0]), 1.0)
+
+    def test_streamed_boundary_pair_expansion_preserves_cell_cross_product(
+        self,
+    ) -> None:
+        source, target = _expanded_cell_pairs(
+            np.asarray([0, 1, 2, 3, 4], dtype=np.uint32),
+            np.asarray([0, 2]),
+            np.asarray([2, 3]),
+            np.asarray([0]),
+            np.asarray([1]),
+        )
+        np.testing.assert_array_equal(source, [0, 0, 0, 1, 1, 1])
+        np.testing.assert_array_equal(target, [2, 3, 4, 2, 3, 4])
+
+    def test_directional_boundary_candidates_cannot_displace_local_evidence(
+        self,
+    ) -> None:
+        order = _candidate_order(
+            np.asarray([0.9, 0.5]),
+            np.asarray([0, 0]),
+            np.asarray([1, 2]),
+            np.asarray(
+                [PROVENANCE_DIRECTIONAL_BOUNDARY, PROVENANCE_SINGLE_WINDOW]
+            ),
+        )
+        np.testing.assert_array_equal(order, [1, 0])
+        weakest = _weakest_retained_candidate(
+            np.asarray([0, 1]),
+            np.asarray([0.9, 0.5]),
+            np.asarray([[10, 11], [12, 13]], dtype=np.uint64),
+            np.asarray(
+                [PROVENANCE_DIRECTIONAL_BOUNDARY, PROVENANCE_SINGLE_WINDOW]
+            ),
+        )
+        self.assertEqual(weakest, 0)
+
+    def test_streamed_boundary_search_scores_each_spatial_pair_once(self) -> None:
+        flakes = [
+            {
+                "normal": [0.0, 0.0, 1.0],
+                "fiber": [0.0, 1.0, 0.0],
+                "crossFiber": [-1.0, 0.0, 0.0],
+                "quality": 0.4,
+                "normalFamily": 0,
+                "radiusFiber": 20.0,
+                "radiusCrossFiber": 20.0,
+            }
+            for _ in range(2)
+        ]
+        hits, stats = _stream_boundary_hits(
+            np.asarray([[0, 0, 0], [1, 0, 0]], dtype=np.int32),
+            np.asarray([0, 1], dtype=np.int32),
+            np.asarray([[0.0, 0.0, 0.0], [20.0, 0.0, 0.5]], dtype=np.float32),
+            np.asarray(
+                [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], dtype=np.float32
+            ),
+            _boundary_geometry_arrays(flakes),
+            np.asarray([True, True]),
+            np.asarray([False, False]),
+            np.asarray([2, 1, 1]),
+            3,
+            128.0,
+            0.1,
+            8.0,
+            0.08,
+            None,
+        )
+        self.assertEqual(stats["rawSpatialPairCount"], 1)
+        self.assertEqual(stats["spatialFacingBoundaryPairCount"], 1)
+        self.assertEqual(len(hits), 1)
+
+    def test_vectorized_global_boundary_score_matches_local_endpoint_score(
+        self,
+    ) -> None:
+        flakes = [
+            {
+                "center": [0.0, 0.0, 0.0],
+                "normal": [0.0, 0.0, 1.0],
+                "fiber": [0.0, 1.0, 0.0],
+                "crossFiber": [-1.0, 0.0, 0.0],
+                "quality": 0.4,
+                "normalFamily": 0,
+                "radiusFiber": 20.0,
+                "radiusCrossFiber": 20.0,
+            },
+            {
+                "center": [20.0, 0.0, 0.5],
+                "normal": [0.0, 0.0, 1.0],
+                "fiber": [0.0, 1.0, 0.0],
+                "crossFiber": [-1.0, 0.0, 0.0],
+                "quality": 0.4,
+                "normalFamily": 0,
+                "radiusFiber": 20.0,
+                "radiusCrossFiber": 20.0,
+            },
+        ]
+        centers = np.asarray([flake["center"] for flake in flakes], dtype=np.float32)
+        outward = np.asarray(
+            [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], dtype=np.float32
+        )
+        branch = np.asarray([0, 1], dtype=np.int32)
+        supported = np.asarray([True, True])
+        contested = np.asarray([False, False])
+        legacy = _score_endpoint_hits(
+            flakes,
+            [(0, 1, 0)],
+            branch,
+            centers,
+            outward,
+            supported,
+            contested,
+            8.0,
+            0.08,
+        )
+        vectorized = _score_boundary_pair_arrays(
+            np.asarray([0]),
+            np.asarray([1]),
+            np.asarray([0]),
+            branch,
+            centers,
+            outward,
+            _boundary_geometry_arrays(flakes),
+            supported,
+            contested,
+            8.0,
+            0.08,
+        )
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(len(vectorized), 1)
+        for field in (
+            "score",
+            "geometryScore",
+            "facing",
+            "distanceVoxels",
+            "edgeResidualVoxels",
+            "fiberAngleDeg",
+            "normalBendDeg",
+            "reachRatio",
+        ):
+            self.assertAlmostEqual(
+                float(vectorized[field][0]), float(legacy[field][0]), places=5
+            )
+
     def test_global_rescue_candidate_source_preserves_local_deferral(self) -> None:
         source, selected = _candidate_evidence_source(
             np.asarray([DECISION_RETAINED, 0]),

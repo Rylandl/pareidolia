@@ -29,19 +29,25 @@ from .slab_global_branch_candidates import (
     SOURCE_SUBWINDOW_UNRESOLVED,
     build_global_branch_candidates,
 )
+from .slab_global_boundary_candidates import (
+    GLOBAL_BOUNDARY_CANDIDATE_VERSION,
+    build_global_boundary_candidates,
+)
 from .slab_global_monotone_graph import GLOBAL_MONOTONE_GRAPH_VERSION
 from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BRANCH_ASSOCIATION_VERSION = 4
+GLOBAL_BRANCH_ASSOCIATION_VERSION = 5
 
+PROVENANCE_DIRECTIONAL_BOUNDARY = 0
 PROVENANCE_LOCAL_EXACT_DEFERRED = SOURCE_LOCAL_EXACT_DEFERRED
 PROVENANCE_SUBWINDOW_UNRESOLVED = SOURCE_SUBWINDOW_UNRESOLVED
 PROVENANCE_CONTEXT_DISPUTED = 3
 PROVENANCE_SINGLE_WINDOW = 4
 PROVENANCE_OVERLAP_VALIDATED = 5
 PROVENANCE_NAMES = {
+    PROVENANCE_DIRECTIONAL_BOUNDARY: "directional-boundary",
     PROVENANCE_LOCAL_EXACT_DEFERRED: "local-exact-deferred",
     PROVENANCE_SUBWINDOW_UNRESOLVED: "subwindow-unresolved",
     PROVENANCE_CONTEXT_DISPUTED: "context-disputed",
@@ -72,6 +78,7 @@ GRAPH_RETAINED = 2
 GRAPH_REDUNDANT = 3
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "includeDirectionalBoundaryCandidates": True,
     "includeLocalExactDeferredCandidates": True,
     "includeSubwindowUnresolvedCandidates": True,
     "includeContextDisputedCandidates": True,
@@ -171,6 +178,7 @@ def _candidate_order(
             np.asarray(source, dtype=np.int64),
             -priority,
             -np.asarray(score, dtype=np.float64),
+            priority == PROVENANCE_DIRECTIONAL_BOUNDARY,
         )
     )
 
@@ -702,6 +710,10 @@ def _weakest_retained_candidate(
         min(
             candidate_indices,
             key=lambda index: (
+                int(
+                    provenance_priority[index]
+                    != PROVENANCE_DIRECTIONAL_BOUNDARY
+                ),
                 float(score[index]),
                 int(provenance_priority[index]),
                 int(endpoint_pair[index, 0]),
@@ -775,6 +787,10 @@ def associate_global_branches(
     candidate_artifact_path = root / (
         f"global-branch-candidates-v{GLOBAL_BRANCH_CANDIDATE_VERSION}.npz"
     )
+    boundary_summary = build_global_boundary_candidates(root, force=force)
+    boundary_artifact_path = root / (
+        f"global-boundary-candidates-v{GLOBAL_BOUNDARY_CANDIDATE_VERSION}.npz"
+    )
     flake_paths = [
         root / f"flakes-v{FLAKE_CACHE_VERSION}-z{z_index}-k3.json"
         for z_index in range(len(grid["z"]))
@@ -785,17 +801,22 @@ def associate_global_branches(
         "scheduleIdentity": schedule["identity"],
         "globalGraphIdentity": graph_summary["identity"],
         "candidateIdentity": candidate_summary["identity"],
+        "boundaryCandidateIdentity": boundary_summary["identity"],
         "inputArtifacts": [
             _content_identity(path)
             for path in (
                 root / "grid.json",
                 candidate_artifact_path,
+                boundary_artifact_path,
                 *flake_paths,
             )
         ],
     }
     include_local_exact_deferred = bool(
         resolved["includeLocalExactDeferredCandidates"]
+    )
+    include_directional_boundary = bool(
+        resolved["includeDirectionalBoundaryCandidates"]
     )
     include_subwindow_unresolved = bool(
         resolved["includeSubwindowUnresolvedCandidates"]
@@ -810,13 +831,36 @@ def associate_global_branches(
         and include_subwindow_unresolved
         and include_context_disputed
         and include_single_window
+        and include_directional_boundary
     ):
         mode_suffix = ""
-    elif not include_rescue and include_context_disputed and include_single_window:
+    elif (
+        not include_directional_boundary
+        and include_rescue
+        and include_context_disputed
+        and include_single_window
+    ):
+        mode_suffix = "-local-evidence-only"
+    elif (
+        not include_directional_boundary
+        and not include_rescue
+        and include_context_disputed
+        and include_single_window
+    ):
         mode_suffix = "-accepted-only"
-    elif not include_rescue and not include_context_disputed and include_single_window:
+    elif (
+        not include_directional_boundary
+        and not include_rescue
+        and not include_context_disputed
+        and include_single_window
+    ):
         mode_suffix = "-clean-only"
-    elif not include_rescue and not include_context_disputed and not include_single_window:
+    elif (
+        not include_directional_boundary
+        and not include_rescue
+        and not include_context_disputed
+        and not include_single_window
+    ):
         mode_suffix = "-overlap-only"
     else:
         tier_flags = {
@@ -824,6 +868,7 @@ def associate_global_branches(
             "subwindow": include_subwindow_unresolved,
             "context": include_context_disputed,
             "single": include_single_window,
+            "directionalBoundary": include_directional_boundary,
         }
         digest = hashlib.sha256(
             json.dumps(tier_flags, sort_keys=True).encode("utf-8")
@@ -849,6 +894,8 @@ def associate_global_branches(
         graph = {key: np.asarray(payload[key]) for key in payload.files}
     with np.load(candidate_artifact_path) as payload:
         rescue = {key: np.asarray(payload[key]) for key in payload.files}
+    with np.load(boundary_artifact_path) as payload:
+        boundary = {key: np.asarray(payload[key]) for key in payload.files}
 
     selected, evidence_provenance = _candidate_tier_selection(
         tiled["branchJoinUnanimous"],
@@ -993,6 +1040,58 @@ def associate_global_branches(
             [acceptance_count, rescue_evidence_count]
         )
 
+    boundary_indices = (
+        np.flatnonzero(boundary["candidateSelected"])
+        if include_directional_boundary
+        else np.empty(0, dtype=np.int64)
+    )
+    boundary_candidate_offset = len(endpoint_pair)
+    boundary_endpoint_pair = boundary["candidateEndpointIdentity"][
+        boundary_indices
+    ].astype(np.uint64)
+    boundary_endpoint_node = boundary["candidateEndpointNodeIndex"][
+        boundary_indices
+    ].astype(np.uint32)
+    boundary_branch_pair = np.stack(
+        (
+            boundary["candidateBranchSource"][boundary_indices],
+            boundary["candidateBranchTarget"][boundary_indices],
+        ),
+        axis=1,
+    ).astype(np.uint32)
+    if len(boundary_indices):
+        if not np.all(
+            node_identity[boundary_endpoint_node] == boundary_endpoint_pair
+        ):
+            raise ValueError(
+                "a directional-boundary endpoint identity no longer matches its node"
+            )
+        if not np.array_equal(
+            component[boundary_endpoint_node], boundary_branch_pair
+        ):
+            raise ValueError(
+                "a directional-boundary endpoint no longer matches its global branch"
+            )
+        endpoint_pair = np.concatenate([endpoint_pair, boundary_endpoint_pair])
+        endpoint_node = np.concatenate([endpoint_node, boundary_endpoint_node])
+        provenance = np.concatenate(
+            [
+                provenance,
+                np.full(
+                    len(boundary_indices),
+                    PROVENANCE_DIRECTIONAL_BOUNDARY,
+                    dtype=np.uint8,
+                ),
+            ]
+        )
+        branch_pair = np.concatenate([branch_pair, boundary_branch_pair])
+        observation_count = np.concatenate(
+            [observation_count, np.ones(len(boundary_indices), dtype=np.uint8)]
+        )
+        acceptance_count = np.concatenate(
+            [acceptance_count, np.ones(len(boundary_indices), dtype=np.uint8)]
+        )
+
     if not len(endpoint_pair):
         raise ValueError("all selected global join evidence is already linked")
     canonical_branch_pair = np.sort(branch_pair, axis=1)
@@ -1008,6 +1107,10 @@ def associate_global_branches(
     rescue_evidence_selected = rescue_selected[
         rescue["evidenceCandidateIndex"]
     ]
+    boundary_candidate_index = (
+        boundary_candidate_offset
+        + np.arange(len(boundary_indices), dtype=np.uint32)
+    )
     observations = {
         "candidateIndex": np.concatenate(
             [
@@ -1015,6 +1118,7 @@ def associate_global_branches(
                 rescue_candidate_map[
                     rescue["evidenceCandidateIndex"][rescue_evidence_selected]
                 ].astype(np.uint32),
+                boundary_candidate_index,
             ]
         ),
         "windowIndex": np.concatenate(
@@ -1023,6 +1127,7 @@ def associate_global_branches(
                 rescue["evidenceWindowIndex"][rescue_evidence_selected].astype(
                     np.uint8
                 ),
+                np.full(len(boundary_indices), 255, dtype=np.uint8),
             ]
         ),
         "score": np.concatenate(
@@ -1031,6 +1136,7 @@ def associate_global_branches(
                 rescue["evidenceScore"][rescue_evidence_selected].astype(
                     np.float32
                 ),
+                boundary["candidateScore"][boundary_indices].astype(np.float32),
             ]
         ),
         "medianHeightResidualVoxels": np.concatenate(
@@ -1039,6 +1145,7 @@ def associate_global_branches(
                 rescue["evidenceExactMedianHeightResidualVoxels"][
                     rescue_evidence_selected
                 ].astype(np.float32),
+                np.full(len(boundary_indices), np.nan, dtype=np.float32),
             ]
         ),
         "medianNormalResidualDeg": np.concatenate(
@@ -1047,6 +1154,7 @@ def associate_global_branches(
                 rescue["evidenceExactMedianNormalResidualDeg"][
                     rescue_evidence_selected
                 ].astype(np.float32),
+                np.full(len(boundary_indices), np.nan, dtype=np.float32),
             ]
         ),
     }
@@ -1276,6 +1384,12 @@ def associate_global_branches(
         ],
         minlength=len(association_branch_count),
     ).astype(np.uint16)
+    association_directional_boundary_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_DIRECTIONAL_BOUNDARY
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
     exact_groups = [value["exact"] for value in final_geometries]
     for value in exact_groups:
         association_id = int(value["associationId"])
@@ -1292,11 +1406,15 @@ def associate_global_branches(
         local_exact_count = int(
             association_local_exact_deferred_join_count[association_id]
         )
+        directional_boundary_count = int(
+            association_directional_boundary_join_count[association_id]
+        )
         value["overlapValidatedJoinCount"] = overlap_count
         value["singleWindowJoinCount"] = single_count
         value["contextDisputedJoinCount"] = context_count
         value["subwindowUnresolvedJoinCount"] = subwindow_count
         value["localExactDeferredJoinCount"] = local_exact_count
+        value["directionalBoundaryJoinCount"] = directional_boundary_count
         active_provenance = [
             name
             for name, count in (
@@ -1305,6 +1423,7 @@ def associate_global_branches(
                 ("context-disputed", context_count),
                 ("subwindow-unresolved", subwindow_count),
                 ("local-exact-deferred", local_exact_count),
+                ("directional-boundary", directional_boundary_count),
             )
             if count
         ]
@@ -1410,6 +1529,9 @@ def associate_global_branches(
         associationLocalExactDeferredJoinCount=(
             association_local_exact_deferred_join_count
         ),
+        associationDirectionalBoundaryJoinCount=(
+            association_directional_boundary_join_count
+        ),
         integrityRoundIndex=np.asarray(
             [value[0] for value in violation_records], dtype=np.uint16
         ),
@@ -1496,7 +1618,13 @@ def associate_global_branches(
                     for window_index in observations["windowIndex"][
                         observation_indices
                     ]
+                    if int(window_index) < len(schedule["windows"])
                 ],
+                "wholeVolumeBoundaryObservation": bool(
+                    np.any(
+                        observations["windowIndex"][observation_indices] == 255
+                    )
+                ),
                 "sourceStandaloneCarrier": {
                     "medianHeightResidualVoxels": float(
                         branch_exact["medianHeightResidualVoxels"][
@@ -1585,6 +1713,8 @@ def associate_global_branches(
         included_tiers.append("subwindow-unresolved")
     if include_local_exact_deferred:
         included_tiers.append("local-exact-deferred")
+    if include_directional_boundary:
+        included_tiers.append("directional-boundary")
     input_rule = (
         "integrity-clean endpoint evidence enters in explicit provenance tiers: "
         + ", ".join(included_tiers)
@@ -1594,6 +1724,12 @@ def associate_global_branches(
             "; the rescue tiers passed local score, material, order, and collision "
             "checks but remain candidates until complete-global-branch reconstruction"
         )
+    if include_directional_boundary:
+        input_rule += (
+            "; directional-boundary candidates were absent from every local candidate "
+            "list and passed the whole-volume exposure, material, order, and collision "
+            "screen before complete-branch reconstruction"
+        )
     result = {
         "identity": identity,
         "contract": {
@@ -1602,8 +1738,11 @@ def associate_global_branches(
                 "the minimum accepted local score controls deterministic global "
                 "construction; overlap-validated, then single-window, then "
                 "context-disputed, then subwindow-unresolved, then local-exact-deferred "
-                "evidence wins exact score ties, and every supporting local score, "
-                "residual, and provenance label is retained"
+                "then directional-boundary evidence wins exact score ties, and every "
+                "supporting score, residual, and provenance label is retained; all "
+                "local-evidence joins are constructed before directional-boundary "
+                "joins, and a directional-only construction edge is pruned before "
+                "any local-evidence edge"
             ),
             "pairGate": (
                 "each join reconstructed from its complete global branches must pass "
@@ -1646,6 +1785,9 @@ def associate_global_branches(
             "inputRescueCandidateCount": int(
                 candidate_summary["stats"]["candidateBranchPairCount"]
             ),
+            "inputDirectionalBoundaryCandidateCount": int(
+                boundary_summary["stats"]["selectedNovelBranchPairCount"]
+            ),
             "eligibleTierEvidenceJoinCount": int(np.count_nonzero(selected)),
             "excludedQuarantinedEvidenceCount": len(
                 excluded_quarantined_endpoint_pair
@@ -1663,6 +1805,9 @@ def associate_global_branches(
                 accepted_tier_candidate_count
             ),
             "selectedRescueCandidateJoinCount": len(rescue_indices),
+            "selectedDirectionalBoundaryCandidateJoinCount": len(
+                boundary_indices
+            ),
             "selectedOverlapValidatedJoinCount": int(
                 np.count_nonzero(
                     provenance == PROVENANCE_OVERLAP_VALIDATED
@@ -1686,8 +1831,19 @@ def associate_global_branches(
                     provenance == PROVENANCE_LOCAL_EXACT_DEFERRED
                 )
             ),
+            "selectedDirectionalBoundaryJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_DIRECTIONAL_BOUNDARY
+                )
+            ),
             "selectedTouchedGlobalBranchCount": len(touched),
-            "localObservationCount": len(observations["score"]),
+            "evidenceObservationCount": len(observations["score"]),
+            "localObservationCount": int(
+                np.count_nonzero(observations["windowIndex"] != 255)
+            ),
+            "wholeVolumeBoundaryObservationCount": int(
+                np.count_nonzero(observations["windowIndex"] == 255)
+            ),
             "minimumCandidateScore": _quantiles(aggregate["minimumScore"]),
             "candidateScoreObservationRange": _quantiles(
                 aggregate["maximumScore"] - aggregate["minimumScore"], 7
@@ -1720,6 +1876,12 @@ def associate_global_branches(
                 (
                     aggregate["maximumScore"] - aggregate["minimumScore"]
                 )[provenance == PROVENANCE_LOCAL_EXACT_DEFERRED],
+                7,
+            ),
+            "directionalBoundaryCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_DIRECTIONAL_BOUNDARY],
                 7,
             ),
             "pairExactPassCount": int(np.count_nonzero(pair_exact["passed"])),
@@ -1819,6 +1981,7 @@ def associate_global_branches(
                     "context-disputed-only",
                     "subwindow-unresolved-only",
                     "local-exact-deferred-only",
+                    "directional-boundary-only",
                     "mixed",
                 )
             },

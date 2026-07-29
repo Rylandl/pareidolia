@@ -14,14 +14,19 @@ from backend.slab_global_branch_association import associate_global_branches
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply accepted and locally deferred endpoint evidence to the global "
-            "sparse branch graph with collision, exact-carrier, and mesh-integrity "
-            "gates."
+            "Apply local evidence and directionally exposed whole-volume boundary "
+            "candidates to the global sparse branch graph with collision, exact-"
+            "carrier, and mesh-integrity gates."
         )
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
     evidence_mode = parser.add_mutually_exclusive_group()
+    evidence_mode.add_argument(
+        "--local-evidence-only",
+        action="store_true",
+        help="exclude directional-boundary discovery and reproduce the v4 scope",
+    )
     evidence_mode.add_argument(
         "--accepted-only",
         action="store_true",
@@ -59,6 +64,12 @@ def main() -> None:
         args.root,
         force=args.force,
         settings={
+            "includeDirectionalBoundaryCandidates": not (
+                args.local_evidence_only
+                or args.accepted_only
+                or args.clean_only
+                or args.overlap_only
+            ),
             "includeLocalExactDeferredCandidates": not (
                 args.accepted_only or args.clean_only or args.overlap_only
             ),

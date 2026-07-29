@@ -292,8 +292,9 @@ silently using synthetic padding.
   subwindow disagreement. Accepted, quarantined, already-linked, and duplicate
   global branch pairs cannot re-enter through `global-branch-candidates-v1`.
 - `python3 scripts/associate-global-branches.py --root
-  work/cross-scroll-analysis-z512` rebuilds both the accepted and rescue tiers
-  from complete global branches. Global context passes 111 of 230 subwindow-
+  work/cross-scroll-analysis-z512 --local-evidence-only` rebuilds the accepted
+  and rescue tiers from complete global branches. Global context passes 111 of
+  230 subwindow-
   unresolved pairs and five of 429 locally exact-deferred pairs. The final solve
   retains 587 joins: 125 overlap-validated, 213 single-window, 140 context-
   disputed, 104 subwindow-unresolved, and five local-exact rescues. Six pairwise
@@ -311,6 +312,29 @@ silently using synthetic padding.
   decision arrays; `--clean-only` retains the earlier two-tier scope. The v4
   artifact preserves every candidate, provenance tier, residual, and final
   decision.
+- `python3 scripts/build-global-boundary-candidates.py --root
+  work/cross-scroll-analysis-z512` broadens “endpoint” to a directionally
+  exposed fragment edge. For global graph nodes of degree one through six, it
+  estimates the open direction opposite the resultant of retained tangent
+  neighbors, then requires that no retained neighbor already occupies that
+  cone. A streamed vectorized search evaluates 106,943,713 nearby node pairs in
+  30.0 seconds without materializing them, leaving 276 novel branch
+  pairs after the existing score, material, order, and collision rules. This
+  tier is a construction heuristic, not independent evidence; 102 of its 124
+  ultimately retained joins have both endpoints in contested material.
+- The default `associate-global-branches.py` solve adds directional boundaries
+  only after all local-evidence joins and always prunes a directional-only edge
+  before a local edge. It therefore preserves all 60 common v4 artifact arrays
+  exactly. Complete-branch reconstruction retains 124 of 276 new candidates:
+  139 have an incoherent input carrier, six fail pair geometry, one collides,
+  one fails transitive reconstruction, and five are removed by mesh integrity.
+  The final 711 joins form 672 associations over 1,383 branches and 14,509
+  flakes with 1.24-voxel / 3.90-degree median fits and zero intersections.
+  Relative to v4, 120 directional-boundary associations extend axial span in
+  74 cases; the whole catalog gains 12 fragments with at least 25 flakes, eight
+  with at least 50, six spanning at least 11 planes, and three spanning all 14.
+  The largest fragment remains 586 flakes and the count at least 100 is
+  unchanged, so this is useful gap closure rather than a giant collapse.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened
