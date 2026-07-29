@@ -48,6 +48,7 @@ from backend.slab_gap_reanalysis import (
     _cell_normal,
     _mask_covering_points,
 )
+from backend.slab_gap_census import _cropped_gap_context, _ct_gate
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -58,6 +59,42 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_gap_census_gate_and_block_aligned_crop(self) -> None:
+        evidence = {
+            "depthAlignedTextureScore": 0.55,
+            "materialFraction": 0.9,
+            "bestDepthOffsetVoxels": -2.0,
+            "fiberAngleResidualDeg": 3.0,
+        }
+        gate = _ct_gate(evidence, 0.5, 0.35, 4.0, 12.0)
+        self.assertTrue(gate["queuedForDenseAcus"])
+        self.assertAlmostEqual(
+            gate["thresholdSlack"]["depthAlignedTextureScore"], 0.05
+        )
+        evidence["bestDepthOffsetVoxels"] = -5.0
+        gate = _ct_gate(evidence, 0.5, 0.35, 4.0, 12.0)
+        self.assertFalse(gate["queuedForDenseAcus"])
+        self.assertIn("depth", gate["rejectionReasons"])
+
+        support = np.ones((30, 30), dtype=bool)
+        gap_mask = np.zeros_like(support)
+        gap_mask[5:14, 9:20] = True
+        carrier = {
+            "surfaceXYZ": np.zeros((30, 30, 3), dtype=np.float32),
+            "normalXYZ": np.zeros((30, 30, 3), dtype=np.float32),
+            "fiberXYZ": np.zeros((30, 30, 3), dtype=np.float32),
+            "supportMask": support,
+            "frame": {},
+        }
+        cropped, cropped_gap = _cropped_gap_context(
+            carrier, {"bboxYX": [5, 14, 9, 20], "mask": gap_mask, "gapId": 1}
+        )
+        self.assertEqual(cropped["supportMask"].shape, (16, 16))
+        self.assertEqual(
+            int(np.count_nonzero(cropped_gap["mask"])),
+            int(np.count_nonzero(gap_mask)),
+        )
+
     def test_targeted_gap_acceptance_requires_ct_and_global_ownership(self) -> None:
         candidate = {
             "targetRank": 1,
@@ -79,6 +116,9 @@ class RectifierTests(unittest.TestCase):
         )
         self.assertEqual(accepted, [])
         self.assertIn("ct-evidence", diagnostics[0]["rejectionReasons"])
+        self.assertAlmostEqual(
+            diagnostics[0]["thresholdSlack"]["depthAlignedTextureScore"], -0.01
+        )
         candidate["depthAlignedTextureScore"] = 0.51
         accepted, diagnostics = _accepted_candidates(
             [candidate], scores, metrics, 0.55, 0.04, 0.04, 0.5, 8.0

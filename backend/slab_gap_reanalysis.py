@@ -25,6 +25,7 @@ from .slab_carrier_gaps import (
 )
 from .slab_carrier_growth import _flake_arrays, _score_growth_candidates
 from .slab_flakes import _catalog_records_for_cell, _fit_cell_flakes
+from .slab_gap_census import GAP_CENSUS_VERSION, _content_identity
 from .slab_sheetlet_carriers import (
     _carrier_yield,
     _contrast,
@@ -35,7 +36,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-GAP_REANALYSIS_VERSION = 1
+GAP_REANALYSIS_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -347,6 +348,7 @@ def _accepted_candidates(
         )
         ownership_order = np.argsort(score_by_state[:, best_index])[::-1]
         best_owner = int(ownership_order[0]) + 1
+        best_owner_score = float(score_by_state[ownership_order[0], best_index])
         other_scores = np.delete(score_by_state[:, best_index], target_rank - 1)
         second_owner_score = float(np.max(other_scores, initial=0.0))
         mode_margin = best_score - second_mode_score
@@ -361,6 +363,16 @@ def _accepted_candidates(
         ct_evidence = float(candidates[best_index]["depthAlignedTextureScore"])
         if ct_evidence < minimum_ct_evidence:
             reasons.append("ct-evidence")
+        threshold_slack = {
+            "score": round(best_score - score_threshold, 4),
+            "modeMargin": round(mode_margin - minimum_mode_margin, 4),
+            "ownershipMargin": round(
+                ownership_margin - minimum_ownership_margin, 4
+            ),
+            "depthAlignedTextureScore": round(
+                ct_evidence - minimum_ct_evidence, 4
+            ),
+        }
         diagnostics.append(
             {
                 "targetRank": target_rank,
@@ -370,6 +382,7 @@ def _accepted_candidates(
                 "score": round(best_score, 4),
                 "modeMargin": round(mode_margin, 4),
                 "bestCarrierRank": best_owner,
+                "bestCarrierScore": round(best_owner_score, 4),
                 "ownershipMargin": round(ownership_margin, 4),
                 "depthAlignedTextureScore": round(ct_evidence, 4),
                 "heightResidualVoxels": round(
@@ -380,6 +393,10 @@ def _accepted_candidates(
                 ),
                 "fiberResidualDeg": round(
                     float(metrics["fiberAngle"][best_index]), 3
+                ),
+                "thresholdSlack": threshold_slack,
+                "minimumThresholdSlack": round(
+                    min(float(value) for value in threshold_slack.values()), 4
                 ),
                 "accepted": not reasons,
                 "rejectionReasons": reasons,
@@ -451,9 +468,124 @@ def _gap_support_on_carrier(
     return output
 
 
+def _post_fit_diagnostics(
+    member_flakes: list[dict[str, Any]],
+    accepted_indices: list[int],
+    candidates: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    if not accepted_indices:
+        return {}
+    accepted_modes = [candidates[index] for index in accepted_indices]
+    combined = member_flakes + accepted_modes
+    arrays = _flake_arrays(combined)
+    member_count = len(member_flakes)
+    output: dict[int, dict[str, Any]] = {}
+    for local_index, candidate_index in enumerate(accepted_indices):
+        candidate_position = member_count + local_index
+        support_indices = np.asarray(
+            [index for index in range(len(combined)) if index != candidate_position],
+            dtype=np.int64,
+        )
+        scored = _score_growth_candidates(
+            support_indices,
+            np.asarray([candidate_position], dtype=np.int64),
+            arrays,
+            combined,
+        )
+        before = next(
+            value
+            for value in diagnostics
+            if int(value["candidateIndex"]) == candidate_index
+        )
+        score = float(scored["score"][0])
+        output[candidate_index] = {
+            "score": round(score, 4),
+            "scoreDrift": round(score - float(before["score"]), 4),
+            "heightResidualVoxels": round(
+                float(scored["heightResidual"][0]), 3
+            ),
+            "normalResidualDeg": round(float(scored["normalAngle"][0]), 3),
+            "fiberResidualDeg": round(float(scored["fiberAngle"][0]), 3),
+            "nearestPlanarDistanceVoxels": round(
+                float(scored["nearestPlanarDistance"][0]), 3
+            ),
+        }
+    return output
+
+
+def _classify_gap(
+    target_rank: int,
+    candidate_indices: list[int],
+    accepted_indices: set[int],
+    candidates: list[dict[str, Any]],
+    metrics: dict[str, np.ndarray],
+    diagnostics: list[dict[str, Any]],
+    score_threshold: float,
+) -> dict[str, Any]:
+    accepted = [index for index in candidate_indices if index in accepted_indices]
+    if accepted:
+        return {
+            "label": "recovered-missing-evidence",
+            "acceptedFineFlakeCount": len(accepted),
+        }
+    owned_elsewhere = [
+        value
+        for value in diagnostics
+        if int(value["bestCarrierRank"]) != target_rank
+        and float(value["bestCarrierScore"]) >= score_threshold
+    ]
+    if owned_elsewhere:
+        best = max(owned_elsewhere, key=lambda value: float(value["bestCarrierScore"]))
+        return {
+            "label": "owned-by-another-carrier",
+            "acceptedFineFlakeCount": 0,
+            "bestCarrierRank": int(best["bestCarrierRank"]),
+            "bestCarrierScore": float(best["bestCarrierScore"]),
+        }
+    near_surface = [
+        index
+        for index in candidate_indices
+        if float(metrics["heightResidual"][index]) <= 4.0
+    ]
+    minimum_near_fiber = min(
+        (float(metrics["fiberAngle"][index]) for index in near_surface),
+        default=None,
+    )
+    if minimum_near_fiber is not None and minimum_near_fiber >= 40.0:
+        return {
+            "label": "orthogonal-near-surface",
+            "acceptedFineFlakeCount": 0,
+            "minimumNearSurfaceFiberResidualDeg": round(minimum_near_fiber, 3),
+        }
+    fiber_matched = [
+        index
+        for index in candidate_indices
+        if float(metrics["fiberAngle"][index]) <= 12.0
+    ]
+    minimum_fiber_height = min(
+        (float(metrics["heightResidual"][index]) for index in fiber_matched),
+        default=None,
+    )
+    if minimum_fiber_height is not None and minimum_fiber_height > 6.0:
+        return {
+            "label": "matching-fiber-at-other-depth",
+            "acceptedFineFlakeCount": 0,
+            "minimumFiberMatchedHeightResidualVoxels": round(
+                minimum_fiber_height, 3
+            ),
+        }
+    if not candidate_indices:
+        return {"label": "no-dense-acus-mode", "acceptedFineFlakeCount": 0}
+    return {
+        "label": "insufficient-joint-agreement",
+        "acceptedFineFlakeCount": 0,
+    }
+
+
 def reanalyze_carrier_gaps(
     output_root: str | Path,
-    ranks: tuple[int, ...] = (11, 12),
+    ranks: tuple[int, ...] | None = None,
     fine_stride: float = 8.0,
     candidate_spacing: int = 2,
     maximum_per_bin: int = 256,
@@ -467,7 +599,21 @@ def reanalyze_carrier_gaps(
     """Re-extract Acus needles only inside selected CT-positive carrier gaps."""
     root = Path(output_root)
     output_path = root / f"sheetlet-gap-reanalysis-v{GAP_REANALYSIS_VERSION}.json"
-    selected_ranks = tuple(sorted(set(int(value) for value in ranks)))
+    census_path = root / f"sheetlet-gap-census-v{GAP_CENSUS_VERSION}.json"
+    if not census_path.is_file():
+        raise ValueError("all-carrier gap census is required before targeted reanalysis")
+    census = json.loads(census_path.read_text())
+    selected_ranks = tuple(
+        sorted(
+            set(
+                int(value)
+                for value in (
+                    census["queue"]["ranks"] if ranks is None else ranks
+                )
+            )
+        )
+    )
+    input_identity = {"census": _content_identity(census_path)}
     settings = {
         "ranks": list(selected_ranks),
         "fineGridStrideVoxels": float(fine_stride),
@@ -482,7 +628,10 @@ def reanalyze_carrier_gaps(
     }
     if output_path.is_file() and not force:
         cached = json.loads(output_path.read_text())
-        if cached.get("settings") == settings:
+        if (
+            cached.get("settings") == settings
+            and cached.get("identity", {}).get("inputArtifacts") == input_identity
+        ):
             return cached
 
     started = time.monotonic()
@@ -492,16 +641,15 @@ def reanalyze_carrier_gaps(
     gap_fill = json.loads(
         (root / f"sheetlet-carrier-gaps-v{CARRIER_GAP_VERSION}.json").read_text()
     )
-    preview_path = root / f"sheetlet-gaps-v{CARRIER_GAP_VERSION}" / "summary-top12.json"
-    if not preview_path.is_file():
-        raise ValueError("gap CT preview summary is required before targeted reanalysis")
-    preview = json.loads(preview_path.read_text())
     ct_by_rank = {
-        rank: {
-            int(value["gapId"]): value["ctEvidence"]
-            for value in candidate.get("gapEvidence", [])
+        int(state["rank"]): {
+            int(value["gapId"]): {
+                "ctEvidence": value["ctEvidence"],
+                "gate": value["gate"],
+            }
+            for value in state.get("gaps", [])
         }
-        for rank, candidate in enumerate(preview["candidates"], start=1)
+        for state in census["states"]
     }
     with np.load(root / gap_fill["artifact"]) as payload:
         member_index = np.asarray(payload["memberIndex"], dtype=np.uint32)
@@ -512,10 +660,18 @@ def reanalyze_carrier_gaps(
     ]
     if not selected_ranks or min(selected_ranks) < 1 or max(selected_ranks) > len(state_members):
         raise ValueError(f"ranks must fall between 1 and {len(state_members)}")
-    missing_ct_ranks = [rank for rank in selected_ranks if rank not in ct_by_rank]
+    missing_ct_ranks = [
+        rank
+        for rank in selected_ranks
+        if rank not in ct_by_rank
+        or not any(
+            bool(value["gate"]["queuedForDenseAcus"])
+            for value in ct_by_rank[rank].values()
+        )
+    ]
     if missing_ct_ranks:
         raise ValueError(
-            "gap CT preview does not cover ranks "
+            "gap census has no CT-positive gaps for ranks "
             + ", ".join(str(value) for value in missing_ct_ranks)
         )
 
@@ -538,10 +694,37 @@ def reanalyze_carrier_gaps(
         )
         gap_outputs = []
         for gap in gaps:
-            ct_evidence = ct_by_rank[rank].get(int(gap["gapId"]), {})
+            ct_record = ct_by_rank[rank].get(int(gap["gapId"]), {})
+            ct_evidence = ct_record.get("ctEvidence", {})
+            ct_gate = ct_record.get(
+                "gate",
+                {
+                    "queuedForDenseAcus": False,
+                    "rejectionReasons": ["missing-census-evidence"],
+                },
+            )
             depth_aligned_texture = float(
                 ct_evidence.get("depthAlignedTextureScore", 0.0)
             )
+            if not bool(ct_gate["queuedForDenseAcus"]):
+                gap_outputs.append(
+                    {
+                        **{key: value for key, value in gap.items() if key != "mask"},
+                        "status": "ct-rejected",
+                        "sampleCount": 0,
+                        "ctEvidence": ct_evidence,
+                        "ctGate": ct_gate,
+                        "samplePointsYX": [],
+                        "extraction": None,
+                        "coarse": {"fittedModeCount": 0, "samples": []},
+                        "dense": {
+                            "fittedModeCount": 0,
+                            "candidateRange": [len(all_candidates), len(all_candidates)],
+                            "samples": [],
+                        },
+                    }
+                )
+                continue
             samples_yx = _mask_covering_points(
                 gap["mask"],
                 fine_stride / float(carrier["stats"]["pixelStepVoxels"]),
@@ -628,8 +811,10 @@ def reanalyze_carrier_gaps(
             gap_outputs.append(
                 {
                     **{key: value for key, value in gap.items() if key != "mask"},
+                    "status": "reanalyzed",
                     "sampleCount": int(len(sample_points)),
                     "ctEvidence": ct_evidence,
+                    "ctGate": ct_gate,
                     "samplePointsYX": samples_yx.astype(int).tolist(),
                     "extraction": extraction,
                     "coarse": {
@@ -700,6 +885,26 @@ def reanalyze_carrier_gaps(
             if int(all_candidates[index]["targetRank"]) == rank
         ]
         accepted_modes = [all_candidates[index] for index in accepted_for_rank]
+        rank_candidate_indices = [
+            index
+            for index, candidate in enumerate(all_candidates)
+            if int(candidate["targetRank"]) == rank
+        ]
+        rank_diagnostics = [
+            value
+            for value in sample_diagnostics
+            if int(value["targetRank"]) == rank
+        ]
+        post_fit = _post_fit_diagnostics(
+            context["memberFlakes"],
+            accepted_for_rank,
+            all_candidates,
+            rank_diagnostics,
+        )
+        for diagnostic in rank_diagnostics:
+            candidate_index = int(diagnostic["candidateIndex"])
+            if candidate_index in post_fit:
+                diagnostic["postFit"] = post_fit[candidate_index]
         final_carrier = _mls_carrier(context["memberFlakes"] + accepted_modes)
         gap_map = np.zeros(context["carrier"]["supportMask"].shape, dtype=np.uint8)
         gap_map[context["carrier"]["supportMask"]] = 48
@@ -738,16 +943,6 @@ def reanalyze_carrier_gaps(
         best_path.write_bytes(
             grayscale_png(_contrast(stack[best_index], final_carrier["supportMask"]))
         )
-        rank_candidate_indices = [
-            index
-            for index, candidate in enumerate(all_candidates)
-            if int(candidate["targetRank"]) == rank
-        ]
-        rank_diagnostics = [
-            value
-            for value in sample_diagnostics
-            if int(value["targetRank"]) == rank
-        ]
         near_surface = [
             index
             for index in rank_candidate_indices
@@ -775,6 +970,38 @@ def reanalyze_carrier_gaps(
                 if int(value["candidateIndex"]) == index
             )
             serialized_modes.append({**mode, "acceptance": diagnostic})
+        classified_gaps = []
+        for gap_output in context["gapOutputs"]:
+            gap_id = int(gap_output["gapId"])
+            gap_candidates = [
+                index
+                for index in rank_candidate_indices
+                if int(all_candidates[index]["targetGapId"]) == gap_id
+            ]
+            gap_diagnostics = [
+                value
+                for value in rank_diagnostics
+                if int(value["gapId"]) == gap_id
+            ]
+            classification = (
+                {
+                    "label": "ct-negative",
+                    "acceptedFineFlakeCount": 0,
+                }
+                if gap_output["status"] == "ct-rejected"
+                else _classify_gap(
+                    rank,
+                    gap_candidates,
+                    accepted_set,
+                    all_candidates,
+                    metrics,
+                    gap_diagnostics,
+                    score_threshold,
+                )
+            )
+            classified_gaps.append(
+                {**gap_output, "classification": classification}
+            )
         rank_outputs.append(
             {
                 "rank": rank,
@@ -783,7 +1010,7 @@ def reanalyze_carrier_gaps(
                 "candidateModeCount": len(rank_candidate_indices),
                 "initialCarrier": context["carrier"]["stats"],
                 "finalCarrier": final_carrier["stats"],
-                "gaps": context["gapOutputs"],
+                "gaps": classified_gaps,
                 "sampleDiagnostics": rank_diagnostics,
                 "failureProfile": {
                     "nearSurfaceCandidateCount": len(near_surface),
@@ -824,9 +1051,8 @@ def reanalyze_carrier_gaps(
         "identity": {
             "version": GAP_REANALYSIS_VERSION,
             "analysis": analysis["identity"],
-            "input": str(
-                root / f"sheetlet-carrier-gaps-v{CARRIER_GAP_VERSION}.json"
-            ),
+            "input": str(census_path),
+            "inputArtifacts": input_identity,
         },
         "settings": settings,
         "ranks": rank_outputs,
@@ -841,6 +1067,20 @@ def reanalyze_carrier_gaps(
             "candidateModeCount": len(all_candidates),
             "acceptedFineFlakeCount": len(accepted_set),
             "allCarrierOwnershipChecks": len(state_members) * len(all_candidates),
+            "classificationCounts": {
+                label: sum(
+                    int(gap["classification"]["label"] == label)
+                    for value in rank_outputs
+                    for gap in value["gaps"]
+                )
+                for label in sorted(
+                    {
+                        gap["classification"]["label"]
+                        for value in rank_outputs
+                        for gap in value["gaps"]
+                    }
+                )
+            },
         },
     }
     _atomic_json(output_path, result)

@@ -16,7 +16,9 @@ if str(ROOT) not in sys.path:
 from backend.slab_gap_reanalysis import reanalyze_carrier_gaps  # noqa: E402
 
 
-def _ranks(value: str) -> tuple[int, ...]:
+def _ranks(value: str) -> tuple[int, ...] | None:
+    if value.strip().lower() == "auto":
+        return None
     try:
         parsed = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     except ValueError as error:
@@ -31,7 +33,12 @@ def main() -> None:
         description="Re-extract dense Acus needles only inside selected carrier gaps."
     )
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--ranks", type=_ranks, default=(11, 12))
+    parser.add_argument(
+        "--ranks",
+        type=_ranks,
+        default=None,
+        help="comma-separated carrier ranks, or auto for the census queue",
+    )
     parser.add_argument("--fine-stride", type=float, default=8.0)
     parser.add_argument("--candidate-spacing", type=int, default=2)
     parser.add_argument("--maximum-per-bin", type=int, default=256)
@@ -66,6 +73,13 @@ def main() -> None:
                         "acceptedFineFlakeCount": value["acceptedFineFlakeCount"],
                         "gapPixels": value["gapPixels"],
                         "failureProfile": value["failureProfile"],
+                        "classifications": [
+                            {
+                                "gapId": gap["gapId"],
+                                "classification": gap["classification"],
+                            }
+                            for gap in value["gaps"]
+                        ],
                         "initialCarrier": value["initialCarrier"],
                         "finalCarrier": value["finalCarrier"],
                         "artifacts": value["artifacts"],

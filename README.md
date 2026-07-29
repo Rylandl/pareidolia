@@ -201,22 +201,33 @@ silently using synthetic padding.
   focused candidates for denser local Acus re-analysis rather than permissive
   CT-only filling. Gap maps and exact previews are stored under
   `work/cross-scroll-analysis-z512/sheetlet-gaps-v1`.
+- `python3 scripts/census-sheetlet-gaps.py --root
+  work/cross-scroll-analysis-z512` scans enclosed gaps in every final carrier.
+  CT sampling is cropped to block-aligned gap bounds, preserving the texture
+  estimator's original grid phase while avoiding full-carrier resampling. The
+  census takes 17.3 seconds: 44 of 121 carriers contain 65 enclosed gaps with
+  78,083 square voxels of total area, but only ranks 11, 12, and 24 pass the
+  depth-aligned texture, material, depth, and fiber gates. The nearest rejected
+  gap has a 0.4121 texture score, leaving a clear separation from the weakest
+  queued score of 0.5521. Upstream artifacts are content-hashed so a stale
+  census cannot survive regenerated carrier inputs. Results are stored in
+  `work/cross-scroll-analysis-z512/sheetlet-gap-census-v1.json`.
 - `python3 scripts/reanalyze-sheetlet-gaps.py --root
-  work/cross-scroll-analysis-z512 --ranks 11,12` re-extracts Acus needles only
-  around CT-positive enclosed gaps. It uses an 8-voxel cell covering,
-  2-voxel candidate spacing, up to 640 needles per cell, and the GPU Hessian
-  path, then requires a 0.55 carrier score, a 0.50 depth-aligned CT texture
-  score, best-vs-second mode separation, and best ownership across all 121
-  carriers. The two-rank run takes 9.5 seconds and checks 39 new modes against
-  every carrier. Rank 11 remains empty for a useful reason: its two
-  near-surface modes are about 88.3 degrees from the carrier fiber, while the
-  matching fiber family is at least 13.5 voxels away. Rank 12 gains one
-  independently fitted flake with 56 needles, 3.744-voxel height residual,
-  5.491-degree normal residual, and 1.980-degree fiber residual. That single
-  flake supports all 133 pixels of the enclosed hole while changing median
-  carrier height residual from 1.408 to 1.431 voxels and median normal residual
-  from 3.014 to 3.017 degrees. Outputs are stored under
-  `work/cross-scroll-analysis-z512/sheetlet-gap-reanalysis-v1`.
+  work/cross-scroll-analysis-z512 --ranks auto` re-extracts Acus needles only
+  for the census queue. It uses an 8-voxel cell covering, 2-voxel candidate
+  spacing, up to 640 needles per cell, and the GPU Hessian path, then requires
+  a 0.55 carrier score, a 0.50 depth-aligned CT texture score,
+  best-vs-second mode separation, and best ownership across all 121 carriers.
+  The three-rank run takes 10.4 seconds and checks 55 new modes through 6,655
+  carrier comparisons. Rank 11 is classified as orthogonal near-surface
+  evidence: its two near-surface modes are about 88.3 degrees from the carrier
+  fiber, while the matching family is at least 13.5 voxels away. Rank 12 gains
+  one 56-needle flake that supports all 133 gap pixels; its acceptance score is
+  0.5606 with 0.0106 threshold slack and zero post-fit score drift. Rank 24 has
+  strong near-surface evidence, but carrier 3 fits it better (0.7419 versus
+  0.7111), so ownership rejects the fill. Per-threshold slack, global
+  ownership, post-fit rescoring, and gap classifications are recorded in
+  `work/cross-scroll-analysis-z512/sheetlet-gap-reanalysis-v2.json`.
 
 The included bounded Zarr importer reads raw, uncompressed Zarr v2 chunks into
 a local `.npy` cuboid. Whole-scroll multiscale navigation and demand-loaded
