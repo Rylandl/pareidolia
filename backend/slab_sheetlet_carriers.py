@@ -10,10 +10,11 @@ import numpy as np
 
 from .rectify import _trilinear, grayscale_png
 from .slab_flakes import slab_flake_plane
+from .slab_sheetlet_explore import SHEETLET_EXPLORE_VERSION
 
 
-CARRIER_VERSION = 1
-CARRIER_SCREEN_VERSION = 1
+CARRIER_VERSION = 5
+CARRIER_SCREEN_VERSION = 5
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -179,6 +180,28 @@ def _mls_carrier(
             )
         )
     )
+    normal_families = np.asarray(
+        [int(flake.get("normalFamily", 0)) for flake in flakes], dtype=np.uint8
+    )
+    family_stats = {}
+    for family_index in np.unique(normal_families):
+        family_mask = normal_families == family_index
+        family_stats[str(int(family_index))] = {
+            "flakeCount": int(np.count_nonzero(family_mask)),
+            "medianQuality": round(float(np.median(quality[family_mask])), 4),
+            "medianNodeHeightResidualVoxels": round(
+                float(np.median(height_residual[family_mask])), 3
+            ),
+            "p90NodeHeightResidualVoxels": round(
+                float(np.percentile(height_residual[family_mask], 90)), 3
+            ),
+            "medianNodeNormalResidualDeg": round(
+                float(np.median(normal_residual[family_mask])), 3
+            ),
+            "p90NodeNormalResidualDeg": round(
+                float(np.percentile(normal_residual[family_mask], 90)), 3
+            ),
+        }
     return {
         "uValues": u_values,
         "vValues": v_values,
@@ -187,6 +210,8 @@ def _mls_carrier(
         "fiberXYZ": fiber_grid.astype(np.float32),
         "supportMask": mask.reshape(shape),
         "frame": frame,
+        "nodeHeightResidualVoxels": height_residual.astype(np.float32),
+        "nodeNormalResidualDeg": normal_residual.astype(np.float32),
         "stats": {
             "pixelStepVoxels": round(step, 4),
             "shapeYX": [int(shape[0]), int(shape[1])],
@@ -196,6 +221,7 @@ def _mls_carrier(
             "p90NodeHeightResidualVoxels": round(float(np.percentile(height_residual, 90)), 3),
             "medianNodeNormalResidualDeg": round(float(np.median(normal_residual)), 3),
             "p90NodeNormalResidualDeg": round(float(np.percentile(normal_residual, 90)), 3),
+            "normalFamilies": family_stats,
         },
     }
 
@@ -385,9 +411,14 @@ def _load_carrier_catalog(
     analysis = json.loads((root / "analysis.json").read_text())
     source_path = Path(analysis["identity"]["source"])
     candidate_payload = json.loads(
-        (root / "sheetlets-explore-v1-candidates.json").read_text()
+        (
+            root
+            / f"sheetlets-explore-v{SHEETLET_EXPLORE_VERSION}-candidates.json"
+        ).read_text()
     )
-    with np.load(root / "sheetlets-explore-v1-components.npz") as payload:
+    with np.load(
+        root / f"sheetlets-explore-v{SHEETLET_EXPLORE_VERSION}-components.npz"
+    ) as payload:
         component = np.asarray(payload["component"], dtype=np.uint32)
     grid = json.loads((root / "grid.json").read_text())
     planes = [
@@ -447,6 +478,7 @@ def screen_sheetlet_carriers(
     }
     identity = {
         "version": CARRIER_SCREEN_VERSION,
+        "sheetletIdentity": candidate_payload.get("identity"),
         "sheetletThreshold": candidate_payload["settings"]["selectedThreshold"],
         "source": str(source_path),
         "sourceMtimeNs": source_path.stat().st_mtime_ns,
@@ -694,6 +726,7 @@ def build_sheetlet_carriers(
     result = {
         "identity": {
             "version": CARRIER_VERSION,
+            "sheetletIdentity": candidate_payload.get("identity"),
             "sheetletThreshold": candidate_payload["settings"]["selectedThreshold"],
             "source": str(source_path),
             "sourceMtimeNs": source_path.stat().st_mtime_ns,

@@ -11,7 +11,7 @@ import numpy as np
 from .slab_flakes import FLAKE_CACHE_VERSION, slab_flake_plane
 
 
-SHEETLET_EXPLORE_VERSION = 1
+SHEETLET_EXPLORE_VERSION = 5
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -54,6 +54,9 @@ def _score_batch(
         [flake["crossFiber"] for flake in flakes], dtype=np.float32
     )
     qualities = np.asarray([flake["quality"] for flake in flakes], dtype=np.float32)
+    normal_families = np.asarray(
+        [int(flake.get("normalFamily", 0)) for flake in flakes], dtype=np.uint8
+    )
     radius_fiber = np.asarray(
         [flake["radiusFiber"] for flake in flakes], dtype=np.float32
     )
@@ -159,6 +162,7 @@ def _score_batch(
         (edge_residual <= 12.0)
         & (fiber_angle <= 40.0)
         & (normal_bend <= 75.0)
+        & (normal_families[sources] == normal_families[targets])
         & (reach_ratio <= 2.0)
         & (score >= 0.12)
     )
@@ -314,6 +318,9 @@ def _sweep_summary(
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     accepted = links["score"] >= threshold
     cell_indices = np.asarray([flake["cellIndex"] for flake in flakes], dtype=np.int32)
+    normal_families = np.asarray(
+        [int(flake.get("normalFamily", 0)) for flake in flakes], dtype=np.uint8
+    )
     cell_shape = np.max(cell_indices, axis=0) + 1
     cell_code = (
         cell_indices[:, 0].astype(np.int64)
@@ -365,6 +372,9 @@ def _sweep_summary(
                 "maximumXYZ": np.round(np.max(member_centers, axis=0), 2).tolist(),
                 "medianDegree": round(float(np.median(degree[member])), 2),
                 "maximumDegree": int(np.max(degree[member])),
+                "secondaryFamilyNodeCount": int(
+                    np.count_nonzero(normal_families[member] == 1)
+                ),
             }
         )
     return (
@@ -378,6 +388,14 @@ def _sweep_summary(
             "retainedZLinkCount": int(np.count_nonzero(axes == 2)),
             "linkedNodeCount": int(np.count_nonzero(linked)),
             "linkedNodeFraction": round(float(np.mean(linked)), 4),
+            "secondaryLinkedNodeCount": int(
+                np.count_nonzero(linked & (normal_families == 1))
+            ),
+            "secondaryLinkedNodeFraction": round(
+                float(np.count_nonzero(linked & (normal_families == 1)))
+                / max(int(np.count_nonzero(normal_families == 1)), 1),
+                4,
+            ),
             "componentCount": int(len(linked_component_sizes)),
             "medianComponentSize": _median(linked_component_sizes.astype(np.float32), 2),
             "p90ComponentSize": round(float(np.percentile(linked_component_sizes, 90)), 2)
@@ -421,9 +439,26 @@ def _candidate_catalog(
     component_sizes: np.ndarray,
     degree: np.ndarray,
     minimum_size: int = 20,
+    minimum_secondary_seed_size: int = 5,
 ) -> list[dict[str, Any]]:
+    normal_families = np.asarray(
+        [int(flake.get("normalFamily", 0)) for flake in flakes], dtype=np.uint8
+    )
+    secondary_counts = np.bincount(
+        component,
+        weights=(normal_families == 1).astype(np.int32),
+        minlength=len(component_sizes),
+    ).astype(np.int32)
+    pure_secondary = secondary_counts == component_sizes
     candidate_ids = set(
-        int(value) for value in np.flatnonzero(component_sizes >= minimum_size)
+        int(value)
+        for value in np.flatnonzero(
+            (component_sizes >= minimum_size)
+            | (
+                pure_secondary
+                & (component_sizes >= minimum_secondary_seed_size)
+            )
+        )
     )
     members: dict[int, list[int]] = {value: [] for value in candidate_ids}
     for node_index, component_id in enumerate(component):
@@ -477,6 +512,7 @@ def _candidate_catalog(
             * math.exp(-0.5 * (edge_fiber_p90 / 12.0) ** 2)
         )
         axes = links["axis"][edge] if len(edge) else np.empty(0, dtype=np.uint8)
+        secondary_count = int(np.count_nonzero(normal_families[member] == 1))
         catalog.append(
             {
                 "componentId": component_id,
@@ -506,6 +542,15 @@ def _candidate_catalog(
                 "medianQuality": _median(quality[member], 4),
                 "medianDegree": _median(degree[member].astype(np.float32), 2),
                 "boundaryNodeFraction": round(float(np.mean(degree[member] <= 1)), 4),
+                "secondaryFamilyNodeCount": secondary_count,
+                "secondaryFamilyNodeFraction": round(
+                    secondary_count / max(len(member), 1), 4
+                ),
+                "candidateClass": (
+                    "secondary-seed"
+                    if secondary_count == len(member)
+                    else "legacy-scale"
+                ),
                 "rank": round(float(rank), 3),
             }
         )
@@ -529,7 +574,14 @@ def analyze_sheetlets_exploratory(
         and candidate_path.is_file()
         and not force
     ):
-        return json.loads(summary_path.read_text())
+        cached = json.loads(summary_path.read_text())
+        if (
+            int(cached.get("identity", {}).get("version", -1))
+            == SHEETLET_EXPLORE_VERSION
+            and int(cached.get("identity", {}).get("flakeCacheVersion", -1))
+            == FLAKE_CACHE_VERSION
+        ):
+            return cached
 
     started = time.monotonic()
     grid = json.loads((root / "grid.json").read_text())
@@ -574,8 +626,20 @@ def analyze_sheetlets_exploratory(
     selected_threshold = float(selected["threshold"])
     component, component_sizes, degree, retained = component_results[selected_threshold]
     candidates = _candidate_catalog(
-        flakes, links, retained, component, component_sizes, degree, minimum_size=20
+        flakes,
+        links,
+        retained,
+        component,
+        component_sizes,
+        degree,
+        minimum_size=20,
+        minimum_secondary_seed_size=5,
     )
+    result_identity = {
+        "version": SHEETLET_EXPLORE_VERSION,
+        "flakeCacheVersion": FLAKE_CACHE_VERSION,
+        "flakeIdentities": [plane["identity"] for plane in planes],
+    }
     source_z = np.asarray([flake["sourceZIndex"] for flake in flakes], dtype=np.uint8)
     source_flake_id = np.asarray(
         [flake["sourceFlakeId"] for flake in flakes], dtype=np.uint32
@@ -598,9 +662,11 @@ def analyze_sheetlets_exploratory(
     _atomic_json(
         candidate_path,
         {
+            "identity": result_identity,
             "settings": {
                 "selectedThreshold": selected_threshold,
                 "minimumComponentSize": 20,
+                "minimumPureSecondarySeedSize": 5,
                 "normalDeviationIsDescriptiveNotPenalized": True,
             },
             "stats": {
@@ -615,16 +681,21 @@ def analyze_sheetlets_exploratory(
                     ),
                     3,
                 ),
+                "secondaryFamilyCandidateCount": int(
+                    np.count_nonzero(
+                        [value["secondaryFamilyNodeCount"] > 0 for value in candidates]
+                    )
+                ),
+                "secondarySeedCandidateCount": sum(
+                    value["candidateClass"] == "secondary-seed"
+                    for value in candidates
+                ),
             },
             "candidates": candidates,
         },
     )
     result = {
-        "identity": {
-            "version": SHEETLET_EXPLORE_VERSION,
-            "flakeCacheVersion": FLAKE_CACHE_VERSION,
-            "flakeIdentities": [plane["identity"] for plane in planes],
-        },
+        "identity": result_identity,
         "settings": {
             "gridSpacingVoxels": int(planes[0]["settings"]["gridStride"]),
             "cellStep": 1,
@@ -633,8 +704,12 @@ def analyze_sheetlets_exploratory(
             "edgeResidualScaleVoxels": 4.0,
             "fiberAngleScaleDeg": 12.0,
             "maximumNormalBendDeg": 75.0,
+            "crossFamilyLinksAllowed": False,
             "normalBendPenalized": False,
-            "componentConstraint": "at most one flake per Acus cell",
+            "componentConstraint": (
+                "at most one local surface hypothesis per Acus cell in a component; "
+                "distinct normal families remain separate components"
+            ),
             "selectedThreshold": selected_threshold,
             "construction": (
                 "mutual neighbor matches by transported fiber direction and finite-patch "
@@ -644,9 +719,21 @@ def analyze_sheetlets_exploratory(
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),
             "nodeCount": len(flakes),
+            "primaryFamilyNodeCount": sum(
+                int(flake.get("normalFamily", 0)) == 0 for flake in flakes
+            ),
+            "secondaryFamilyNodeCount": sum(
+                int(flake.get("normalFamily", 0)) == 1 for flake in flakes
+            ),
             "candidateMutualLinkCount": int(len(links["score"])),
             "selected": selected,
-            "substantialCandidateCount": len(candidates),
+            "candidateCount": len(candidates),
+            "substantialCandidateCount": sum(
+                value["candidateClass"] == "legacy-scale" for value in candidates
+            ),
+            "secondarySeedCandidateCount": sum(
+                value["candidateClass"] == "secondary-seed" for value in candidates
+            ),
             "topRankedCandidates": candidates[:12],
             "sweeps": sweeps,
             "constraint": (

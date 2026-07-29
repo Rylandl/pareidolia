@@ -8,7 +8,12 @@ from typing import Any
 import numpy as np
 
 from .rectify import grayscale_png
-from .slab_carrier_assembly import _carrier_boundary, _score_point_pairs
+from .slab_carrier_assembly import (
+    CARRIER_ASSEMBLY_VERSION,
+    CARRIER_BOUNDARY_VERSION,
+    _carrier_boundary,
+    _score_point_pairs,
+)
 from .slab_carrier_growth import _flake_arrays, _score_growth_candidates
 from .slab_sheetlet_carriers import (
     _carrier_yield,
@@ -20,7 +25,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-CARRIER_ITERATION_VERSION = 1
+CARRIER_ITERATION_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -37,9 +42,14 @@ def _atomic_npz(path: Path, **arrays: np.ndarray) -> None:
 
 
 def _assembly_seed_groups(root: Path) -> list[dict[str, Any]]:
-    with np.load(root / "sheetlet-carrier-assembly-v1-components.npz") as payload:
+    with np.load(
+        root
+        / f"sheetlet-carrier-assembly-v{CARRIER_ASSEMBLY_VERSION}-components.npz"
+    ) as payload:
         assembly_component = np.asarray(payload["component"], dtype=np.int32)
-    with np.load(root / "sheetlet-carrier-boundaries-v1.npz") as payload:
+    with np.load(
+        root / f"sheetlet-carrier-boundaries-v{CARRIER_BOUNDARY_VERSION}.npz"
+    ) as payload:
         sheetlet_component = np.asarray(payload["componentId"], dtype=np.uint32)
         member_count = np.asarray(payload["memberCount"], dtype=np.uint32)
         source_rank = np.asarray(payload["sourceRank"], dtype=np.uint32)
@@ -113,6 +123,7 @@ def _grow_states(
                     for cell in neighboring_cells
                     for index in by_cell[cell]
                     if index not in reserved
+                    and int(arrays["normalFamily"][index]) == 0
                 }
             )
             if not candidates:
@@ -349,10 +360,20 @@ def iterate_carrier_hypotheses(
         "growthScoreThreshold": growth_score_threshold,
         "growthMinimumMargin": growth_minimum_margin,
         "boundaryScoreThreshold": boundary_score_threshold,
+        "normalFamilyConstraint": "legacy primary family only",
+    }
+    assembly = json.loads(
+        (
+            root / f"sheetlet-carrier-assembly-v{CARRIER_ASSEMBLY_VERSION}.json"
+        ).read_text()
+    )
+    identity = {
+        "version": CARRIER_ITERATION_VERSION,
+        "assemblyIdentity": assembly["identity"],
     }
     if summary_path.is_file() and artifact_path.is_file() and not force:
         cached = json.loads(summary_path.read_text())
-        if cached.get("settings") == settings:
+        if cached.get("identity") == identity and cached.get("settings") == settings:
             return cached
     groups = _assembly_seed_groups(root)
     _, _, flake_component, flakes = _load_carrier_catalog(root)
@@ -366,6 +387,8 @@ def iterate_carrier_hypotheses(
         members = set(
             int(value) for value in np.flatnonzero(np.isin(flake_component, component_ids))
         )
+        if any(int(arrays["normalFamily"][index]) != 0 for index in members):
+            raise ValueError("legacy carrier assembly contains a secondary-family seed")
         states.append(
             {
                 "members": members,
@@ -445,7 +468,7 @@ def iterate_carrier_hypotheses(
         memberOffset=np.asarray(offsets, dtype=np.uint32),
     )
     result = {
-        "identity": {"version": CARRIER_ITERATION_VERSION},
+        "identity": identity,
         "settings": settings,
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from .rectify import grayscale_png
+from .slab_carrier_bridges import CARRIER_BRIDGE_VERSION
 from .slab_carrier_growth import _flake_arrays, _score_growth_candidates
 from .slab_sheetlet_carriers import (
     _carrier_yield,
@@ -20,7 +21,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-CARRIER_GAP_VERSION = 1
+CARRIER_GAP_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -240,7 +241,11 @@ def _state_gap_proposals(
     y, x, inside = _project_flakes_to_carrier(carrier, arrays["center"])
     candidates = np.flatnonzero(inside)
     labels = gap_label[y[candidates], x[candidates]]
-    keep = (labels > 0) & ~np.isin(candidates, members)
+    keep = (
+        (labels > 0)
+        & ~np.isin(candidates, members)
+        & (arrays["normalFamily"][candidates] == 0)
+    )
     candidates = candidates[keep]
     labels = labels[keep]
     if not len(candidates):
@@ -318,13 +323,20 @@ def fill_carrier_gaps(
         "scoreThreshold": float(score_threshold),
         "minimumBestVsSecondMargin": float(minimum_margin),
         "scope": "fully enclosed unsupported carrier regions only",
+        "normalFamilyConstraint": "legacy primary family only",
+    }
+    bridge_path = root / f"sheetlet-carrier-bridges-v{CARRIER_BRIDGE_VERSION}.json"
+    bridges = json.loads(bridge_path.read_text())
+    identity = {
+        "version": CARRIER_GAP_VERSION,
+        "source": bridges["identity"]["source"],
+        "bridgeIdentity": bridges["identity"],
+        "input": str(bridge_path),
     }
     if summary_path.is_file() and artifact_path.is_file() and not force:
         cached = json.loads(summary_path.read_text())
-        if cached.get("settings") == settings:
+        if cached.get("identity") == identity and cached.get("settings") == settings:
             return cached
-
-    bridges = json.loads((root / "sheetlet-carrier-bridges-v1.json").read_text())
     with np.load(root / bridges["artifact"]) as payload:
         member_index = np.asarray(payload["memberIndex"], dtype=np.uint32)
         member_offset = np.asarray(payload["memberOffset"], dtype=np.uint64)
@@ -462,11 +474,7 @@ def fill_carrier_gaps(
         memberOffset=np.asarray(offsets, dtype=np.uint64),
     )
     result = {
-        "identity": {
-            "version": CARRIER_GAP_VERSION,
-            "source": bridges["identity"]["source"],
-            "input": str(root / "sheetlet-carrier-bridges-v1.json"),
-        },
+        "identity": identity,
         "settings": settings,
         "artifact": artifact_path.name,
         "states": state_summaries,
@@ -496,7 +504,11 @@ def build_gap_fill_previews(
     with np.load(root / gaps["artifact"]) as payload:
         member_index = np.asarray(payload["memberIndex"], dtype=np.uint32)
         member_offset = np.asarray(payload["memberOffset"], dtype=np.uint64)
-    bridges = json.loads((root / "sheetlet-carrier-bridges-v1.json").read_text())
+    bridges = json.loads(
+        (
+            root / f"sheetlet-carrier-bridges-v{CARRIER_BRIDGE_VERSION}.json"
+        ).read_text()
+    )
     with np.load(root / bridges["artifact"]) as payload:
         initial_index = np.asarray(payload["memberIndex"], dtype=np.uint32)
         initial_offset = np.asarray(payload["memberOffset"], dtype=np.uint64)

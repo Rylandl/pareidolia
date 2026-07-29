@@ -36,7 +36,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-GAP_REANALYSIS_VERSION = 2
+GAP_REANALYSIS_VERSION = 3
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:

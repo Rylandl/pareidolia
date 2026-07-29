@@ -16,7 +16,7 @@ from .slab_carrier_gaps import (
 from .slab_sheetlet_carriers import _load_carrier_catalog, _mls_carrier, _sample_stack
 
 
-GAP_CENSUS_VERSION = 1
+GAP_CENSUS_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:

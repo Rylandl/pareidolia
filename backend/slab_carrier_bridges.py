@@ -14,6 +14,7 @@ from .slab_carrier_assembly import (
     _transported_fiber_angle,
 )
 from .slab_carrier_growth import _flake_arrays
+from .slab_carrier_iteration import CARRIER_ITERATION_VERSION
 from .slab_sheetlet_carriers import (
     _carrier_yield,
     _contrast,
@@ -24,7 +25,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-CARRIER_BRIDGE_VERSION = 1
+CARRIER_BRIDGE_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -224,7 +225,11 @@ def _flake_bridge_evidence(
 def _load_fixed_states(
     root: Path, arrays: dict[str, np.ndarray]
 ) -> tuple[list[dict[str, Any]], set[int]]:
-    iteration = json.loads((root / "sheetlet-carrier-iteration-v1.json").read_text())
+    iteration = json.loads(
+        (
+            root / f"sheetlet-carrier-iteration-v{CARRIER_ITERATION_VERSION}.json"
+        ).read_text()
+    )
     with np.load(root / iteration["artifact"]) as payload:
         member_index = np.asarray(payload["memberIndex"])
         member_offset = np.asarray(payload["memberOffset"])
@@ -347,17 +352,35 @@ def build_long_range_bridges(
         "bridgeSampleSpacingVoxels": 8.0,
         "selectedThreshold": selected_threshold,
         "thresholdSweep": [0.28, 0.32, 0.36, 0.4, 0.45],
+        "normalFamilyConstraint": "legacy primary family only",
+    }
+    iteration = json.loads(
+        (
+            root / f"sheetlet-carrier-iteration-v{CARRIER_ITERATION_VERSION}.json"
+        ).read_text()
+    )
+    analysis = json.loads((root / "analysis.json").read_text())
+    input_source_path = Path(analysis["identity"]["source"])
+    identity = {
+        "version": CARRIER_BRIDGE_VERSION,
+        "source": str(input_source_path),
+        "iterationIdentity": iteration["identity"],
     }
     if summary_path.is_file() and artifact_path.is_file() and not force:
         cached = json.loads(summary_path.read_text())
-        if cached.get("settings") == settings:
+        if cached.get("identity") == identity and cached.get("settings") == settings:
             return cached
     source_path, _, _, flakes = _load_carrier_catalog(root)
     source = np.load(source_path, mmap_mode="r")
     arrays = _flake_arrays(flakes)
     states, reserved = _load_fixed_states(root, arrays)
     available = np.asarray(
-        [index for index in range(len(flakes)) if index not in reserved], dtype=np.int64
+        [
+            index
+            for index in range(len(flakes))
+            if index not in reserved and int(arrays["normalFamily"][index]) == 0
+        ],
+        dtype=np.int64,
     )
     boundaries = []
     started = time.monotonic()
@@ -484,7 +507,7 @@ def build_long_range_bridges(
         memberOffset=np.asarray(member_offsets, dtype=np.uint32),
     )
     result = {
-        "identity": {"version": CARRIER_BRIDGE_VERSION, "source": str(source_path)},
+        "identity": identity,
         "settings": settings,
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),

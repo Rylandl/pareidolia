@@ -9,9 +9,15 @@ from typing import Any
 import numpy as np
 
 from .acus import _minimal_rotation, _plane_basis
+from .slab_normal_families import (
+    NORMAL_FAMILY_VERSION,
+    _catalog_records_for_cell,
+    _normal_family_partitions,
+    load_normal_families,
+)
 
 
-FLAKE_CACHE_VERSION = 3
+FLAKE_CACHE_VERSION = 5
 
 
 def _atomic_compact_json(path: Path, payload: dict[str, Any]) -> None:
@@ -44,57 +50,6 @@ def _angular_distance_degrees(first: np.ndarray, second: np.ndarray) -> np.ndarr
     return np.minimum(distance, 180.0 - distance)
 
 
-def _catalog_records_for_cell(
-    catalog: np.ndarray,
-    counts: np.ndarray,
-    center: np.ndarray,
-    settings: dict[str, Any],
-    bin_shape_zyx: tuple[int, int, int],
-) -> tuple[np.ndarray, np.ndarray]:
-    cube_size = int(settings["cubeSize"])
-    half_cube = cube_size * 0.5
-    halo = int(settings["halo"])
-    bin_size = int(settings["binSize"])
-    maximum_per_bin = int(settings["maxNeedlesPerBin"])
-    maximum_needles = int(settings["maxNeedles"])
-    radius = max(3, int(math.ceil(float(settings["scale"]) * 2.5)))
-    low_xyz = center - half_cube - radius
-    high_xyz = center + half_cube + radius
-    bin_low_xyz = np.floor((low_xyz - halo) / bin_size).astype(int)
-    bin_high_xyz = np.floor((high_xyz - halo) / bin_size).astype(int)
-    bin_low_xyz = np.maximum(bin_low_xyz, 0)
-    bin_high_xyz = np.minimum(
-        bin_high_xyz,
-        np.asarray(
-            [bin_shape_zyx[2] - 1, bin_shape_zyx[1] - 1, bin_shape_zyx[0] - 1]
-        ),
-    )
-    ids: list[int] = []
-    for bin_z in range(bin_low_xyz[2], bin_high_xyz[2] + 1):
-        for bin_y in range(bin_low_xyz[1], bin_high_xyz[1] + 1):
-            base = (bin_z * bin_shape_zyx[1] + bin_y) * bin_shape_zyx[2]
-            ids.extend(
-                base + bin_x
-                for bin_x in range(bin_low_xyz[0], bin_high_xyz[0] + 1)
-            )
-    if not ids:
-        return catalog[:0, :0].reshape(-1), np.empty(0, dtype=np.int64)
-    bin_ids = np.asarray(ids, dtype=np.int64)
-    slots = np.arange(maximum_per_bin, dtype=np.int64)
-    slot_mask = slots[None, :] < counts[bin_ids, None]
-    records = catalog[bin_ids][slot_mask]
-    record_ids = (bin_ids[:, None] * maximum_per_bin + slots[None, :])[slot_mask]
-    if len(records):
-        inside = np.all(np.abs(records["center"] - center) <= half_cube, axis=1)
-        records = records[inside]
-        record_ids = record_ids[inside]
-    if len(records) > maximum_needles:
-        chosen = np.argpartition(records["score"], -maximum_needles)[-maximum_needles:]
-        records = records[chosen]
-        record_ids = record_ids[chosen]
-    return records, record_ids
-
-
 def _fit_cell_flakes(
     records: np.ndarray,
     record_ids: np.ndarray,
@@ -107,6 +62,11 @@ def _fit_cell_flakes(
     depth_bandwidth: float,
     angle_bandwidth: float,
     minimum_needles: int,
+    normal_family: int = 0,
+    family_coverage: float = 1.0,
+    family_ambiguous_fraction: float = 0.0,
+    family_component_id: int | None = None,
+    family_component_size: int = 0,
 ) -> list[dict[str, Any]]:
     if len(records) < minimum_needles:
         return []
@@ -269,6 +229,13 @@ def _fit_cell_flakes(
             {
                 "cellIndex": list(cell_index),
                 "cellCenter": np.round(cell_center, 3).tolist(),
+                "normalFamily": int(normal_family),
+                "familyCoverage": round(float(family_coverage), 4),
+                "familyAmbiguousFraction": round(
+                    float(family_ambiguous_fraction), 4
+                ),
+                "familyComponentId": family_component_id,
+                "familyComponentSize": int(family_component_size),
                 "center": np.round(center, 3).tolist(),
                 "normal": np.round(normal, 6).tolist(),
                 "fiber": np.round(fiber, 6).tolist(),
@@ -530,9 +497,12 @@ def slab_flake_plane(
     angle_bandwidth = 12.0
     minimum_needles = 5
     settings = analysis["identity"]["settings"]
+    family_result, normal_families = load_normal_families(root)
     identity = {
         "version": FLAKE_CACHE_VERSION,
         "analysisIdentity": analysis["identity"],
+        "normalFamilyVersion": NORMAL_FAMILY_VERSION,
+        "normalFamilyIdentity": family_result["identity"],
         "zIndex": z_index,
         "maximumFlakes": maximum_flakes,
         "depthBandwidthVoxels": depth_bandwidth,
@@ -558,6 +528,9 @@ def slab_flake_plane(
     flakes: list[dict[str, Any]] = []
     valid_cell_count = 0
     fitted_cell_count = 0
+    primary_fitted_cell_count = 0
+    secondary_fitted_cell_count = 0
+    cross_family_shared_needle_count = 0
     for cell_y, center_y in enumerate(grid["y"]):
         for cell_x, center_x in enumerate(grid["x"]):
             cell = cells[z_index, cell_y, cell_x]
@@ -570,22 +543,52 @@ def slab_flake_plane(
             records, record_ids = _catalog_records_for_cell(
                 catalog, counts, cell_center, settings, bin_shape_zyx
             )
-            fitted = _fit_cell_flakes(
+            partitions = _normal_family_partitions(
                 records,
                 record_ids,
-                cell_center,
-                np.asarray(cell["normal"], dtype=np.float32),
-                float(cell["normalConfidence"]),
-                (cell_x, cell_y, z_index),
-                int(settings["cubeSize"]),
-                maximum_flakes,
-                depth_bandwidth,
-                angle_bandwidth,
-                minimum_needles,
+                cell,
+                normal_families[z_index, cell_y, cell_x],
             )
-            if fitted:
+            fitted_in_cell = False
+            fitted_ids_by_family = {0: set(), 1: set()}
+            for partition in partitions:
+                fitted = _fit_cell_flakes(
+                    partition["records"],
+                    partition["recordIds"],
+                    cell_center,
+                    partition["normal"],
+                    partition["normalConfidence"],
+                    (cell_x, cell_y, z_index),
+                    int(settings["cubeSize"]),
+                    maximum_flakes,
+                    depth_bandwidth,
+                    angle_bandwidth,
+                    minimum_needles,
+                    normal_family=int(partition["normalFamily"]),
+                    family_coverage=float(partition["familyCoverage"]),
+                    family_ambiguous_fraction=float(
+                        partition["ambiguousFraction"]
+                    ),
+                    family_component_id=partition["familyComponentId"],
+                    family_component_size=int(partition["familyComponentSize"]),
+                )
+                if fitted:
+                    fitted_in_cell = True
+                    family_index = int(partition["normalFamily"])
+                    for flake in fitted:
+                        fitted_ids_by_family[family_index].update(
+                            flake["_needleIds"]
+                        )
+                    if family_index == 0:
+                        primary_fitted_cell_count += 1
+                    else:
+                        secondary_fitted_cell_count += 1
+                    flakes.extend(fitted)
+            cross_family_shared_needle_count += len(
+                fitted_ids_by_family[0].intersection(fitted_ids_by_family[1])
+            )
+            if fitted_in_cell:
                 fitted_cell_count += 1
-                flakes.extend(fitted)
     for index, flake in enumerate(flakes):
         flake["id"] = index
     membership_offsets = [0]
@@ -633,7 +636,8 @@ def slab_flake_plane(
             "z": grid["z"][z_index],
         },
         "settings": {
-            "maximumFlakesPerCell": maximum_flakes,
+            "maximumFlakesPerFamily": maximum_flakes,
+            "maximumNormalFamiliesPerCell": 2,
             "depthBandwidthVoxels": depth_bandwidth,
             "angleBandwidthDeg": angle_bandwidth,
             "minimumNeedles": minimum_needles,
@@ -648,6 +652,15 @@ def slab_flake_plane(
             "cacheHit": False,
             "validCellCount": valid_cell_count,
             "fittedCellCount": fitted_cell_count,
+            "primaryFittedCellCount": primary_fitted_cell_count,
+            "secondaryFittedCellCount": secondary_fitted_cell_count,
+            "primaryFlakeCount": sum(
+                int(flake["normalFamily"]) == 0 for flake in flakes
+            ),
+            "secondaryFlakeCount": sum(
+                int(flake["normalFamily"]) == 1 for flake in flakes
+            ),
+            "crossFamilySharedNeedleCount": cross_family_shared_needle_count,
             "flakeCount": len(flakes),
             "candidateLinkCount": len(links),
             "acceptedLinkCount": len(accepted_links),

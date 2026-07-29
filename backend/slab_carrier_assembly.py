@@ -10,6 +10,7 @@ import numpy as np
 
 from .rectify import grayscale_png
 from .slab_sheetlet_carriers import (
+    CARRIER_SCREEN_VERSION,
     _carrier_yield,
     _contrast,
     _load_carrier_catalog,
@@ -19,9 +20,9 @@ from .slab_sheetlet_carriers import (
 )
 
 
-CARRIER_BOUNDARY_VERSION = 1
-CARRIER_ASSEMBLY_VERSION = 1
-ASSEMBLY_PREVIEW_VERSION = 1
+CARRIER_BOUNDARY_VERSION = 2
+CARRIER_ASSEMBLY_VERSION = 2
+ASSEMBLY_PREVIEW_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -115,12 +116,22 @@ def build_carrier_boundaries(
     root = Path(output_root)
     summary_path = root / f"sheetlet-carrier-boundaries-v{CARRIER_BOUNDARY_VERSION}.json"
     artifact_path = root / f"sheetlet-carrier-boundaries-v{CARRIER_BOUNDARY_VERSION}.npz"
-    screen = json.loads((root / "sheetlet-carrier-screen-v1.json").read_text())
-    source_path, _, component, flakes = _load_carrier_catalog(root)
+    screen = json.loads(
+        (
+            root / f"sheetlet-carrier-screen-v{CARRIER_SCREEN_VERSION}.json"
+        ).read_text()
+    )
+    source_path, candidate_payload, component, flakes = _load_carrier_catalog(root)
+    legacy_scale_components = {
+        int(value["componentId"])
+        for value in candidate_payload["candidates"]
+        if value.get("candidateClass", "legacy-scale") == "legacy-scale"
+    }
     eligible = [
         value
         for value in screen["candidates"]
         if float(value["yield"]["fitFactor"]) >= minimum_fit_factor
+        and int(value["componentId"]) in legacy_scale_components
     ]
     settings = {
         "minimumFitFactor": minimum_fit_factor,
@@ -128,9 +139,12 @@ def build_carrier_boundaries(
         "maximumBoundaryPointsPerCarrier": 128,
         "carrierPixelStepVoxels": 4.0,
         "carrierMaximumPixelsPerAxis": 192,
+        "includedCandidateClasses": ["legacy-scale"],
+        "secondarySeedsDeferredToDedicatedGrowth": True,
     }
     identity = {
         "version": CARRIER_BOUNDARY_VERSION,
+        "screenIdentity": screen["identity"],
         "source": str(source_path),
         "sourceMtimeNs": source_path.stat().st_mtime_ns,
         "screenVersion": screen["identity"]["version"],
@@ -337,8 +351,14 @@ def match_carrier_boundaries(
     boundary_path = root / boundary_summary["artifact"]
     summary_path = root / f"sheetlet-carrier-assembly-v{CARRIER_ASSEMBLY_VERSION}.json"
     edge_path = root / f"sheetlet-carrier-assembly-v{CARRIER_ASSEMBLY_VERSION}-edges.npz"
+    identity = {
+        "version": CARRIER_ASSEMBLY_VERSION,
+        "boundaryIdentity": boundary_summary["identity"],
+    }
     if summary_path.is_file() and edge_path.is_file() and not force:
-        return json.loads(summary_path.read_text())
+        cached = json.loads(summary_path.read_text())
+        if cached.get("identity") == identity:
+            return cached
     with np.load(boundary_path) as payload:
         arrays = {key: np.asarray(payload[key]) for key in payload.files}
 
@@ -466,10 +486,7 @@ def match_carrier_boundaries(
     }
     _atomic_npz(edge_path, **edge_arrays)
     result = {
-        "identity": {
-            "version": CARRIER_ASSEMBLY_VERSION,
-            "boundaryVersion": boundary_summary["identity"]["version"],
-        },
+        "identity": identity,
         "settings": {
             "bucketWidthVoxels": bucket_width,
             "maximumBoundaryDistanceVoxels": maximum_distance,
@@ -692,7 +709,11 @@ def build_assembly_previews(
     summary_path = artifact_root / f"summary-top{len(selected_candidates)}.json"
     if summary_path.is_file() and not force:
         return json.loads(summary_path.read_text())
-    screen = json.loads((root / "sheetlet-carrier-screen-v1.json").read_text())
+    screen = json.loads(
+        (
+            root / f"sheetlet-carrier-screen-v{CARRIER_SCREEN_VERSION}.json"
+        ).read_text()
+    )
     screen_by_component = {
         int(value["componentId"]): value for value in screen["candidates"]
     }

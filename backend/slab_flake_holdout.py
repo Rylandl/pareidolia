@@ -16,9 +16,10 @@ from .slab_flakes import (
     _fit_cell_flakes,
     slab_flake_plane,
 )
+from .slab_normal_families import _normal_family_partitions, load_normal_families
 
 
-FLAKE_HOLDOUT_VERSION = 1
+FLAKE_HOLDOUT_VERSION = 3
 
 
 def _atomic_compact_json(path: Path, payload: dict[str, Any]) -> None:
@@ -86,6 +87,10 @@ def _mutual_cell_matches(
     candidates: list[tuple[int, int, dict[str, float]]] = []
     for first_index, first_flake in enumerate(first):
         for second_index, second_flake in enumerate(second):
+            if int(first_flake.get("normalFamily", 0)) != int(
+                second_flake.get("normalFamily", 0)
+            ):
+                continue
             metrics = _replication_metrics(first_flake, second_flake)
             if (
                 metrics["positionResidual"] <= 12.0
@@ -123,6 +128,7 @@ def _representative(
     fiber -= normal * float(np.dot(fiber, normal))
     fiber /= max(float(np.linalg.norm(fiber)), 1.0e-8)
     return {
+        "normalFamily": int(first.get("normalFamily", 0)),
         "normal": normal.tolist(),
         "fiber": fiber.tolist(),
         "center": (
@@ -231,6 +237,7 @@ def slab_flake_holdout(
     cells = np.load(root / "cells.npy", mmap_mode="r")
     catalog = np.load(root / "needles.npy", mmap_mode="r")
     counts = np.load(root / "needle-counts.npy", mmap_mode="r")
+    _, normal_families = load_normal_families(root)
     bin_shape_zyx = tuple(int(value) for value in analysis["binShapeZYX"])
     split_seed = int(identity["splitSeed"])
     first_by_cell: dict[tuple[int, int], list[dict[str, Any]]] = {}
@@ -247,28 +254,58 @@ def slab_flake_holdout(
             records, record_ids = _catalog_records_for_cell(
                 catalog, counts, cell_center, settings, bin_shape_zyx
             )
-            fold = _stable_fold(record_ids, split_seed)
-            if int(np.count_nonzero(fold)) < 4 or int(np.count_nonzero(~fold)) < 4:
-                continue
-            eligible_cell_count += 1
-            fit_arguments = (
-                cell_center,
-                np.asarray(cell["normal"], dtype=np.float32),
-                float(cell["normalConfidence"]),
-                (cell_x, cell_y, z_index),
-                int(settings["cubeSize"]),
-                maximum_flakes,
-                4.0,
-                12.0,
-                4,
+            partitions = _normal_family_partitions(
+                records,
+                record_ids,
+                cell,
+                normal_families[z_index, cell_y, cell_x],
             )
-            first = _fit_cell_flakes(records[fold], record_ids[fold], *fit_arguments)
-            second = _fit_cell_flakes(records[~fold], record_ids[~fold], *fit_arguments)
             key = (cell_x, cell_y)
-            if first:
-                first_by_cell[key] = first
-            if second:
-                second_by_cell[key] = second
+            eligible = False
+            for partition in partitions:
+                partition_records = partition["records"]
+                partition_ids = partition["recordIds"]
+                fold = _stable_fold(partition_ids, split_seed)
+                if int(np.count_nonzero(fold)) < 4 or int(np.count_nonzero(~fold)) < 4:
+                    continue
+                eligible = True
+                fit_arguments = (
+                    cell_center,
+                    partition["normal"],
+                    partition["normalConfidence"],
+                    (cell_x, cell_y, z_index),
+                    int(settings["cubeSize"]),
+                    maximum_flakes,
+                    4.0,
+                    12.0,
+                    4,
+                )
+                fit_keywords = {
+                    "normal_family": int(partition["normalFamily"]),
+                    "family_coverage": float(partition["familyCoverage"]),
+                    "family_ambiguous_fraction": float(
+                        partition["ambiguousFraction"]
+                    ),
+                    "family_component_id": partition["familyComponentId"],
+                    "family_component_size": int(partition["familyComponentSize"]),
+                }
+                first = _fit_cell_flakes(
+                    partition_records[fold],
+                    partition_ids[fold],
+                    *fit_arguments,
+                    **fit_keywords,
+                )
+                second = _fit_cell_flakes(
+                    partition_records[~fold],
+                    partition_ids[~fold],
+                    *fit_arguments,
+                    **fit_keywords,
+                )
+                if first:
+                    first_by_cell.setdefault(key, []).extend(first)
+                if second:
+                    second_by_cell.setdefault(key, []).extend(second)
+            eligible_cell_count += int(eligible)
 
     observed = _match_fold_maps(first_by_cell, second_by_cell)
     representatives_by_cell: dict[tuple[int, int], list[dict[str, Any]]] = {}
@@ -321,7 +358,12 @@ def slab_flake_holdout(
             mapped = matched_by_full.get(full_index)
             if mapped is None:
                 validation_by_flake.append(
-                    {"flakeId": int(flake["id"]), "validated": False, "validationScore": 0.0}
+                    {
+                        "flakeId": int(flake["id"]),
+                        "normalFamily": int(flake.get("normalFamily", 0)),
+                        "validated": False,
+                        "validationScore": 0.0,
+                    }
                 )
                 continue
             representative_index, mapping = mapped
@@ -331,6 +373,7 @@ def slab_flake_holdout(
             validation_by_flake.append(
                 {
                     "flakeId": int(flake["id"]),
+                    "normalFamily": int(flake.get("normalFamily", 0)),
                     "validated": validated,
                     "validationScore": round(float(representative["foldScore"]), 4),
                     "foldDepthDeltaVoxels": round(float(representative["foldDepthDelta"]), 3),
@@ -346,6 +389,20 @@ def slab_flake_holdout(
             )
     validation_by_flake.sort(key=lambda value: int(value["flakeId"]))
     observed_validated_count = len(validated_pairs)
+    full_family_count = {
+        family: sum(
+            int(flake.get("normalFamily", 0)) == family
+            for flake in full_result["flakes"]
+        )
+        for family in (0, 1)
+    }
+    validated_family_count = {
+        family: sum(
+            int(value.get("normalFamily", 0)) == family and bool(value["validated"])
+            for value in validation_by_flake
+        )
+        for family in (0, 1)
+    }
     null_validated_median = float(np.median(null_validated_counts)) if null_validated_counts else 0.0
     elapsed_ms = (time.monotonic() - started) * 1000.0
     result = {
@@ -377,6 +434,14 @@ def slab_flake_holdout(
             "validatedFullFlakeCount": validated_full_count,
             "validatedFullFlakeFraction": round(
                 validated_full_count / max(len(full_result["flakes"]), 1), 4
+            ),
+            "primaryValidatedFullFlakeCount": validated_family_count[0],
+            "secondaryValidatedFullFlakeCount": validated_family_count[1],
+            "primaryValidatedFullFlakeFraction": round(
+                validated_family_count[0] / max(full_family_count[0], 1), 4
+            ),
+            "secondaryValidatedFullFlakeFraction": round(
+                validated_family_count[1] / max(full_family_count[1], 1), 4
             ),
             "medianFoldDepthDeltaVoxels": _median(
                 [float(value["foldDepthDelta"]) for value in validated_pairs], 3

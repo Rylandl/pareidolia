@@ -184,6 +184,39 @@ silently using synthetic padding.
   as provisional CT-only continuations. The largest exact joined carrier has
   965 flakes with 2.069-voxel median height residual and 4.446° median normal
   residual.
+- `python3 scripts/build-normal-families.py --root
+  work/cross-scroll-analysis-z512` adds a conservative multi-normal census
+  without changing the Acus needle bake. It records 21,621 standalone
+  secondary candidates separately from the 9,560 cells (3.80% of valid cells)
+  admitted by a three-cell spatial-support rule, so neighbor agreement is an
+  inclusion filter rather than circular evidence. The included cells have
+  19.66% median exclusive needle coverage, 0.573 median refit confidence,
+  5.65% genuinely margin-ambiguous weight, and 22.79% broader plane overlap.
+  The largest secondary-normal region contains 397 cells and spans all 14
+  planes. Primary flakes retain their original normal, confidence, inputs, and
+  membership exactly; the z512 audit finds 714,987 unchanged primary flakes,
+  9,685 additive secondary flakes, and zero shared needle IDs.
+- Normal families are kept as separate surface hypotheses in sheetlet
+  construction. An early cross-family join trial failed the declared carrier
+  gates because a few alternate-family flakes were absorbed as extreme
+  curvature; the final graph therefore permits no cross-family links. This
+  preserves all baseline macro counts exactly (538 components spanning at
+  least 11 planes, 241 spanning all 14, and 3,237 spanning at least six) while
+  4,298 secondary nodes form 2,699 independent links with zero cell
+  collisions. Sixty-three pure secondary fragments of 5–13 flakes are retained
+  as a separate small-seed class instead of being attached to legacy carriers.
+  Their median carrier residual is 0.217 voxels / 2.09°, their median fit factor
+  is 0.939, and their CT screen covers 114,736 gross square voxels with a 0.332
+  median best-plane texture score. Gross support is not unique recovered area
+  and is not assumed to lie in an existing carrier hole. Secondary seeds are
+  deliberately excluded from legacy boundary assembly and growth until a
+  family-constrained seed-growth stage is evaluated.
+  `python3 scripts/evaluate-normal-families.py --root
+  work/cross-scroll-analysis-z512` independently checks persisted primary
+  values and needle memberships, per-family carrier residuals, graph
+  preservation, CT screen results, and the predeclared construction gates. As
+  throughout this pipeline, these are surface hypotheses rather than claimed
+  physical papyrus identities.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

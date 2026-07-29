@@ -22,6 +22,7 @@ from backend.slab_flake_holdout import _mutual_cell_matches, _stable_fold
 from backend.slab_flakes import slab_flake_plane
 from backend.slab_sheetlets import _match_3d
 from backend.slab_sheetlet_explore import (
+    _candidate_catalog,
     _components_without_cell_collisions,
     _direction_edge_links,
 )
@@ -49,6 +50,12 @@ from backend.slab_gap_reanalysis import (
     _mask_covering_points,
 )
 from backend.slab_gap_census import _cropped_gap_context, _ct_gate
+from backend.slab_normal_families import (
+    NORMAL_FAMILY_DTYPE,
+    _infer_cell_normal_families,
+    _normal_family_assignment,
+    _union_components,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -59,6 +66,68 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_secondary_normal_family_is_standalone_partitioned_and_spatial(self) -> None:
+        rng = np.random.default_rng(7)
+        directions = []
+        for index in range(100):
+            base = (
+                np.asarray([1.0, 0.0, 0.0])
+                if index % 2 == 0
+                else np.asarray([0.0, 1.0, 0.0])
+            )
+            direction = base + rng.normal(0.0, 0.025, 3)
+            directions.append(direction / np.linalg.norm(direction))
+        angle = np.radians(32.0)
+        for index in range(60):
+            base = (
+                np.asarray([np.cos(angle), 0.0, np.sin(angle)])
+                if index % 2 == 0
+                else np.asarray([-np.sin(angle), 0.0, np.cos(angle)])
+            )
+            direction = base + rng.normal(0.0, 0.025, 3)
+            directions.append(direction / np.linalg.norm(direction))
+        records = np.zeros(len(directions), dtype=NEEDLE_DTYPE)
+        records["direction"] = directions
+        records["score"] = 1.0
+        records["axialCoverage"] = 1.0
+        records["supportScore"] = 1.0
+        inferred = _infer_cell_normal_families(
+            records, np.asarray([0.0, 0.0, 1.0], dtype=np.float32), 0.8
+        )
+        self.assertTrue(inferred["secondaryFitted"])
+        self.assertTrue(inferred["standaloneCandidate"])
+        self.assertGreater(inferred["secondaryStandaloneConfidence"], 0.8)
+        self.assertGreater(inferred["secondaryCoverage"], 0.3)
+        self.assertGreater(inferred["ambiguousFraction"], 0.2)
+        self.assertGreater(inferred["normalAngleDeg"], 85.0)
+
+        primary, secondary, ambiguous, overlap, unassigned = _normal_family_assignment(
+            records["direction"],
+            inferred["primaryNormal"],
+            inferred["secondaryNormal"],
+            inferred["primaryInlierLimitDeg"],
+            inferred["secondaryInlierLimitDeg"],
+            3.0,
+        )
+        self.assertFalse(np.any(primary & secondary))
+        self.assertFalse(np.any(secondary & ambiguous))
+        self.assertTrue(np.all(ambiguous <= overlap))
+        self.assertEqual(
+            int(np.count_nonzero(primary | secondary | unassigned)),
+            len(records),
+        )
+
+        families = np.zeros((1, 3, 3), dtype=NORMAL_FAMILY_DTYPE)
+        families["componentId"] = -1
+        for y, x in ((0, 0), (0, 1), (0, 2), (2, 2)):
+            families[0, y, x]["standaloneCandidate"] = 1
+            families[0, y, x]["secondaryNormal"] = [0.0, 1.0, 0.0]
+        component_count, edge_count = _union_components(families, 12.0)
+        self.assertEqual(component_count, 2)
+        self.assertEqual(edge_count, 2)
+        self.assertEqual(int(families[0, 0, 0]["componentSize"]), 3)
+        self.assertEqual(int(families[0, 2, 2]["componentSize"]), 1)
+
     def test_gap_census_gate_and_block_aligned_crop(self) -> None:
         evidence = {
             "depthAlignedTextureScore": 0.55,
@@ -585,6 +654,17 @@ class RectifierTests(unittest.TestCase):
         )
         self.assertEqual(len(fold_matches), 1)
         self.assertLess(fold_matches[0]["fiberAngle"], 0.01)
+        other_family = flake(
+            [0, 0, 0], [0.0, 0.4, 0.0], [-1.0, 0.0, 0.0]
+        )
+        other_family["normalFamily"] = 1
+        self.assertEqual(
+            _mutual_cell_matches(
+                [flake([0, 0, 0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0])],
+                [other_family],
+            ),
+            [],
+        )
         links = _match_3d(
             [
                 flake([0, 0, 0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
@@ -596,13 +676,19 @@ class RectifierTests(unittest.TestCase):
         self.assertEqual(links[0]["axis"], "z")
 
     def test_exploratory_sheetlets_allow_curvature_but_reject_cell_collisions(self) -> None:
-        def flake(cell: list[int], center: list[float], normal: list[float]) -> dict[str, object]:
+        def flake(
+            cell: list[int],
+            center: list[float],
+            normal: list[float],
+            normal_family: int = 0,
+        ) -> dict[str, object]:
             fiber = np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
             normal_array = np.asarray(normal, dtype=np.float32)
             cross = np.cross(normal_array, fiber)
             cross /= np.linalg.norm(cross)
             return {
                 "cellIndex": cell,
+                "normalFamily": normal_family,
                 "center": center,
                 "normal": normal,
                 "fiber": fiber.tolist(),
@@ -624,6 +710,45 @@ class RectifierTests(unittest.TestCase):
         self.assertLess(float(curved["edgeResidual"][0]), 0.02)
         self.assertGreater(float(curved["normalBend"][0]), 7.0)
 
+        cross_family_close = _direction_edge_links(
+            [
+                flake(
+                    [0, 0, 0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    normal_family=0,
+                ),
+                flake(
+                    [1, 0, 0],
+                    [32.0, 4.213, 0.0],
+                    [-0.258819, 0.965926, 0.0],
+                    normal_family=1,
+                ),
+            ],
+            cell_step=1,
+            edge_padding=8.0,
+        )
+        self.assertEqual(len(cross_family_close["score"]), 0)
+        cross_family_jump = _direction_edge_links(
+            [
+                flake(
+                    [0, 0, 0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    normal_family=0,
+                ),
+                flake(
+                    [1, 0, 0],
+                    [32.0, 8.574, 0.0],
+                    [-0.5, 0.866025, 0.0],
+                    normal_family=1,
+                ),
+            ],
+            cell_step=1,
+            edge_padding=8.0,
+        )
+        self.assertEqual(len(cross_family_jump["score"]), 0)
+
         component, _, _, retained = _components_without_cell_collisions(
             4,
             np.asarray([0, 1, 2, 0], dtype=np.int64),
@@ -635,6 +760,61 @@ class RectifierTests(unittest.TestCase):
         self.assertTrue(retained[1])
         self.assertFalse(retained[2])
         self.assertNotEqual(int(component[0]), int(component[3]))
+
+    def test_pure_secondary_fragments_have_a_smaller_seed_threshold(self) -> None:
+        flakes = [
+            {
+                "cellIndex": [index, 0, 0],
+                "center": [float(index * 32), 0.0, 0.0],
+                "normal": [0.0, 1.0, 0.0],
+                "fiber": [1.0, 0.0, 0.0],
+                "quality": 0.2,
+                "normalFamily": 1,
+            }
+            for index in range(5)
+        ]
+        empty_links = {
+            "source": np.empty(0, dtype=np.uint32),
+            "axis": np.empty(0, dtype=np.uint8),
+            "edgeResidual": np.empty(0, dtype=np.float32),
+            "fiberAngle": np.empty(0, dtype=np.float32),
+            "normalBend": np.empty(0, dtype=np.float32),
+        }
+        candidates = _candidate_catalog(
+            flakes,
+            empty_links,
+            np.empty(0, dtype=bool),
+            np.zeros(5, dtype=np.int32),
+            np.asarray([5], dtype=np.int32),
+            np.zeros(5, dtype=np.uint8),
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["candidateClass"], "secondary-seed")
+        large_secondary = [dict(flakes[index % len(flakes)]) for index in range(20)]
+        for index, flake in enumerate(large_secondary):
+            flake["cellIndex"] = [index, 0, 0]
+        large_candidates = _candidate_catalog(
+            large_secondary,
+            empty_links,
+            np.empty(0, dtype=bool),
+            np.zeros(20, dtype=np.int32),
+            np.asarray([20], dtype=np.int32),
+            np.zeros(20, dtype=np.uint8),
+        )
+        self.assertEqual(large_candidates[0]["candidateClass"], "secondary-seed")
+        for flake in flakes:
+            flake["normalFamily"] = 0
+        self.assertEqual(
+            _candidate_catalog(
+                flakes,
+                empty_links,
+                np.empty(0, dtype=bool),
+                np.zeros(5, dtype=np.int32),
+                np.asarray([5], dtype=np.int32),
+                np.zeros(5, dtype=np.uint8),
+            ),
+            [],
+        )
 
     def test_sheetlet_carrier_follows_curved_normals_and_samples_depth(self) -> None:
         flakes = []
@@ -658,6 +838,9 @@ class RectifierTests(unittest.TestCase):
             support_radius=24.0,
             maximum_pixels=64,
         )
+        self.assertEqual(len(carrier["nodeHeightResidualVoxels"]), len(flakes))
+        self.assertEqual(len(carrier["nodeNormalResidualDeg"]), len(flakes))
+        self.assertEqual(carrier["stats"]["normalFamilies"]["0"]["flakeCount"], len(flakes))
         self.assertGreater(carrier["stats"]["supportedPixelFraction"], 0.5)
         self.assertLess(carrier["stats"]["medianNodeHeightResidualVoxels"], 2.0)
         self.assertLess(carrier["stats"]["medianNodeNormalResidualDeg"], 10.0)
@@ -777,6 +960,14 @@ class RectifierTests(unittest.TestCase):
         )
         self.assertGreater(float(score["score"][0]), 0.8)
         self.assertGreater(float(score["score"][0]), float(score["score"][1]) + 0.7)
+
+        cross_family = dict(flakes[4])
+        cross_family["normalFamily"] = 1
+        separated = flakes[:4] + [cross_family]
+        family_score = _score_growth_candidates(
+            np.arange(4), np.asarray([4]), _flake_arrays(separated), separated
+        )
+        self.assertEqual(float(family_score["score"][0]), 0.0)
 
     def test_iterative_carrier_merge_rejects_transitive_cell_collision(self) -> None:
         states = [

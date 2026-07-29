@@ -8,7 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from backend.slab_sheetlet_carriers import build_sheetlet_carriers
+from backend.slab_sheetlet_carriers import (
+    CARRIER_SCREEN_VERSION,
+    build_sheetlet_carriers,
+)
 
 
 def main() -> None:
@@ -27,7 +30,10 @@ def main() -> None:
     source_ranks = None
     summary_label = None
     if args.screened_top is not None:
-        screen_path = Path(args.root) / "sheetlet-carrier-screen-v1.json"
+        screen_path = (
+            Path(args.root)
+            / f"sheetlet-carrier-screen-v{CARRIER_SCREEN_VERSION}.json"
+        )
         screen = json.loads(screen_path.read_text())
         count = max(1, min(int(args.screened_top), 64))
         source_ranks = [

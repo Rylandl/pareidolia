@@ -9,7 +9,11 @@ from typing import Any
 import numpy as np
 
 from .rectify import grayscale_png
-from .slab_carrier_assembly import _transported_fiber_angle
+from .slab_carrier_assembly import (
+    ASSEMBLY_PREVIEW_VERSION,
+    CARRIER_ASSEMBLY_VERSION,
+    _transported_fiber_angle,
+)
 from .slab_sheetlet_carriers import (
     _carrier_frame,
     _carrier_yield,
@@ -21,7 +25,7 @@ from .slab_sheetlet_carriers import (
 )
 
 
-CARRIER_GROWTH_VERSION = 1
+CARRIER_GROWTH_VERSION = 2
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -44,6 +48,10 @@ def _flake_arrays(flakes: list[dict[str, Any]]) -> dict[str, np.ndarray]:
         "fiber": np.asarray([flake["fiber"] for flake in flakes], dtype=np.float32),
         "quality": np.asarray([flake["quality"] for flake in flakes], dtype=np.float32),
         "cell": np.asarray([flake["cellIndex"] for flake in flakes], dtype=np.int32),
+        "normalFamily": np.asarray(
+            [int(flake.get("normalFamily", 0)) for flake in flakes],
+            dtype=np.uint8,
+        ),
     }
 
 
@@ -143,8 +151,13 @@ def _score_growth_candidates(
         )
     )
     score = agreement * (0.72 + 0.28 * np.sqrt(candidate_quality))
+    member_families = np.unique(arrays["normalFamily"][member_indices])
+    family_compatible = np.isin(
+        arrays["normalFamily"][candidate_indices], member_families
+    )
     score[
-        (nearest > 100.0)
+        ~family_compatible
+        | (nearest > 100.0)
         | (height_residual > 14.0)
         | (normal_angle > 40.0)
         | (fiber_angle > 40.0)
@@ -176,15 +189,21 @@ def grow_carrier_hypotheses(
         "minimumBestVsSecondMargin": minimum_margin,
         "neighborhood": "26 adjacent Acus cells",
         "assignment": "best unclaimed flake per seed-cell, then global score order",
+        "normalFamilyConstraint": "candidate must match the seed family",
+    }
+    assembly = json.loads(
+        (
+            root / f"sheetlet-carrier-assembly-v{CARRIER_ASSEMBLY_VERSION}.json"
+        ).read_text()
+    )
+    identity = {
+        "version": CARRIER_GROWTH_VERSION,
+        "assemblyIdentity": assembly["identity"],
     }
     if summary_path.is_file() and artifact_path.is_file() and not force:
         cached = json.loads(summary_path.read_text())
-        if cached.get("settings") == settings:
+        if cached.get("identity") == identity and cached.get("settings") == settings:
             return cached
-
-    assembly = json.loads(
-        (root / "sheetlet-carrier-assembly-v1.json").read_text()
-    )
     seeds = assembly["selected"]["topComponents"][:seed_count]
     _, _, flake_component, flakes = _load_carrier_catalog(root)
     arrays = _flake_arrays(flakes)
@@ -205,6 +224,8 @@ def grow_carrier_hypotheses(
     for seed_rank, seed in enumerate(seeds, start=1):
         component_ids = np.asarray(seed["sheetletComponentIds"], dtype=np.uint32)
         members = set(int(value) for value in np.flatnonzero(np.isin(flake_component, component_ids)))
+        if any(int(arrays["normalFamily"][index]) != 0 for index in members):
+            raise ValueError("legacy carrier assembly contains a secondary-family seed")
         reserved.update(members)
         occupied_cells = {
             tuple(int(value) for value in arrays["cell"][index]) for index in members
@@ -243,6 +264,7 @@ def grow_carrier_hypotheses(
                     for cell in neighboring_cells
                     for index in by_cell[cell]
                     if index not in reserved
+                    and int(arrays["normalFamily"][index]) == 0
                 }
             )
             if not candidate_values:
@@ -371,10 +393,7 @@ def grow_carrier_hypotheses(
         memberOffset=np.asarray(member_offsets, dtype=np.uint32),
     )
     result = {
-        "identity": {
-            "version": CARRIER_GROWTH_VERSION,
-            "assemblyVersion": assembly["identity"]["version"],
-        },
+        "identity": identity,
         "settings": settings,
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),
@@ -419,7 +438,10 @@ def build_growth_previews(
     if summary_path.is_file() and not force:
         return json.loads(summary_path.read_text())
     assembly_preview = json.loads(
-        (root / "sheetlet-assemblies-v1/summary-top12.json").read_text()
+        (
+            root
+            / f"sheetlet-assemblies-v{ASSEMBLY_PREVIEW_VERSION}/summary-top12.json"
+        ).read_text()
     )
     seed_by_rank = {int(value["rank"]): value for value in assembly_preview["candidates"]}
     outputs = []
