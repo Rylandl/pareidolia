@@ -1,0 +1,22 @@
+{
+  "name": "PHerc. 358 \u00b7 9.362 \u00b5m real cuboid",
+  "sourceKind": "zarr-cuboid",
+  "sourceUrl": "https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHerc0358/volumes/20250821151737-9.362um-1.2m-113keV-masked.zarr",
+  "sourceLevel": 0,
+  "sourceShapeZYX": [
+    14744,
+    7783,
+    7783
+  ],
+  "originXYZ": [
+    4608,
+    5888,
+    7168
+  ],
+  "voxelSizeMicrons": 9.362,
+  "suggestedSeed": {
+    "x": 64,
+    "y": 64,
+    "z": 64
+  }
+}
