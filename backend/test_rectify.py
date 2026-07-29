@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -64,6 +65,17 @@ from backend.slab_material_intervals import (
     _smoothed_material_mask,
 )
 from backend.slab_monotone_layers import _box_sums, _monotone_partial_match
+from backend.slab_branch_association import (
+    CANDIDATE_DTYPE,
+    DECISION_EXACT_GROUP_PRUNED,
+    DECISION_ORDER_BLOCKED,
+    DECISION_RETAINED,
+    DEFAULT_SETTINGS,
+    _audit_exact_candidate_pairs,
+    _order_condensation,
+    _solve_candidates,
+    _solve_with_exact_geometry,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -152,6 +164,143 @@ class RectifierTests(unittest.TestCase):
         sums = _box_sums(values, (2, 2, 3))
         self.assertEqual(sums.shape, (1, 3, 3))
         self.assertEqual(int(np.max(sums)), 12)
+
+    def test_branch_association_defers_transitive_layer_order(self) -> None:
+        cell = np.asarray(
+            [[0, 0, 0], [0, 0, 0], [1, 0, 0], [1, 0, 0]],
+            dtype=np.int32,
+        )
+        depth = np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float32)
+        branch = np.asarray([0, 1, 1, 2], dtype=np.int32)
+        order = _order_condensation(cell, depth, branch)
+        self.assertEqual(order["stats"]["sccCount"], 3)
+        self.assertEqual(order["stats"]["cyclicSccCount"], 0)
+
+        candidates = np.zeros(1, dtype=CANDIDATE_DTYPE)
+        candidates["branchSource"] = 0
+        candidates["branchTarget"] = 2
+        candidates["score"] = 0.9
+        candidates["endpointSupportedCount"] = 2
+        solved = _solve_candidates(
+            candidates, 0.45, order, [{1}, {2}, {3}]
+        )
+        self.assertEqual(
+            int(solved["decisions"][0]), DECISION_ORDER_BLOCKED
+        )
+
+    def test_branch_order_cycles_remain_explicit_ambiguity(self) -> None:
+        cell = np.asarray(
+            [
+                [0, 0, 0],
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 0, 0],
+                [2, 0, 0],
+                [2, 0, 0],
+            ],
+            dtype=np.int32,
+        )
+        depth = np.asarray([0, 1, 0, 1, 0, 1], dtype=np.float32)
+        branch = np.asarray([0, 1, 1, 2, 2, 0], dtype=np.int32)
+        order = _order_condensation(cell, depth, branch)
+        self.assertEqual(order["stats"]["cyclicSccCount"], 1)
+        self.assertEqual(order["stats"]["largestCyclicSccSize"], 3)
+        solved = _solve_candidates(
+            np.empty(0, dtype=CANDIDATE_DTYPE),
+            0.45,
+            order,
+            [{1}, {2}, {3}],
+        )
+        self.assertEqual(len(np.unique(solved["branchGroup"])), 3)
+
+    def test_exact_pair_gate_defers_separated_parallel_surfaces(self) -> None:
+        flakes = []
+        branch = []
+        for branch_index, height in enumerate((0.0, 10.0)):
+            for x in (0.0, 16.0):
+                flakes.append(
+                    {
+                        "center": [x, 0.0, height],
+                        "normal": [0.0, 0.0, 1.0],
+                        "fiber": [1.0, 0.0, 0.0],
+                        "quality": 0.4,
+                    }
+                )
+                branch.append(branch_index)
+        candidates = np.zeros(1, dtype=CANDIDATE_DTYPE)
+        candidates["branchSource"] = 0
+        candidates["branchTarget"] = 1
+        audit = _audit_exact_candidate_pairs(
+            candidates,
+            np.ones(1, dtype=bool),
+            flakes,
+            np.asarray(branch, dtype=np.int32),
+            DEFAULT_SETTINGS,
+        )
+        self.assertGreater(float(audit["medianHeightResidualVoxels"][0]), 3.0)
+        self.assertFalse(bool(audit["passed"][0]))
+
+    def test_exact_group_pruning_removes_weakest_transitive_join(self) -> None:
+        flakes = []
+        branch = []
+        for branch_index in range(3):
+            for x in (float(branch_index * 16), float(branch_index * 16 + 8)):
+                flakes.append(
+                    {
+                        "center": [x, 0.0, 0.0],
+                        "normal": [0.0, 0.0, 1.0],
+                        "fiber": [1.0, 0.0, 0.0],
+                        "quality": 0.4,
+                    }
+                )
+                branch.append(branch_index)
+        candidates = np.zeros(2, dtype=CANDIDATE_DTYPE)
+        candidates["branchSource"] = [0, 1]
+        candidates["branchTarget"] = [1, 2]
+        candidates["score"] = [0.9, 0.8]
+        candidates["endpointSupportedCount"] = 2
+        order = {
+            "branchScc": np.arange(3, dtype=np.int32),
+            "sccSizes": np.ones(3, dtype=np.uint32),
+            "dag": [[], [], []],
+        }
+
+        def group_audit(branch_group, *_args):
+            counts = np.bincount(branch_group)
+            return [
+                {
+                    "associationId": int(group_index),
+                    "branchCount": int(counts[group_index]),
+                    "flakeCount": 2 * int(counts[group_index]),
+                    "medianHeightResidualVoxels": 0.0,
+                    "p90HeightResidualVoxels": 0.0,
+                    "medianNormalResidualDeg": 0.0,
+                    "p90NormalResidualDeg": 0.0,
+                    "gatesPass": bool(counts[group_index] <= 2),
+                }
+                for group_index in np.flatnonzero(counts >= 2)
+            ]
+
+        with patch(
+            "backend.slab_branch_association._audit_exact_association_groups",
+            side_effect=group_audit,
+        ):
+            solved = _solve_with_exact_geometry(
+                candidates,
+                np.ones(2, dtype=bool),
+                flakes,
+                np.asarray(branch, dtype=np.int32),
+                0.45,
+                order,
+                [{0}, {1}, {2}],
+                DEFAULT_SETTINGS,
+            )
+        self.assertEqual(int(solved["decisions"][0]), DECISION_RETAINED)
+        self.assertEqual(
+            int(solved["decisions"][1]), DECISION_EXACT_GROUP_PRUNED
+        )
+        self.assertEqual(solved["stats"]["exactPruningRoundCount"], 1)
+        self.assertEqual(solved["stats"]["finalExactFailureCount"], 0)
 
     def test_secondary_normal_family_is_standalone_partitioned_and_spatial(self) -> None:
         rng = np.random.default_rng(7)

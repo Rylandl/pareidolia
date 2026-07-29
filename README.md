@@ -245,6 +245,19 @@ silently using synthetic padding.
   edges—not fixed ordinal mistakes—are now the main fragmentation problem.
   The revised evidence and identity contracts are documented in
   `docs/design-revision.md`.
+- `python3 scripts/associate-monotone-branches.py --root
+  work/cross-scroll-analysis-z512` scores compatible facing endpoints of those
+  local branches, enforces material support, cell-depth order, collision safety,
+  and agreement across overlapping subwindows, then applies the active MLS fit
+  as a same-sample construction gate. The 12.5-second solve reduces 45
+  overlap-stable joins to 34 exact-coherent joins in 33 associations. All final
+  associations pass the 3-voxel / 6-degree median carrier gates; the largest
+  combines three original branches and 219 flakes at 2.33 voxels / 4.26
+  degrees. Eleven apparently strong joins are explicitly deferred by exact
+  geometry, including the highest-scoring reject at 0.843. Association IDs are
+  chunk-local surface hypotheses, never page identities. The aligned candidate,
+  decision, exact-residual, branch, and flake arrays are stored under
+  `work/cross-scroll-analysis-z512/branch-association-window-v1`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

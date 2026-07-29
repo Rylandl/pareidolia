@@ -40,8 +40,14 @@ a graph component a physical papyrus sheet.
    - Collision-safe graph components are local surface branches only.
 
 4. **Sparse association**
-   - Future branch joins should use compatible facing edges, fiber continuation,
-     order feasibility, and material accountability.
+   - Branch joins use compatible facing edges, fiber continuation, order
+     feasibility, and material accountability.
+   - A join must be accepted in the main chunk and every overlapping subwindow
+     that observes it. It is then rebuilt with the active MLS carrier; this is a
+     same-sample construction gate, not independent validation.
+   - Pairwise-incoherent joins are deferred. If individually coherent joins make
+     an incoherent transitive association, the weakest retained construction
+     edge is removed until every output association passes the carrier gate.
    - A completeness prior applies only to flakes with a calibrated reliability
      estimate. Every solve retains an explicit outlier/unassigned state.
    - Secondary-normal fragments remain separate branches until the association
@@ -95,6 +101,23 @@ missing continuation edges, with order feasibility and material accountability
 as constraints. It should not be another local ordinal rematcher or a dense
 global surface fit.
 
+The first branch-association solve implements that next step in the same window.
+It evaluates 75,118 spatial endpoint pairs, retains 1,775 geometry hits, and
+aggregates them into 1,499 branch-pair candidates in 12.5 seconds. At the
+selected 0.45 score threshold, 56 joins survive the main-window solve and 45
+are unanimous wherever observed by the four overlapping subwindows. Exact MLS
+reconstruction defers 11 of those joins: one fails only the 3-voxel median
+height gate, four fail only the 6-degree median normal gate, and six fail both.
+The high-level endpoint score alone is not sufficient—the strongest rejected
+join scores 0.843—so this reconstruction gate is materially useful.
+
+The remaining 34 joins form 33 associations over 67 original branches. Every
+association passes exact reconstruction without requiring transitive pruning.
+The largest joins three branches and 219 flakes with 2.33-voxel median height
+residual and 4.26-degree median normal residual. These are deliberately modest,
+chunk-local surface associations; 3,282 linked branches remain explicitly
+unassociated, and no output identity is promoted to a physical sheet.
+
 ## Reproducible commands
 
 ```bash
@@ -105,6 +128,9 @@ global surface fit.
   --root work/cross-scroll-analysis-z512
 
 .venv/bin/python scripts/prototype-monotone-layers.py \
+  --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/associate-monotone-branches.py \
   --root work/cross-scroll-analysis-z512
 ```
 

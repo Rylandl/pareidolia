@@ -203,6 +203,15 @@ def _score_batch(
     ]
 
 
+def score_flake_pair_groups(
+    flakes: list[dict[str, Any]],
+    groups: list[tuple[list[int], list[int], int]],
+    edge_padding: float,
+) -> list[tuple[int, int, int, float, float, float, float, float]]:
+    """Score explicitly supplied flake-pair groups with the active geometry model."""
+    return _score_batch(flakes, groups, edge_padding)
+
+
 def _direction_edge_links(
     flakes: list[dict[str, Any]], cell_step: int, edge_padding: float
 ) -> dict[str, np.ndarray]:
