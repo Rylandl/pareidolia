@@ -46,9 +46,9 @@ a graph component a physical papyrus sheet.
 4. **Sparse association**
    - Branch joins use compatible facing edges, fiber continuation, order
      feasibility, and material accountability.
-   - A join must be accepted in the main chunk and every overlapping subwindow
-     that observes it. It is then rebuilt with the active MLS carrier; this is a
-     same-sample construction gate, not independent validation.
+   - A clean local join must be accepted in the main chunk and every overlapping
+     subwindow that observes it. It is then rebuilt with the active MLS carrier;
+     this is a same-sample construction gate, not independent validation.
    - Pairwise-incoherent joins are deferred. If individually coherent joins make
      an incoherent transitive association, the weakest retained construction
      edge is removed until every output association passes the carrier gate.
@@ -61,10 +61,12 @@ a graph component a physical papyrus sheet.
      separately. Window disagreement is retained as weaker provenance rather
      than relabeled as independent validation.
    - The whole-volume association solve keeps overlap-validated, unanimous
-     single-window, and context-disputed evidence in separate tiers. Every novel
-     endpoint pair must still pass complete-global-branch reconstruction,
-     collision safety, transitive reconstruction, and mesh integrity. Local
-     integrity quarantine remains a hard exclusion.
+     single-window, context-disputed, subwindow-unresolved, and locally exact-
+     deferred evidence in separate tiers. The last two enter through an explicit
+     candidate catalog only after passing local score, material, order, and
+     collision checks. Every novel endpoint pair must still pass complete-global-
+     branch reconstruction, collision safety, transitive reconstruction, and
+     mesh integrity. Local integrity quarantine remains a hard exclusion.
    - A completeness prior applies only to flakes with a calibrated reliability
      estimate. Every solve retains an explicit outlier/unassigned state.
    - Secondary-normal fragments remain separate branches until the association
@@ -162,64 +164,77 @@ consistency rejects 5,417 more. The final 783,846-edge graph has:
 - 531 branches spanning at least 11 of 14 axial planes; and
 - 235 branches spanning all 14 planes.
 
-The global association pass now preserves three provenance tiers. Tier one is
-the 125 integrity-clean endpoint joins accepted by every one of at least two
-observing windows. Tier two contains 214 unanimous single-window candidates.
-Tier three contains 172 endpoint pairs accepted in only a subset of their
-observing windows. This third tier is explicitly named `context-disputed`; it is
-not called validation. The minimum accepted score controls deterministic
-ordering, and overlap-validated, then single-window, then context-disputed
-provenance wins exact score ties.
+The accepted endpoint catalog preserves three provenance tiers. Tier one is the
+125 integrity-clean joins accepted by every one of at least two observing
+windows. Tier two contains 214 unanimous single-window candidates. Tier three
+contains 172 endpoint pairs accepted in only a subset of their observing
+windows. This third tier is explicitly named `context-disputed`; it is not called
+validation. Two disputed pairs remain excluded by local mesh integrity and 13
+already lie inside one global branch. The accepted-evidence scope therefore has
+496 novel candidates: 125 overlap-validated, 214 single-window, and 157 context-
+disputed. Its 479 retained joins exactly reproduce the v3 result.
 
-Two disputed pairs remain excluded because a local association containing each
-failed mesh integrity. Another 13 disputed endpoint pairs already lie inside one
-global branch and are preserved as already-linked evidence rather than presented
-as new joins. That leaves 496 novel candidates: 125 overlap-validated, 214
-single-window, and 157 context-disputed.
+Candidate discovery then inspects local evidence withheld before final
+association rather than jumping directly to an unrestricted spatial search. The
+51 windows contain 47,981 candidate occurrences over 29,809 unique endpoint
+pairs. The rescue catalog admits only two cases: a pair accepted by the main
+window but not unanimously by its subwindows, or a subwindow-stable pair that
+failed the small-window MLS fit. Material-deferred, order-ambiguous, order-
+blocked, below-score, collision-rejected, already accepted, locally quarantined,
+already-linked, and duplicate global branch pairs remain excluded.
 
-Every novel candidate is reconstructed from its complete global branches. Of
-the 970 touched branches, 107 fail as standalone carriers, but 96 of those cases
-stabilize when reconstructed with the proposed neighbor. Standalone failure is
-therefore diagnostic rather than a blanket veto. The complete pair gate passes
-483 candidates. Thirteen are deferred because their joined reconstruction
-remains incoherent: the previous single-window failure and 12 disputed cases.
-There are no failures blamed on a coherent input pair alone.
+After mapping endpoint identities into the whole-volume graph, the catalog has
+230 subwindow-unresolved and 429 locally exact-deferred global branch pairs. It
+retains all 1,045 supporting local observations, including scores, overlap
+counts, original decisions, and available local residuals. Of the 230 unresolved
+pairs, 229 have insufficient subwindow observations and one has an observed
+disagreement. This artifact is a candidate inventory only; it accepts no
+association.
 
-Descending-score construction retains 479 joins. The two remaining pair-gate
-passes that would repeat an Acus cell are explicitly rejected. The first
-transitive carrier audit then finds two support-skirt intersections and no
-evidence-core intersections. Removing only the weaker context-disputed
-construction edge from each intersecting carrier pair produces a zero-
-intersection fixed point while preserving the stronger neighboring construction.
-No transitive exact-carrier pruning is required.
+Every candidate is then reconstructed from its complete global branches. The
+accepted tiers pass 483 of 496 pair gates. Global context also passes 111 of 230
+subwindow-unresolved pairs and five of 429 locally exact-deferred pairs. The five
+rescues are narrow rather than permissive: their local failures sit near the
+normal/height gates, while complete-branch fits range from 0.67 to 2.47 voxels
+and 3.06 to 5.67 degrees. Across all 1,155 candidates, 599 pass complete pair
+geometry; 494 are deferred with an incoherent input carrier and 62 fail despite
+coherent inputs.
 
-The final solve forms 458 associations over 937 branches and 9,415 flakes: 439
-pairs, 17 triples, and two four-branch groups. There are 117 overlap-only, 202
-single-window-only, 135 context-disputed-only, and four mixed-provenance
-associations. Final carrier medians are 1.25 voxels in height and 3.88 degrees in
-normal, with maxima of 2.94 voxels and 5.99 degrees. Triangulating all 458
-carriers produces 373 overlapping bounding-box pairs, 101,818 broad-phase
-triangle pairs, and 2,486 narrow-phase checks with zero final support-skirt or
-evidence-core intersections. Twenty-one associations span at least 11 axial
-planes and nine span all 14.
+Descending-score construction retains 593 of those pairwise passes initially;
+six would repeat an Acus cell. All 562 resulting transitive carriers pass exact
+reconstruction without pruning. The first mesh audit finds eight intersecting
+carrier pairs, all in the support skirt and none in both evidence cores. Removing
+the six weakest implicated construction edges—three context-disputed and three
+subwindow-unresolved—produces a zero-intersection fixed point.
 
-At catalog scale, association reduces 131,211 original components to 130,732
+The final 587 joins form 556 associations over 1,143 branches and 12,042 flakes:
+528 pairs, 25 triples, and three four-branch groups. There are 117 overlap-only,
+202 single-window-only, 132 context-disputed-only, 95 subwindow-unresolved-only,
+four local-exact-rescue-only, and six mixed-provenance associations. Final
+carrier medians are 1.25 voxels in height and 3.90 degrees in normal, with maxima
+of 2.94 voxels and 5.99 degrees. Triangulating all 556 carriers produces 524
+overlapping bounding-box pairs, 127,776 broad-phase triangle pairs, and 3,802
+narrow-phase checks with zero final support-skirt or evidence-core intersections.
+Twenty-five associations span at least 11 axial planes and nine span all 14.
+
+At catalog scale, association reduces 131,211 original components to 130,624
 without changing the 586-flake maximum. Relative to the original sparse graph,
-the final catalog has 17 more fragments with at least 25 flakes, four more with
-at least 100 flakes, eight more spanning at least 11 planes, and six more
-spanning all 14. Relative to the clean two-tier result, the disputed tier adds
-five, three, four, and four to those respective counts. Of the 458 merged
-associations, 268 extend axial span and 35 add at least ten flakes beyond their
-largest input branch.
+the final catalog has 25 more fragments with at least 25 flakes, 11 more with at
+least 50, four more with at least 100, nine more spanning at least 11 planes, and
+six more spanning all 14. Relative to v3, the rescue tiers add eight, two, zero,
+one, and zero to those respective counts. Of the 556 merged associations, 320
+extend axial span and 42 add at least ten flakes beyond their largest input
+branch.
 
-The default solve completes in 24.7 seconds and reduces 63,783 linked branches
-to 63,304 branch groups. A `--clean-only` compatibility solve exactly reproduces
-all 17 compared geometric and decision arrays from v2, including candidate
-decisions and association identities. This remains a deliberately narrow region-
-wide construction result, not a sheet census. Unassociated global branches are
-outside the carrier-intersection audit, and no provenance tier is relabeled as
-independent replication. Output identities remain sparse exact-coherent surface
-hypotheses rather than pages or physical papyrus layers.
+Fresh candidate discovery takes 11.2 seconds and the five-tier solve 34.5
+seconds, reducing 63,783 linked branches to 63,196 branch groups. An
+`--accepted-only` compatibility solve exactly reproduces all 23 compared
+geometric and decision arrays from v3, including association identities;
+`--clean-only` retains the earlier two-tier scope. This remains a deliberately
+narrow region-wide construction result, not a sheet census. Unassociated global
+branches are outside the carrier-intersection audit, and no provenance tier is
+relabeled as independent replication. Output identities remain sparse exact-
+coherent surface hypotheses rather than pages or physical papyrus layers.
 
 ## Reproducible commands
 
@@ -257,8 +272,14 @@ hypotheses rather than pages or physical papyrus layers.
 .venv/bin/python scripts/build-global-monotone-graph.py \
   --root work/cross-scroll-analysis-z512
 
+.venv/bin/python scripts/build-global-branch-candidates.py \
+  --root work/cross-scroll-analysis-z512
+
 .venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/associate-global-branches.py \
+  --root work/cross-scroll-analysis-z512 --accepted-only
 
 .venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512 --clean-only

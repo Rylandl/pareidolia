@@ -23,17 +23,27 @@ from .slab_branch_association import (
     _exact_carrier_stats,
 )
 from .slab_flakes import FLAKE_CACHE_VERSION
+from .slab_global_branch_candidates import (
+    GLOBAL_BRANCH_CANDIDATE_VERSION,
+    SOURCE_LOCAL_EXACT_DEFERRED,
+    SOURCE_SUBWINDOW_UNRESOLVED,
+    build_global_branch_candidates,
+)
 from .slab_global_monotone_graph import GLOBAL_MONOTONE_GRAPH_VERSION
 from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BRANCH_ASSOCIATION_VERSION = 3
+GLOBAL_BRANCH_ASSOCIATION_VERSION = 4
 
-PROVENANCE_CONTEXT_DISPUTED = 1
-PROVENANCE_SINGLE_WINDOW = 2
-PROVENANCE_OVERLAP_VALIDATED = 3
+PROVENANCE_LOCAL_EXACT_DEFERRED = SOURCE_LOCAL_EXACT_DEFERRED
+PROVENANCE_SUBWINDOW_UNRESOLVED = SOURCE_SUBWINDOW_UNRESOLVED
+PROVENANCE_CONTEXT_DISPUTED = 3
+PROVENANCE_SINGLE_WINDOW = 4
+PROVENANCE_OVERLAP_VALIDATED = 5
 PROVENANCE_NAMES = {
+    PROVENANCE_LOCAL_EXACT_DEFERRED: "local-exact-deferred",
+    PROVENANCE_SUBWINDOW_UNRESOLVED: "subwindow-unresolved",
     PROVENANCE_CONTEXT_DISPUTED: "context-disputed",
     PROVENANCE_SINGLE_WINDOW: "single-window",
     PROVENANCE_OVERLAP_VALIDATED: "overlap-validated",
@@ -62,6 +72,8 @@ GRAPH_RETAINED = 2
 GRAPH_REDUNDANT = 3
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "includeLocalExactDeferredCandidates": True,
+    "includeSubwindowUnresolvedCandidates": True,
     "includeContextDisputedCandidates": True,
     "includeSingleWindowCandidates": True,
     "minimumOverlapValidatedObservations": 2,
@@ -357,11 +369,19 @@ def _aggregate_observations(
     np.minimum.at(minimum, index, observations["score"])
     np.maximum.at(maximum, index, observations["score"])
     np.add.at(total, index, observations["score"])
-    np.maximum.at(
-        maximum_height, index, observations["medianHeightResidualVoxels"]
+    observed_height = np.asarray(
+        observations["medianHeightResidualVoxels"], dtype=np.float32
     )
+    finite_height = np.isfinite(observed_height)
     np.maximum.at(
-        maximum_normal, index, observations["medianNormalResidualDeg"]
+        maximum_height, index[finite_height], observed_height[finite_height]
+    )
+    observed_normal = np.asarray(
+        observations["medianNormalResidualDeg"], dtype=np.float32
+    )
+    finite_normal = np.isfinite(observed_normal)
+    np.maximum.at(
+        maximum_normal, index[finite_normal], observed_normal[finite_normal]
     )
     if np.any(count == 0):
         raise ValueError("a selected global join has no accepted local observation")
@@ -751,17 +771,10 @@ def associate_global_branches(
     schedule = json.loads(schedule_summary_path.read_text())
     graph_summary = json.loads(graph_summary_path.read_text())
     grid = json.loads((root / "grid.json").read_text())
-    local_paths = []
-    for window in schedule["windows"]:
-        suffix = window_artifact_suffix(window["originCellXYZ"])
-        local_paths.extend(
-            (
-                root
-                / f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}{suffix}.npz",
-                root
-                / f"branch-association-window-v{BRANCH_ASSOCIATION_VERSION}{suffix}.npz",
-            )
-        )
+    candidate_summary = build_global_branch_candidates(root, force=force)
+    candidate_artifact_path = root / (
+        f"global-branch-candidates-v{GLOBAL_BRANCH_CANDIDATE_VERSION}.npz"
+    )
     flake_paths = [
         root / f"flakes-v{FLAKE_CACHE_VERSION}-z{z_index}-k3.json"
         for z_index in range(len(grid["z"]))
@@ -771,29 +784,51 @@ def associate_global_branches(
         "settings": resolved,
         "scheduleIdentity": schedule["identity"],
         "globalGraphIdentity": graph_summary["identity"],
+        "candidateIdentity": candidate_summary["identity"],
         "inputArtifacts": [
             _content_identity(path)
             for path in (
                 root / "grid.json",
-                schedule_artifact_path,
-                graph_artifact_path,
-                *local_paths,
+                candidate_artifact_path,
                 *flake_paths,
             )
         ],
     }
+    include_local_exact_deferred = bool(
+        resolved["includeLocalExactDeferredCandidates"]
+    )
+    include_subwindow_unresolved = bool(
+        resolved["includeSubwindowUnresolvedCandidates"]
+    )
     include_context_disputed = bool(
         resolved["includeContextDisputedCandidates"]
     )
     include_single_window = bool(resolved["includeSingleWindowCandidates"])
-    if include_context_disputed and include_single_window:
+    include_rescue = include_local_exact_deferred or include_subwindow_unresolved
+    if (
+        include_local_exact_deferred
+        and include_subwindow_unresolved
+        and include_context_disputed
+        and include_single_window
+    ):
         mode_suffix = ""
-    elif include_single_window:
+    elif not include_rescue and include_context_disputed and include_single_window:
+        mode_suffix = "-accepted-only"
+    elif not include_rescue and not include_context_disputed and include_single_window:
         mode_suffix = "-clean-only"
-    elif not include_context_disputed:
+    elif not include_rescue and not include_context_disputed and not include_single_window:
         mode_suffix = "-overlap-only"
     else:
-        mode_suffix = "-context-no-single"
+        tier_flags = {
+            "localExact": include_local_exact_deferred,
+            "subwindow": include_subwindow_unresolved,
+            "context": include_context_disputed,
+            "single": include_single_window,
+        }
+        digest = hashlib.sha256(
+            json.dumps(tier_flags, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:8]
+        mode_suffix = f"-custom-{digest}"
     stem = (
         f"global-branch-association-v{GLOBAL_BRANCH_ASSOCIATION_VERSION}"
         f"{mode_suffix}"
@@ -812,6 +847,8 @@ def associate_global_branches(
         tiled = {key: np.asarray(payload[key]) for key in payload.files}
     with np.load(graph_artifact_path) as payload:
         graph = {key: np.asarray(payload[key]) for key in payload.files}
+    with np.load(candidate_artifact_path) as payload:
+        rescue = {key: np.asarray(payload[key]) for key in payload.files}
 
     selected, evidence_provenance = _candidate_tier_selection(
         tiled["branchJoinUnanimous"],
@@ -894,18 +931,128 @@ def associate_global_branches(
     branch_pair = evidence_branch_pair[novel]
     observation_count = evidence_observation_count[novel]
     acceptance_count = evidence_acceptance_count[novel]
+    accepted_tier_candidate_count = len(endpoint_pair)
+    accepted_observations = _candidate_observations(
+        root, schedule["windows"], endpoint_pair
+    )
+    accepted_aggregate = _aggregate_observations(
+        accepted_observations, len(endpoint_pair)
+    )
+    if np.any(accepted_aggregate["count"] != acceptance_count):
+        raise ValueError("local join observations do not reproduce tiled acceptance")
+
+    rescue_selected = (
+        (
+            (rescue["candidateSource"] == SOURCE_LOCAL_EXACT_DEFERRED)
+            & include_local_exact_deferred
+        )
+        | (
+            (rescue["candidateSource"] == SOURCE_SUBWINDOW_UNRESOLVED)
+            & include_subwindow_unresolved
+        )
+    )
+    rescue_indices = np.flatnonzero(rescue_selected)
+    rescue_endpoint_pair = rescue["candidateEndpointIdentity"][
+        rescue_indices
+    ].astype(np.uint64)
+    rescue_endpoint_node = rescue["candidateEndpointNodeIndex"][
+        rescue_indices
+    ].astype(np.uint32)
+    rescue_branch_pair = np.stack(
+        (
+            rescue["candidateBranchSource"][rescue_indices],
+            rescue["candidateBranchTarget"][rescue_indices],
+        ),
+        axis=1,
+    ).astype(np.uint32)
+    if len(rescue_indices):
+        if not np.all(
+            node_identity[rescue_endpoint_node] == rescue_endpoint_pair
+        ):
+            raise ValueError("a rescue endpoint identity no longer matches its node")
+        if not np.array_equal(
+            np.sort(component[rescue_endpoint_node], axis=1), rescue_branch_pair
+        ):
+            raise ValueError("a rescue endpoint no longer matches its global branch")
+        endpoint_pair = np.concatenate([endpoint_pair, rescue_endpoint_pair])
+        endpoint_node = np.concatenate([endpoint_node, rescue_endpoint_node])
+        provenance = np.concatenate(
+            [
+                provenance,
+                rescue["candidateSource"][rescue_indices].astype(np.uint8),
+            ]
+        )
+        branch_pair = np.concatenate([branch_pair, rescue_branch_pair])
+        rescue_evidence_count = rescue["candidateEvidenceCount"][
+            rescue_indices
+        ].astype(np.uint8)
+        observation_count = np.concatenate(
+            [observation_count, rescue_evidence_count]
+        )
+        acceptance_count = np.concatenate(
+            [acceptance_count, rescue_evidence_count]
+        )
+
     if not len(endpoint_pair):
         raise ValueError("all selected global join evidence is already linked")
     canonical_branch_pair = np.sort(branch_pair, axis=1)
     if len(np.unique(canonical_branch_pair, axis=0)) != len(branch_pair):
         raise ValueError("multiple endpoint joins address the same global branch pair")
 
-    observations = _candidate_observations(
-        root, schedule["windows"], endpoint_pair
+    rescue_candidate_map = np.full(
+        len(rescue["candidateSource"]), -1, dtype=np.int64
     )
+    rescue_candidate_map[rescue_indices] = (
+        accepted_tier_candidate_count + np.arange(len(rescue_indices))
+    )
+    rescue_evidence_selected = rescue_selected[
+        rescue["evidenceCandidateIndex"]
+    ]
+    observations = {
+        "candidateIndex": np.concatenate(
+            [
+                accepted_observations["candidateIndex"],
+                rescue_candidate_map[
+                    rescue["evidenceCandidateIndex"][rescue_evidence_selected]
+                ].astype(np.uint32),
+            ]
+        ),
+        "windowIndex": np.concatenate(
+            [
+                accepted_observations["windowIndex"],
+                rescue["evidenceWindowIndex"][rescue_evidence_selected].astype(
+                    np.uint8
+                ),
+            ]
+        ),
+        "score": np.concatenate(
+            [
+                accepted_observations["score"],
+                rescue["evidenceScore"][rescue_evidence_selected].astype(
+                    np.float32
+                ),
+            ]
+        ),
+        "medianHeightResidualVoxels": np.concatenate(
+            [
+                accepted_observations["medianHeightResidualVoxels"],
+                rescue["evidenceExactMedianHeightResidualVoxels"][
+                    rescue_evidence_selected
+                ].astype(np.float32),
+            ]
+        ),
+        "medianNormalResidualDeg": np.concatenate(
+            [
+                accepted_observations["medianNormalResidualDeg"],
+                rescue["evidenceExactMedianNormalResidualDeg"][
+                    rescue_evidence_selected
+                ].astype(np.float32),
+            ]
+        ),
+    }
     aggregate = _aggregate_observations(observations, len(endpoint_pair))
     if np.any(aggregate["count"] != acceptance_count):
-        raise ValueError("local join observations do not reproduce tiled acceptance")
+        raise ValueError("local evidence observations do not reproduce candidate counts")
 
     touched = np.unique(branch_pair)
     members = _component_members(component, touched)
@@ -1117,6 +1264,18 @@ def associate_global_branches(
         ],
         minlength=len(association_branch_count),
     ).astype(np.uint16)
+    association_subwindow_unresolved_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_SUBWINDOW_UNRESOLVED
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
+    association_local_exact_deferred_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_LOCAL_EXACT_DEFERRED
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
     exact_groups = [value["exact"] for value in final_geometries]
     for value in exact_groups:
         association_id = int(value["associationId"])
@@ -1127,15 +1286,25 @@ def associate_global_branches(
         context_count = int(
             association_context_disputed_join_count[association_id]
         )
+        subwindow_count = int(
+            association_subwindow_unresolved_join_count[association_id]
+        )
+        local_exact_count = int(
+            association_local_exact_deferred_join_count[association_id]
+        )
         value["overlapValidatedJoinCount"] = overlap_count
         value["singleWindowJoinCount"] = single_count
         value["contextDisputedJoinCount"] = context_count
+        value["subwindowUnresolvedJoinCount"] = subwindow_count
+        value["localExactDeferredJoinCount"] = local_exact_count
         active_provenance = [
             name
             for name, count in (
                 ("overlap-validated", overlap_count),
                 ("single-window", single_count),
                 ("context-disputed", context_count),
+                ("subwindow-unresolved", subwindow_count),
+                ("local-exact-deferred", local_exact_count),
             )
             if count
         ]
@@ -1234,6 +1403,12 @@ def associate_global_branches(
         associationSingleWindowJoinCount=association_single_window_join_count,
         associationContextDisputedJoinCount=(
             association_context_disputed_join_count
+        ),
+        associationSubwindowUnresolvedJoinCount=(
+            association_subwindow_unresolved_join_count
+        ),
+        associationLocalExactDeferredJoinCount=(
+            association_local_exact_deferred_join_count
         ),
         integrityRoundIndex=np.asarray(
             [value[0] for value in violation_records], dtype=np.uint16
@@ -1401,27 +1576,23 @@ def associate_global_branches(
         }
         for index in range(len(excluded_quarantined_endpoint_pair))
     ]
-    if include_context_disputed and include_single_window:
-        input_rule = (
-            "integrity-clean endpoint evidence enters in three explicit tiers: "
-            "overlap-validated joins accepted by at least two windows, unanimous "
-            "single-window joins, and context-disputed joins accepted by only a "
-            "subset of observing windows"
-        )
-    elif include_single_window:
-        input_rule = (
-            "only unanimous overlap-validated and single-window endpoint joins "
-            "enter the solve"
-        )
-    elif include_context_disputed:
-        input_rule = (
-            "overlap-validated and context-disputed endpoint evidence enters the "
-            "solve; unanimous single-window joins are excluded"
-        )
-    else:
-        input_rule = (
-            "only integrity-clean unanimous endpoint joins observed in at least "
-            "two windows enter the solve"
+    included_tiers = ["overlap-validated"]
+    if include_single_window:
+        included_tiers.append("single-window")
+    if include_context_disputed:
+        included_tiers.append("context-disputed")
+    if include_subwindow_unresolved:
+        included_tiers.append("subwindow-unresolved")
+    if include_local_exact_deferred:
+        included_tiers.append("local-exact-deferred")
+    input_rule = (
+        "integrity-clean endpoint evidence enters in explicit provenance tiers: "
+        + ", ".join(included_tiers)
+    )
+    if include_rescue:
+        input_rule += (
+            "; the rescue tiers passed local score, material, order, and collision "
+            "checks but remain candidates until complete-global-branch reconstruction"
         )
     result = {
         "identity": identity,
@@ -1430,8 +1601,9 @@ def associate_global_branches(
             "scoreRule": (
                 "the minimum accepted local score controls deterministic global "
                 "construction; overlap-validated, then single-window, then "
-                "context-disputed evidence wins exact score ties, and every accepted "
-                "local score, residual, and provenance label is retained"
+                "context-disputed, then subwindow-unresolved, then local-exact-deferred "
+                "evidence wins exact score ties, and every supporting local score, "
+                "residual, and provenance label is retained"
             ),
             "pairGate": (
                 "each join reconstructed from its complete global branches must pass "
@@ -1471,6 +1643,9 @@ def associate_global_branches(
             "inputQuarantinedJoinCount": len(
                 tiled["quarantinedBranchJoinEndpointIdentity"]
             ),
+            "inputRescueCandidateCount": int(
+                candidate_summary["stats"]["candidateBranchPairCount"]
+            ),
             "eligibleTierEvidenceJoinCount": int(np.count_nonzero(selected)),
             "excludedQuarantinedEvidenceCount": len(
                 excluded_quarantined_endpoint_pair
@@ -1484,6 +1659,10 @@ def associate_global_branches(
                 )
             ),
             "selectedCandidateJoinCount": len(endpoint_pair),
+            "selectedAcceptedTierCandidateJoinCount": (
+                accepted_tier_candidate_count
+            ),
+            "selectedRescueCandidateJoinCount": len(rescue_indices),
             "selectedOverlapValidatedJoinCount": int(
                 np.count_nonzero(
                     provenance == PROVENANCE_OVERLAP_VALIDATED
@@ -1495,6 +1674,16 @@ def associate_global_branches(
             "selectedContextDisputedJoinCount": int(
                 np.count_nonzero(
                     provenance == PROVENANCE_CONTEXT_DISPUTED
+                )
+            ),
+            "selectedSubwindowUnresolvedJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_SUBWINDOW_UNRESOLVED
+                )
+            ),
+            "selectedLocalExactDeferredJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_LOCAL_EXACT_DEFERRED
                 )
             ),
             "selectedTouchedGlobalBranchCount": len(touched),
@@ -1519,6 +1708,18 @@ def associate_global_branches(
                 (
                     aggregate["maximumScore"] - aggregate["minimumScore"]
                 )[provenance == PROVENANCE_CONTEXT_DISPUTED],
+                7,
+            ),
+            "subwindowUnresolvedCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_SUBWINDOW_UNRESOLVED],
+                7,
+            ),
+            "localExactDeferredCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_LOCAL_EXACT_DEFERRED],
                 7,
             ),
             "pairExactPassCount": int(np.count_nonzero(pair_exact["passed"])),
@@ -1616,6 +1817,8 @@ def associate_global_branches(
                     "overlap-validated-only",
                     "single-window-only",
                     "context-disputed-only",
+                    "subwindow-unresolved-only",
+                    "local-exact-deferred-only",
                     "mixed",
                 )
             },

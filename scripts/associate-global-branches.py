@@ -14,18 +14,23 @@ from backend.slab_global_branch_association import associate_global_branches
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply overlap-validated, single-window, and context-disputed endpoint "
-            "evidence to the global sparse branch graph with collision, exact-carrier, "
-            "and mesh-integrity gates."
+            "Apply accepted and locally deferred endpoint evidence to the global "
+            "sparse branch graph with collision, exact-carrier, and mesh-integrity "
+            "gates."
         )
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
     evidence_mode = parser.add_mutually_exclusive_group()
     evidence_mode.add_argument(
+        "--accepted-only",
+        action="store_true",
+        help="exclude both locally deferred rescue tiers and reproduce the v3 scope",
+    )
+    evidence_mode.add_argument(
         "--clean-only",
         action="store_true",
-        help="exclude context-disputed candidates but retain clean single-window joins",
+        help="retain only overlap-validated and clean single-window joins",
     )
     evidence_mode.add_argument(
         "--overlap-only",
@@ -54,6 +59,12 @@ def main() -> None:
         args.root,
         force=args.force,
         settings={
+            "includeLocalExactDeferredCandidates": not (
+                args.accepted_only or args.clean_only or args.overlap_only
+            ),
+            "includeSubwindowUnresolvedCandidates": not (
+                args.accepted_only or args.clean_only or args.overlap_only
+            ),
             "includeContextDisputedCandidates": not (
                 args.clean_only or args.overlap_only
             ),

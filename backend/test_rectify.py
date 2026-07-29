@@ -73,6 +73,7 @@ from backend.slab_monotone_layers import (
 from backend.slab_branch_association import (
     CANDIDATE_DTYPE,
     DECISION_EXACT_GROUP_PRUNED,
+    DECISION_EXACT_PAIR_DEFERRED as LOCAL_DECISION_EXACT_PAIR_DEFERRED,
     DECISION_ORDER_BLOCKED,
     DECISION_RETAINED,
     DEFAULT_SETTINGS,
@@ -112,6 +113,11 @@ from backend.slab_global_branch_association import (
     _solve_candidate_graph,
     _weakest_integrity_candidates,
 )
+from backend.slab_global_branch_candidates import (
+    SOURCE_LOCAL_EXACT_DEFERRED,
+    SOURCE_SUBWINDOW_UNRESOLVED,
+    _candidate_evidence_source,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -122,6 +128,28 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_global_rescue_candidate_source_preserves_local_deferral(self) -> None:
+        source, selected = _candidate_evidence_source(
+            np.asarray([DECISION_RETAINED, 0]),
+            np.asarray([0, 0]),
+        )
+        self.assertEqual(source, SOURCE_SUBWINDOW_UNRESOLVED)
+        np.testing.assert_array_equal(selected, [True, False])
+
+        source, selected = _candidate_evidence_source(
+            np.asarray([DECISION_RETAINED, DECISION_RETAINED]),
+            np.asarray([LOCAL_DECISION_EXACT_PAIR_DEFERRED, 0]),
+        )
+        self.assertEqual(source, SOURCE_LOCAL_EXACT_DEFERRED)
+        np.testing.assert_array_equal(selected, [True, False])
+
+        source, selected = _candidate_evidence_source(
+            np.asarray([DECISION_RETAINED]),
+            np.asarray([DECISION_RETAINED]),
+        )
+        self.assertEqual(source, 0)
+        np.testing.assert_array_equal(selected, [False])
+
     def test_global_pair_gate_lets_joined_carrier_stabilize_sparse_input(
         self,
     ) -> None:
@@ -196,6 +224,29 @@ class RectifierTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             aggregate["maximumLocalMedianNormalResidualDeg"], [5.0, 2.0]
+        )
+
+    def test_global_branch_join_aggregation_ignores_missing_local_geometry(
+        self,
+    ) -> None:
+        aggregate = _aggregate_observations(
+            {
+                "candidateIndex": np.asarray([0], dtype=np.uint32),
+                "score": np.asarray([0.6], dtype=np.float32),
+                "medianHeightResidualVoxels": np.asarray(
+                    [np.nan], dtype=np.float32
+                ),
+                "medianNormalResidualDeg": np.asarray(
+                    [np.nan], dtype=np.float32
+                ),
+            },
+            1,
+        )
+        self.assertTrue(
+            np.isneginf(aggregate["maximumLocalMedianHeightResidualVoxels"][0])
+        )
+        self.assertTrue(
+            np.isneginf(aggregate["maximumLocalMedianNormalResidualDeg"][0])
         )
 
     def test_global_branch_join_solver_rejects_transitive_cell_collision(

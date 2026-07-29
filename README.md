@@ -281,26 +281,36 @@ silently using synthetic padding.
   planes, and 235 span all 14. Every repeated edge-score observation is exactly
   equal. These remain sparse local surface branches, not pages or sheets.
   Detailed contracts and findings are in `docs/design-revision.md`.
+- `python3 scripts/build-global-branch-candidates.py --root
+  work/cross-scroll-analysis-z512` inventories locally withheld evidence before
+  accepting any new join. From 47,981 candidate occurrences it finds 230 global
+  branch pairs that passed the main window's score, material, order, and
+  collision solve but lacked unanimous subwindow support, plus 429 pairs that
+  passed subwindow stability but failed the small-window MLS fit. The 659-pair
+  catalog retains all 1,045 supporting observations and their original
+  decisions; 229 of the first tier are under-observed and one has an actual
+  subwindow disagreement. Accepted, quarantined, already-linked, and duplicate
+  global branch pairs cannot re-enter through `global-branch-candidates-v1`.
 - `python3 scripts/associate-global-branches.py --root
-  work/cross-scroll-analysis-z512` preserves three evidence tiers rather than
-  hiding crop disagreement: 125 overlap-validated joins, 214 unanimous
-  single-window joins, and 172 context-disputed endpoint observations. Of the
-  latter, two remain excluded by the local mesh quarantine and 13 are already
-  linked inside one global branch, leaving 157 novel disputed candidates. Every
-  novel candidate is reconstructed from its complete global branches. The solve
-  retains all 125 overlap joins, 213 single-window joins, and 141 disputed joins;
-  13 fail because an input carrier remains incoherent, two cause cell collisions,
-  and the two weakest disputed edges in intersecting carrier pairs are removed.
-  The resulting 479 joins form 458 exact-coherent associations over 937 branches
-  and 9,415 flakes: 439 pairs, 17 triples, and two four-branch groups. Final
-  carrier medians are 1.25 voxels / 3.88 degrees, with zero exact failures and
-  zero intersections after 101,818 broad-phase and 2,486 narrow-phase triangle
-  checks. The 25-second result reduces 63,783 linked branches to 63,304 groups.
-  In the full catalog it adds 17 fragments with at least 25 flakes, four with at
-  least 100 flakes, eight spanning at least 11 planes, and six spanning all 14
-  relative to the unassociated graph. `--clean-only` exactly reproduces all 17
-  compared v2 geometric and decision arrays. Evidence, provenance, residuals,
-  and decisions are retained in `global-branch-association-v3`.
+  work/cross-scroll-analysis-z512` rebuilds both the accepted and rescue tiers
+  from complete global branches. Global context passes 111 of 230 subwindow-
+  unresolved pairs and five of 429 locally exact-deferred pairs. The final solve
+  retains 587 joins: 125 overlap-validated, 213 single-window, 140 context-
+  disputed, 104 subwindow-unresolved, and five local-exact rescues. Six pairwise
+  passes cause cell collisions and six weakest edges are removed to resolve eight
+  initial carrier-pair intersections. The resulting 556 exact-coherent
+  associations cover 1,143 branches and 12,042 flakes: 528 pairs, 25 triples,
+  and three four-branch groups. Final carrier medians remain 1.25 voxels / 3.90
+  degrees, with zero exact failures and zero intersections after 127,776 broad-
+  phase and 3,802 narrow-phase triangle checks. Candidate discovery takes 11.2
+  seconds and the solve 34.5 seconds. It reduces 63,783 linked branches to
+  63,196 groups. Relative to the unassociated graph, the full catalog gains 25
+  fragments with at least 25 flakes, 11 with at least 50, four with at least
+  100, nine spanning at least 11 planes, and six spanning all 14. The
+  `--accepted-only` mode exactly reproduces all 23 compared v3 geometric and
+  decision arrays; `--clean-only` retains the earlier two-tier scope. The v4
+  artifact preserves every candidate, provenance tier, residual, and final
+  decision.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened
