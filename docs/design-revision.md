@@ -56,8 +56,17 @@ a graph component a physical papyrus sheet.
 
 5. **Physical interpretation**
    - Page identity, winding order, side, and recto/verso are downstream
-     interpretations. None is encoded in voxel labels, flake IDs, or branch
-     component IDs.
+   interpretations. None is encoded in voxel labels, flake IDs, or branch
+   component IDs.
+
+6. **Cross-association integrity**
+   - Every accepted merged association is reconstructed as the active MLS
+     carrier and triangulated for an explicit non-intersection audit.
+   - Intersections within 24 voxels of supporting flakes on both surfaces are
+     separated from intersections in the wider carrier support skirt.
+   - A bidirectional sampled-clearance sweep is reported descriptively. It is
+     not called papyrus thickness, and shared-cell depth order distinguishes
+     an ordered near-contact from an unexplained boundary approach.
 
 ## Current z512 findings
 
@@ -118,6 +127,16 @@ residual and 4.26-degree median normal residual. These are deliberately modest,
 chunk-local surface associations; 3,282 linked branches remain explicitly
 unassociated, and no output identity is promoted to a physical sheet.
 
+The first joint integrity audit triangulates all 33 accepted association
+carriers into 84,272 finite surface triangles and checks 29,844 sampled points
+within 24 voxels of their supporting flakes. It finds zero surface
+intersections, zero within-association cell collisions, and only one pair of
+carriers within 12 voxels. That pair approaches to 5.67 voxels in the sampled
+grids, but the closest displacement is primarily normal (5.25 voxels), the
+normals and fibers agree within 4.53 and 3.55 degrees, and their one shared cell
+preserves an 8.68-voxel depth order. It is therefore retained as an explicit
+ordered near-contact rather than treated as a crossing or an automatic merge.
+
 ## Reproducible commands
 
 ```bash
@@ -131,6 +150,9 @@ unassociated, and no output identity is promoted to a physical sheet.
   --root work/cross-scroll-analysis-z512
 
 .venv/bin/python scripts/associate-monotone-branches.py \
+  --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/audit-branch-association-integrity.py \
   --root work/cross-scroll-analysis-z512
 ```
 

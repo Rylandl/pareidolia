@@ -258,6 +258,16 @@ silently using synthetic padding.
   chunk-local surface hypotheses, never page identities. The aligned candidate,
   decision, exact-residual, branch, and flake arrays are stored under
   `work/cross-scroll-analysis-z512/branch-association-window-v1`.
+- `python3 scripts/audit-branch-association-integrity.py --root
+  work/cross-scroll-analysis-z512` reconstructs and triangulates every accepted
+  merged association, then reports exact mesh intersections separately from a
+  descriptive sampled-clearance sweep. The 5.1-second audit checks 84,272
+  triangles and 29,844 evidence-core points with zero intersections and zero
+  within-association cell collisions. Only one carrier pair comes within 12
+  voxels; it is a consistently ordered near-contact at 5.67 sampled voxels, not
+  a crossing or an automatic merge. Intersection coordinates, pair clearance,
+  normal/fiber alignment, and shared-cell order remain available in
+  `work/cross-scroll-analysis-z512/branch-association-integrity-v1`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

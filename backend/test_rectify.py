@@ -76,6 +76,10 @@ from backend.slab_branch_association import (
     _solve_candidates,
     _solve_with_exact_geometry,
 )
+from backend.slab_association_integrity import (
+    _shared_cell_order,
+    _triangle_intersection,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -301,6 +305,49 @@ class RectifierTests(unittest.TestCase):
         )
         self.assertEqual(solved["stats"]["exactPruningRoundCount"], 1)
         self.assertEqual(solved["stats"]["finalExactFailureCount"], 0)
+
+    def test_association_integrity_detects_crossing_not_parallel_separation(self) -> None:
+        horizontal = np.asarray(
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]
+        )
+        crossing = np.asarray(
+            [[0.5, -1.0, -1.0], [0.5, 2.0, -1.0], [0.5, 0.0, 1.0]]
+        )
+        point, coplanar = _triangle_intersection(horizontal, crossing, 0.05)
+        self.assertIsNotNone(point)
+        self.assertFalse(coplanar)
+
+        separated = horizontal + np.asarray([0.0, 0.0, 1.0])
+        point, _ = _triangle_intersection(horizontal, separated, 0.05)
+        self.assertIsNone(point)
+
+        overlapping = horizontal + np.asarray([0.25, 0.25, 0.0])
+        point, coplanar = _triangle_intersection(horizontal, overlapping, 0.05)
+        self.assertIsNotNone(point)
+        self.assertTrue(coplanar)
+
+        disjoint = horizontal + np.asarray([4.0, 0.0, 0.0])
+        point, _ = _triangle_intersection(horizontal, disjoint, 0.05)
+        self.assertIsNone(point)
+
+    def test_association_integrity_exposes_shared_cell_order_inversion(self) -> None:
+        first = {
+            "cellDepth": {
+                (0, 0, 0): [0.0],
+                (1, 0, 0): [2.0],
+            }
+        }
+        second = {
+            "cellDepth": {
+                (0, 0, 0): [1.0],
+                (1, 0, 0): [1.0],
+            }
+        }
+        order = _shared_cell_order(first, second, 0.5)
+        self.assertEqual(order["sharedCellCount"], 2)
+        self.assertEqual(order["negativeOrderCount"], 1)
+        self.assertEqual(order["positiveOrderCount"], 1)
+        self.assertTrue(order["orderInversion"])
 
     def test_secondary_normal_family_is_standalone_partitioned_and_spatial(self) -> None:
         rng = np.random.default_rng(7)

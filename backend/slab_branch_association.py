@@ -16,7 +16,7 @@ from .slab_material_intervals import (
     MATERIAL_INTERVAL_VERSION,
 )
 from .slab_monotone_layers import MONOTONE_LAYER_VERSION
-from .slab_sheetlet_carriers import _mls_carrier
+from .slab_sheetlet_carriers import build_mls_carrier
 from .slab_sheetlet_explore import score_flake_pair_groups
 
 
@@ -770,7 +770,7 @@ def _exact_carrier_stats(
     member_flakes: list[dict[str, Any]],
     settings: dict[str, Any],
 ) -> dict[str, float]:
-    carrier = _mls_carrier(
+    carrier = build_mls_carrier(
         member_flakes,
         pixel_step=float(settings["exactCarrierPixelStepVoxels"]),
         maximum_pixels=int(settings["exactCarrierMaximumPixelsPerAxis"]),

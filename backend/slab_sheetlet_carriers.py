@@ -226,6 +226,23 @@ def _mls_carrier(
     }
 
 
+def build_mls_carrier(
+    flakes: list[dict[str, Any]],
+    pixel_step: float = 2.0,
+    bandwidth: float = 48.0,
+    support_radius: float = 48.0,
+    maximum_pixels: int = 512,
+) -> dict[str, Any]:
+    """Build the active moving-tangent-plane carrier for supplied flakes."""
+    return _mls_carrier(
+        flakes,
+        pixel_step=pixel_step,
+        bandwidth=bandwidth,
+        support_radius=support_radius,
+        maximum_pixels=maximum_pixels,
+    )
+
+
 def _contrast(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     values = np.asarray(image, dtype=np.float32)
     valid = values[mask]
