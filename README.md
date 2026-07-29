@@ -281,6 +281,18 @@ silently using synthetic padding.
   planes, and 235 span all 14. Every repeated edge-score observation is exactly
   equal. These remain sparse local surface branches, not pages or sheets.
   Detailed contracts and findings are in `docs/design-revision.md`.
+- `python3 scripts/associate-global-branches.py --root
+  work/cross-scroll-analysis-z512` applies only the 125 integrity-clean joins
+  accepted in both observing windows. Every join is reconstructed from its two
+  complete global branches before construction; all 125 pass the established
+  3-voxel / 6-degree median MLS gates. Descending-score collision solving forms
+  118 associations—111 branch pairs and seven three-branch groups—covering
+  2,151 flakes. All transitive groups pass exact reconstruction with no pruning,
+  and a final 118-carrier mesh audit finds zero intersections after 16,811
+  broad-phase and 1,474 narrow-phase triangle checks. The six-second result
+  reduces 63,783 linked branches to 63,658 linked branch groups while leaving
+  every input observation, score, residual, and decision traceable in
+  `global-branch-association-v1`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

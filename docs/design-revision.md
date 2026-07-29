@@ -154,10 +154,29 @@ consistency rejects 5,417 more. The final 783,846-edge graph has:
 - 531 branches spanning at least 11 of 14 axial planes; and
 - 235 branches spanning all 14 planes.
 
-This is the first region-wide sparse construction result. Components remain
-surface branches rather than sheets; the next association stage may consume
-only overlap-validated, integrity-clean gap joins and must repeat collision and
-exact-geometry checks after any transitive merge.
+The first global association pass consumes only the 125 endpoint joins that are
+both integrity-clean and accepted by every one of at least two observing
+windows. The minimum of the two local scores controls deterministic ordering,
+and both observations remain stored; all 125 score pairs agree exactly.
+Reconstructing each candidate from its two complete global branches leaves all
+125 below the established 3-voxel / 6-degree median carrier gates. The full
+solve retains every join with no cell collision, forming 118 associations over
+243 original branches and 2,151 flakes: 111 have two branches and seven have
+three.
+
+Every transitive association also passes exact reconstruction without pruning.
+The final carrier medians are 1.24 voxels in height and 3.82 degrees in normal;
+the maxima are 2.90 voxels and 5.99 degrees. Triangulating all 118 carriers
+produces 40 overlapping bounding-box pairs, 16,811 broad-phase triangle pairs,
+and 1,474 narrow-phase checks with zero support-skirt or evidence-core
+intersections. Five associations span at least 11 axial planes and three span
+all 14. This reduces the 63,783 linked global branches to 63,658 branch groups.
+
+This is a deliberately narrow region-wide construction result, not a sheet
+census: only 125 joins satisfy the current two-window requirement, and
+unassociated global branches are outside the carrier-intersection audit. The
+output identities remain sparse exact-coherent surface hypotheses rather than
+pages or physical papyrus layers.
 
 ## Reproducible commands
 
@@ -193,6 +212,9 @@ exact-geometry checks after any transitive merge.
   --root work/cross-scroll-analysis-z512 --maximum-workers 4
 
 .venv/bin/python scripts/build-global-monotone-graph.py \
+  --root work/cross-scroll-analysis-z512
+
+.venv/bin/python scripts/associate-global-branches.py \
   --root work/cross-scroll-analysis-z512
 ```
 

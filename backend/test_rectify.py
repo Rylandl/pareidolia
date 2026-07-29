@@ -97,6 +97,13 @@ from backend.slab_window_scheduler import (
     _neighbor_pairs,
     _window_components,
 )
+from backend.slab_global_branch_association import (
+    GRAPH_CELL_COLLISION,
+    GRAPH_REDUNDANT,
+    GRAPH_RETAINED,
+    _aggregate_observations,
+    _solve_candidate_graph,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
     NEEDLE_DTYPE,
@@ -107,6 +114,67 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_global_branch_join_aggregation_uses_conservative_score(self) -> None:
+        aggregate = _aggregate_observations(
+            {
+                "candidateIndex": np.asarray([0, 0, 1], dtype=np.uint32),
+                "score": np.asarray([0.7, 0.5, 0.8], dtype=np.float32),
+                "medianHeightResidualVoxels": np.asarray(
+                    [1.0, 2.0, 0.5], dtype=np.float32
+                ),
+                "medianNormalResidualDeg": np.asarray(
+                    [3.0, 5.0, 2.0], dtype=np.float32
+                ),
+            },
+            2,
+        )
+        np.testing.assert_array_equal(aggregate["count"], [2, 1])
+        np.testing.assert_allclose(aggregate["minimumScore"], [0.5, 0.8])
+        np.testing.assert_allclose(aggregate["meanScore"], [0.6, 0.8])
+        np.testing.assert_allclose(
+            aggregate["maximumLocalMedianHeightResidualVoxels"], [2.0, 0.5]
+        )
+        np.testing.assert_allclose(
+            aggregate["maximumLocalMedianNormalResidualDeg"], [5.0, 2.0]
+        )
+
+    def test_global_branch_join_solver_rejects_transitive_cell_collision(
+        self,
+    ) -> None:
+        result = _solve_candidate_graph(
+            3,
+            np.asarray([0, 1, 0]),
+            np.asarray([1, 2, 2]),
+            np.asarray([0.9, 0.8, 0.7]),
+            np.ones(3, dtype=bool),
+            {0: {10}, 1: {11}, 2: {10}},
+        )
+        np.testing.assert_array_equal(
+            result["decisions"],
+            [GRAPH_RETAINED, GRAPH_CELL_COLLISION, GRAPH_CELL_COLLISION],
+        )
+        self.assertEqual(
+            result["branchAssociation"][0], result["branchAssociation"][1]
+        )
+        self.assertNotEqual(
+            result["branchAssociation"][0], result["branchAssociation"][2]
+        )
+
+    def test_global_branch_join_solver_marks_redundant_cycle_support(self) -> None:
+        result = _solve_candidate_graph(
+            3,
+            np.asarray([0, 1, 0]),
+            np.asarray([1, 2, 2]),
+            np.asarray([0.9, 0.8, 0.7]),
+            np.ones(3, dtype=bool),
+            {0: {10}, 1: {11}, 2: {12}},
+        )
+        np.testing.assert_array_equal(
+            result["decisions"],
+            [GRAPH_RETAINED, GRAPH_RETAINED, GRAPH_REDUNDANT],
+        )
+        self.assertEqual(len(np.unique(result["branchAssociation"])), 1)
+
     def test_window_scheduler_end_aligns_axis_coverage(self) -> None:
         origins = _axis_origins(242, 32, 24)
         self.assertEqual(origins, [0, 24, 48, 72, 96, 120, 144, 168, 192, 210])
