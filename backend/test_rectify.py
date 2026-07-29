@@ -107,6 +107,7 @@ from backend.slab_global_branch_association import (
     DECISION_INPUT_BRANCH_CARRIER_DEFERRED,
     PROVENANCE_DIRECTIONAL_BOUNDARY,
     PROVENANCE_CONTEXT_DISPUTED,
+    PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY,
     PROVENANCE_OVERLAP_VALIDATED,
     PROVENANCE_SINGLE_WINDOW,
     _aggregate_observations,
@@ -123,9 +124,14 @@ from backend.slab_global_branch_candidates import (
     _candidate_evidence_source,
 )
 from backend.slab_global_boundary_candidates import (
+    LOCAL_ORDER_BLOCKED,
+    LOCAL_ORDER_CYCLIC,
+    LOCAL_ORDER_FEASIBLE,
+    LOCAL_ORDER_SAME_BRANCH,
     _boundary_geometry_arrays,
     _boundary_outward,
     _expanded_cell_pairs,
+    _local_order_reconciliation,
     _score_boundary_pair_arrays,
     _stream_boundary_hits,
 )
@@ -199,6 +205,58 @@ class RectifierTests(unittest.TestCase):
             ),
         )
         self.assertEqual(weakest, 0)
+
+    def test_locally_order_resolved_boundaries_are_the_weakest_tier(self) -> None:
+        provenance = np.asarray(
+            [
+                PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY,
+                PROVENANCE_DIRECTIONAL_BOUNDARY,
+                PROVENANCE_SINGLE_WINDOW,
+            ]
+        )
+        order = _candidate_order(
+            np.asarray([0.99, 0.90, 0.50]),
+            np.asarray([0, 0, 0]),
+            np.asarray([1, 2, 3]),
+            provenance,
+        )
+        np.testing.assert_array_equal(order, [2, 1, 0])
+        weakest = _weakest_retained_candidate(
+            np.asarray([0, 1, 2]),
+            np.asarray([0.99, 0.90, 0.50]),
+            np.asarray([[10, 11], [12, 13], [14, 15]], dtype=np.uint64),
+            provenance,
+        )
+        self.assertEqual(weakest, 0)
+
+    def test_local_order_recovery_requires_unanimous_overlap(self) -> None:
+        reconciliation = _local_order_reconciliation(
+            5,
+            np.asarray([0, 0, 1, 1, 2, 3, 3, 4, 4], dtype=np.uint32),
+            np.asarray(
+                [
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_BLOCKED,
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_SAME_BRANCH,
+                    LOCAL_ORDER_FEASIBLE,
+                    LOCAL_ORDER_CYCLIC,
+                ],
+                dtype=np.uint8,
+            ),
+            2,
+        )
+        np.testing.assert_array_equal(
+            reconciliation["resolved"], [True, False, False, True, False]
+        )
+        np.testing.assert_array_equal(
+            reconciliation["observationCount"], [2, 2, 1, 2, 2]
+        )
+        self.assertEqual(int(reconciliation["blockedCount"][1]), 1)
+        self.assertEqual(int(reconciliation["cyclicCount"][4]), 1)
 
     def test_streamed_boundary_search_scores_each_spatial_pair_once(self) -> None:
         flakes = [

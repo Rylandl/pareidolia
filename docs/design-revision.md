@@ -62,10 +62,13 @@ a graph component a physical papyrus sheet.
      than relabeled as independent validation.
    - The whole-volume association solve keeps overlap-validated, unanimous
      single-window, context-disputed, subwindow-unresolved, locally exact-
-     deferred, and directional-boundary evidence in separate tiers. The first
-     five originate in local windows. Directional-boundary discovery is a
-     lowest-priority construction heuristic for exposed degree-one through
-     degree-six graph nodes and cannot displace any local-evidence join.
+     deferred, directional-boundary, and locally order-resolved boundary
+     evidence in separate tiers. The first five originate in local windows.
+     Directional-boundary discovery is a low-priority construction heuristic
+     for exposed degree-one through degree-six graph nodes and cannot displace
+     any local-evidence join. A whole-volume cyclic-order deferral enters one
+     still-lower tier only when at least two tiled windows observe both
+     endpoints and every observation is locally acyclic and unblocked.
      Every novel pair must still pass complete-global-branch reconstruction,
      collision safety, transitive reconstruction, and mesh integrity. Local
      integrity quarantine remains a hard exclusion.
@@ -250,8 +253,9 @@ nodes, 426,766 are directionally exposed. A streamed vectorized search evaluates
 geometry model leaves 249,135 hits over 97,773 branch pairs. After removing every
 branch pair ever proposed locally, 68,899 scored pairs remain. Score, material,
 global order, and collision gates select only 276. Candidate discovery takes
-30.0 seconds and stores every decision and geometric diagnostic in
-`global-boundary-candidates-v3`.
+30.0 seconds. The bounded local-order audit below brings total construction time
+to 37.7 seconds and stores every decision, observation, and geometric diagnostic
+in `global-boundary-candidates-v4`.
 
 All local-evidence joins are constructed before this new tier, and exact or
 integrity pruning always sacrifices a directional-only edge before any local
@@ -279,6 +283,39 @@ flakes, eight at least 50, none at least 100, six spanning at least 11 planes,
 and three spanning all 14. The count at least ten decreases by one because two
 already-qualifying fragments merge. This is measurable gap closure without a
 giant transitive collapse.
+
+The whole-volume order graph is not a useful hard veto everywhere: one cyclic
+strongly connected component contains 54,622 branches, and 5,425 otherwise
+scored novel boundaries are deferred as order-ambiguous. Every one is observed
+in at least one tiled window; 2,707 are observed in two or four. Rebuilding the
+order condensation independently inside each observing window gives 9,064
+bounded observations: 1,701 feasible, 70 already on one local branch, 1,190
+locally ordered apart, and 6,103 still cyclic. Recovery requires at least two
+observations and unanimity among all observing windows. It therefore admits 307
+candidates, while 441 clean single-window cases and every blocked or cyclic
+case remain deferred.
+
+These 307 candidates are constructed after the v5 evidence and are the first
+edges removed by either exact or integrity pruning. Complete-branch gates defer
+122 because an input branch is not a coherent carrier and 15 more at pair
+geometry; five collide, one fails transitive exact reconstruction, and 11 are
+removed by cross-carrier integrity. The remaining 153 joins form 150 affected
+associations, including three with two recovered joins. All 1,431 pre-existing
+candidate decisions and exact diagnostics are identical after stable endpoint
+alignment, and the v5 partition is never split. The v6 result has 864 retained
+joins in 812 associations over 1,676 branches and 17,812 flakes. Final median
+carrier residuals are 1.24 voxels and 3.92 degrees, with maxima of 2.98 voxels
+and 6.00 degrees and zero intersections after 372,118 broad-phase and 9,439
+narrow-phase triangle checks.
+
+Of the 150 affected associations, 82 gain axial span and 18 add at least ten
+flakes beyond their largest v5 input. At full-catalog scale v6 reduces the
+component count from 130,500 to 130,347, adds eight fragments with at least 25
+flakes, five with at least 50, one with at least 100, two spanning at least 11
+planes, and one spanning all 14; the 586-flake maximum is unchanged. One hundred
+fifty-two of the 153 retained joins have both endpoints in contested material,
+so the result remains geometry-conditioned gap closure rather than independent
+evidence for a physical sheet.
 
 This remains a deliberately narrow region-wide construction result, not a sheet
 census. Unassociated global branches are outside the carrier-intersection audit,

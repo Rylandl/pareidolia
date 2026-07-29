@@ -318,23 +318,42 @@ silently using synthetic padding.
   estimates the open direction opposite the resultant of retained tangent
   neighbors, then requires that no retained neighbor already occupies that
   cone. A streamed vectorized search evaluates 106,943,713 nearby node pairs in
-  30.0 seconds without materializing them, leaving 276 novel branch
-  pairs after the existing score, material, order, and collision rules. This
-  tier is a construction heuristic, not independent evidence; 102 of its 124
-  ultimately retained joins have both endpoints in contested material.
-- The default `associate-global-branches.py` solve adds directional boundaries
-  only after all local-evidence joins and always prunes a directional-only edge
-  before a local edge. It therefore preserves all 60 common v4 artifact arrays
-  exactly. Complete-branch reconstruction retains 124 of 276 new candidates:
+  30.0 seconds without materializing them, leaving 276 novel branch pairs after
+  the existing score, material, whole-volume order, and collision rules. It also
+  audits the 5,425 otherwise scored pairs trapped in the giant cyclic order
+  component inside every tiled window that observes both endpoints. Requiring
+  at least two observations and unanimous acyclic, unblocked local order admits
+  307 more candidates; 441 clean single-window cases remain deferred. The full
+  v4 boundary artifact takes 37.7 seconds and retains every local observation.
+- The globally order-clean directional subset is added only after all local-
+  evidence joins and a directional-only edge is always pruned before a local
+  edge. It therefore preserves all 60 common v4 artifact arrays exactly.
+  Complete-branch reconstruction retains 124 of 276 candidates:
   139 have an incoherent input carrier, six fail pair geometry, one collides,
   one fails transitive reconstruction, and five are removed by mesh integrity.
-  The final 711 joins form 672 associations over 1,383 branches and 14,509
-  flakes with 1.24-voxel / 3.90-degree median fits and zero intersections.
+  The resulting v5 scope has 711 joins in 672 associations over 1,383 branches
+  and 14,509 flakes with 1.24-voxel / 3.90-degree median fits and zero
+  intersections.
   Relative to v4, 120 directional-boundary associations extend axial span in
   74 cases; the whole catalog gains 12 fragments with at least 25 flakes, eight
   with at least 50, six spanning at least 11 planes, and three spanning all 14.
   The largest fragment remains 586 flakes and the count at least 100 is
   unchanged, so this is useful gap closure rather than a giant collapse.
+- The default v6 solve constructs the 307 overlap-resolved local-order
+  candidates after even the globally order-clean directional tier and prunes
+  them first. Complete-branch reconstruction retains 153: 122 have an
+  incoherent input carrier, 15 fail pair geometry, five collide, one fails
+  transitive reconstruction, and 11 are removed by mesh integrity. All 1,431
+  earlier candidate decisions and exact diagnostics remain identical after
+  stable endpoint alignment. The final 864 joins form 812 associations over
+  1,676 branches and 17,812 flakes with 1.24-voxel / 3.92-degree median fits and
+  zero intersections. The 150 affected associations extend axial span in 82
+  cases. Relative to v5, the full catalog gains eight fragments with at least
+  25 flakes, five with at least 50, one with at least 100, two spanning at least
+  11 planes, and one spanning all 14; the 586-flake maximum is unchanged.
+  Because 152 of the 153 retained joins have both endpoints in contested
+  material, this remains geometry-conditioned gap closure rather than
+  independent physical-sheet evidence.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

@@ -10,6 +10,7 @@ import numpy as np
 
 from .slab_branch_association import (
     BRANCH_ASSOCIATION_VERSION,
+    DECISION_ORDER_AMBIGUOUS,
     DECISION_REDUNDANT,
     DECISION_RETAINED,
     DEFAULT_SETTINGS as BRANCH_SETTINGS,
@@ -27,7 +28,25 @@ from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BOUNDARY_CANDIDATE_VERSION = 3
+GLOBAL_BOUNDARY_CANDIDATE_VERSION = 4
+
+LOCAL_ORDER_FEASIBLE = 1
+LOCAL_ORDER_SAME_BRANCH = 2
+LOCAL_ORDER_BLOCKED = 3
+LOCAL_ORDER_CYCLIC = 4
+LOCAL_ORDER_NAMES = {
+    LOCAL_ORDER_FEASIBLE: "feasible",
+    LOCAL_ORDER_SAME_BRANCH: "same-branch",
+    LOCAL_ORDER_BLOCKED: "blocked",
+    LOCAL_ORDER_CYCLIC: "cyclic",
+}
+
+SELECTION_GLOBAL_ORDER = 1
+SELECTION_LOCAL_ORDER = 2
+SELECTION_NAMES = {
+    SELECTION_GLOBAL_ORDER: "global-order",
+    SELECTION_LOCAL_ORDER: "local-order",
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "minimumBranchSize": BRANCH_SETTINGS["minimumBranchSize"],
@@ -42,6 +61,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "edgePaddingVoxels": BRANCH_SETTINGS["edgePaddingVoxels"],
     "minimumHitScore": BRANCH_SETTINGS["minimumHitScore"],
     "selectedThreshold": BRANCH_SETTINGS["selectedThreshold"],
+    "minimumLocalOrderObservations": 2,
 }
 
 
@@ -638,6 +658,197 @@ def _pair_membership(values: np.ndarray, catalog: np.ndarray) -> np.ndarray:
     return matched
 
 
+def _local_order_reconciliation(
+    candidate_count: int,
+    observation_candidate_index: np.ndarray,
+    observation_decision: np.ndarray,
+    minimum_observations: int,
+) -> dict[str, np.ndarray]:
+    candidate_index = np.asarray(observation_candidate_index, dtype=np.int64)
+    decision = np.asarray(observation_decision, dtype=np.uint8)
+    if len(candidate_index) != len(decision):
+        raise ValueError("local order observation arrays must have equal length")
+    if np.any(candidate_index < 0) or np.any(candidate_index >= candidate_count):
+        raise ValueError("a local order observation references an invalid candidate")
+    if np.any(~np.isin(decision, list(LOCAL_ORDER_NAMES))):
+        raise ValueError("a local order observation has an unknown decision")
+    if minimum_observations < 1:
+        raise ValueError("minimumLocalOrderObservations must be positive")
+
+    count = np.bincount(candidate_index, minlength=candidate_count).astype(np.uint8)
+    decision_count = {
+        value: np.bincount(
+            candidate_index[decision == value], minlength=candidate_count
+        ).astype(np.uint8)
+        for value in LOCAL_ORDER_NAMES
+    }
+    clean_count = (
+        decision_count[LOCAL_ORDER_FEASIBLE]
+        + decision_count[LOCAL_ORDER_SAME_BRANCH]
+    )
+    resolved = (count >= minimum_observations) & (clean_count == count)
+    return {
+        "observationCount": count,
+        "feasibleCount": decision_count[LOCAL_ORDER_FEASIBLE],
+        "sameBranchCount": decision_count[LOCAL_ORDER_SAME_BRANCH],
+        "blockedCount": decision_count[LOCAL_ORDER_BLOCKED],
+        "cyclicCount": decision_count[LOCAL_ORDER_CYCLIC],
+        "resolved": resolved,
+    }
+
+
+def _local_order_observations(
+    root: Path,
+    windows: list[dict[str, Any]],
+    candidate_endpoint_identity: np.ndarray,
+    candidate_mask: np.ndarray,
+    minimum_observations: int,
+    progress: Callable[[str, int, int, dict[str, Any]], None] | None,
+) -> dict[str, np.ndarray]:
+    endpoint_identity = np.asarray(candidate_endpoint_identity, dtype=np.uint64)
+    candidate_mask = np.asarray(candidate_mask, dtype=bool)
+    if endpoint_identity.shape != (len(candidate_mask), 2):
+        raise ValueError("candidate endpoint identities must be an Nx2 array")
+    selected_candidate = np.flatnonzero(candidate_mask)
+    selected_endpoint = endpoint_identity[selected_candidate]
+    observation_candidate = []
+    observation_window = []
+    observation_decision = []
+
+    for window_index, window in enumerate(windows):
+        suffix = window_artifact_suffix(window["originCellXYZ"])
+        monotone_path = root / (
+            f"monotone-layer-window-v{MONOTONE_LAYER_VERSION}{suffix}.npz"
+        )
+        with np.load(monotone_path) as payload:
+            arrays = {key: np.asarray(payload[key]) for key in payload.files}
+        local_identity = (
+            arrays["sourceZIndex"].astype(np.uint64) << np.uint64(32)
+        ) | arrays["sourceFlakeId"].astype(np.uint64)
+        identity_order = np.argsort(local_identity)
+        ordered_identity = local_identity[identity_order]
+        position = np.searchsorted(ordered_identity, selected_endpoint)
+        inside = position < len(ordered_identity)
+        matched = np.zeros(selected_endpoint.shape, dtype=bool)
+        matched[inside] = (
+            ordered_identity[position[inside]] == selected_endpoint[inside]
+        )
+        observed_offset = np.flatnonzero(np.all(matched, axis=1))
+        if not len(observed_offset):
+            if progress is not None:
+                progress(
+                    "local-order",
+                    window_index + 1,
+                    len(windows),
+                    {"observedCandidateCount": 0},
+                )
+            continue
+
+        local_node = identity_order[position[observed_offset]]
+        branch = arrays["component"].astype(np.int32)
+        endpoint_branch = branch[local_node]
+        order = _order_condensation(
+            arrays["cellIndex"].astype(np.int32),
+            arrays["rawDepth"],
+            branch,
+            arrays["branchParity"],
+        )
+        endpoint_scc = order["branchScc"][endpoint_branch]
+        endpoint_scc_size = order["sccSizes"][endpoint_scc]
+        parity_ambiguous = order["branchParityAmbiguous"][endpoint_branch]
+        dag = order["dag"]
+        descendants: dict[int, set[int]] = {}
+
+        def reachable(source: int, target: int) -> bool:
+            if source not in descendants:
+                seen: set[int] = set()
+                stack = list(dag[source])
+                while stack:
+                    current = int(stack.pop())
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    stack.extend(dag[current])
+                descendants[source] = seen
+            return target in descendants[source]
+
+        local_decision = np.empty(len(observed_offset), dtype=np.uint8)
+        for offset in range(len(observed_offset)):
+            source_branch, target_branch = (
+                int(value) for value in endpoint_branch[offset]
+            )
+            source_scc, target_scc = (
+                int(value) for value in endpoint_scc[offset]
+            )
+            source_size, target_size = (
+                int(value) for value in endpoint_scc_size[offset]
+            )
+            if (
+                bool(parity_ambiguous[offset, 0])
+                or bool(parity_ambiguous[offset, 1])
+                or source_size > 1
+                or target_size > 1
+            ):
+                value = LOCAL_ORDER_CYCLIC
+            elif source_branch == target_branch:
+                value = LOCAL_ORDER_SAME_BRANCH
+            elif reachable(source_scc, target_scc) or reachable(
+                target_scc, source_scc
+            ):
+                value = LOCAL_ORDER_BLOCKED
+            else:
+                value = LOCAL_ORDER_FEASIBLE
+            local_decision[offset] = value
+
+        observation_candidate.append(selected_candidate[observed_offset])
+        observation_window.append(
+            np.full(len(observed_offset), window_index, dtype=np.uint8)
+        )
+        observation_decision.append(local_decision)
+        if progress is not None:
+            progress(
+                "local-order",
+                window_index + 1,
+                len(windows),
+                {
+                    "observedCandidateCount": len(observed_offset),
+                    "decisionCounts": {
+                        name: int(np.count_nonzero(local_decision == value))
+                        for value, name in LOCAL_ORDER_NAMES.items()
+                    },
+                },
+            )
+
+    candidate_index = (
+        np.concatenate(observation_candidate).astype(np.uint32)
+        if observation_candidate
+        else np.empty(0, dtype=np.uint32)
+    )
+    window_index = (
+        np.concatenate(observation_window).astype(np.uint8)
+        if observation_window
+        else np.empty(0, dtype=np.uint8)
+    )
+    decision = (
+        np.concatenate(observation_decision).astype(np.uint8)
+        if observation_decision
+        else np.empty(0, dtype=np.uint8)
+    )
+    reconciliation = _local_order_reconciliation(
+        len(candidate_mask), candidate_index, decision, minimum_observations
+    )
+    if np.any(candidate_mask & (reconciliation["observationCount"] == 0)):
+        raise ValueError("a globally ambiguous boundary has no local order observation")
+    reconciliation.update(
+        {
+            "candidateIndex": candidate_index,
+            "windowIndex": window_index,
+            "decision": decision,
+        }
+    )
+    return reconciliation
+
+
 def build_global_boundary_candidates(
     output_root: str | Path,
     force: bool = False,
@@ -817,10 +1028,9 @@ def build_global_boundary_candidates(
     )
     decision = np.zeros(len(candidates), dtype=np.uint8)
     decision[novel_original_index] = solve["decisions"]
-    selected = (~previously_proposed) & (
+    global_order_selected = (~previously_proposed) & (
         (decision == DECISION_RETAINED) | (decision == DECISION_REDUNDANT)
     )
-    selected_index = np.flatnonzero(selected)
     candidate_endpoint_node = np.stack(
         (
             boundary_node[candidates["nodeSource"].astype(np.int64)],
@@ -831,6 +1041,32 @@ def build_global_boundary_candidates(
     candidate_endpoint_identity = node_identity[candidate_endpoint_node]
     if np.any(component[candidate_endpoint_node] != candidate_branch_pair):
         raise ValueError("a scored endpoint no longer matches its global branch")
+    local_order = _local_order_observations(
+        root,
+        schedule["windows"],
+        candidate_endpoint_identity,
+        (~previously_proposed) & (decision == DECISION_ORDER_AMBIGUOUS),
+        int(resolved["minimumLocalOrderObservations"]),
+        progress,
+    )
+    locally_order_resolved = (
+        (~previously_proposed)
+        & (decision == DECISION_ORDER_AMBIGUOUS)
+        & local_order["resolved"]
+    )
+    if np.any(
+        locally_order_resolved
+        & (
+            (local_order["blockedCount"] > 0)
+            | (local_order["cyclicCount"] > 0)
+        )
+    ):
+        raise RuntimeError("a locally resolved candidate has contradictory order evidence")
+    selected = global_order_selected | locally_order_resolved
+    selection_reason = np.zeros(len(candidates), dtype=np.uint8)
+    selection_reason[global_order_selected] = SELECTION_GLOBAL_ORDER
+    selection_reason[locally_order_resolved] = SELECTION_LOCAL_ORDER
+    selected_index = np.flatnonzero(selected)
 
     artifact_arrays = {
         "candidateEndpointIdentity": candidate_endpoint_identity,
@@ -897,8 +1133,18 @@ def build_global_boundary_candidates(
         ).astype(np.float32),
         "candidatePreviouslyProposedLocally": previously_proposed,
         "candidateOrderDecision": decision,
+        "candidateLocalOrderObservationCount": local_order["observationCount"],
+        "candidateLocalOrderFeasibleCount": local_order["feasibleCount"],
+        "candidateLocalOrderSameBranchCount": local_order["sameBranchCount"],
+        "candidateLocalOrderBlockedCount": local_order["blockedCount"],
+        "candidateLocalOrderCyclicCount": local_order["cyclicCount"],
+        "candidateLocallyOrderResolved": locally_order_resolved,
+        "candidateSelectionReason": selection_reason,
         "candidateSelected": selected,
         "selectedCandidateIndex": selected_index.astype(np.uint32),
+        "localOrderObservationCandidateIndex": local_order["candidateIndex"],
+        "localOrderObservationWindowIndex": local_order["windowIndex"],
+        "localOrderObservationDecision": local_order["decision"],
     }
     _atomic_npz(artifact_path, **artifact_arrays)
     artifact_identity = _content_identity(artifact_path)
@@ -909,6 +1155,9 @@ def build_global_boundary_candidates(
         top.append(
             {
                 "candidateIndex": int(index),
+                "selectionReason": SELECTION_NAMES[
+                    int(selection_reason[int(index)])
+                ],
                 "branchSource": int(value["branchSource"]),
                 "branchTarget": int(value["branchTarget"]),
                 "endpointIdentity": candidate_endpoint_identity[int(index)]
@@ -922,6 +1171,9 @@ def build_global_boundary_candidates(
                 ),
                 "fiberAngleDeg": round(float(value["fiberAngleDeg"]), 4),
                 "normalBendDeg": round(float(value["normalBendDeg"]), 4),
+                "localOrderObservationCount": int(
+                    local_order["observationCount"][int(index)]
+                ),
             }
         )
     summary = {
@@ -939,6 +1191,13 @@ def build_global_boundary_candidates(
             "candidate": (
                 "spatially close mutually facing boundary nodes scored by the existing "
                 "edge, fiber, bend, reach, material, order, and cell-collision rules"
+            ),
+            "localOrderRecovery": (
+                "a whole-volume cyclic-order deferral is recovered only when at least "
+                "minimumLocalOrderObservations tiled windows observe both endpoints "
+                "and every observation is acyclic and either order-independent or "
+                "already on one local branch; any blocked or cyclic observation and "
+                "every single-window observation remain deferred"
             ),
             "novelty": (
                 "a global branch pair is excluded if any local window proposed any "
@@ -987,6 +1246,12 @@ def build_global_boundary_candidates(
                 np.count_nonzero(~previously_proposed)
             ),
             "selectedNovelBranchPairCount": len(selected_index),
+            "globallySelectedNovelBranchPairCount": int(
+                np.count_nonzero(global_order_selected)
+            ),
+            "locallyOrderResolvedNovelBranchPairCount": int(
+                np.count_nonzero(locally_order_resolved)
+            ),
             "selectedScore": _quantiles(selected_values["score"]),
             "selectedSupport": _quantiles(selected_values["support"]),
             "selectedDistanceVoxels": _quantiles(
@@ -1003,6 +1268,43 @@ def build_global_boundary_candidates(
             ),
             "order": order["stats"],
             "novelSolve": solve["stats"],
+            "localOrder": {
+                "candidateCount": int(
+                    np.count_nonzero(
+                        (~previously_proposed)
+                        & (decision == DECISION_ORDER_AMBIGUOUS)
+                    )
+                ),
+                "observationCount": len(local_order["decision"]),
+                "candidateObservationCount": _quantiles(
+                    local_order["observationCount"][
+                        (~previously_proposed)
+                        & (decision == DECISION_ORDER_AMBIGUOUS)
+                    ]
+                ),
+                "observationDecisionCounts": {
+                    name: int(
+                        np.count_nonzero(local_order["decision"] == value)
+                    )
+                    for value, name in LOCAL_ORDER_NAMES.items()
+                },
+                "minimumObservationCount": int(
+                    resolved["minimumLocalOrderObservations"]
+                ),
+                "unanimouslyCleanCandidateCount": int(
+                    np.count_nonzero(locally_order_resolved)
+                ),
+                "singleObservationCleanCandidateCount": int(
+                    np.count_nonzero(
+                        (local_order["observationCount"] == 1)
+                        & (
+                            local_order["feasibleCount"]
+                            + local_order["sameBranchCount"]
+                            == 1
+                        )
+                    )
+                ),
+            },
         },
         "topSelectedCandidates": top,
     }

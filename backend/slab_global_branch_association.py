@@ -38,7 +38,7 @@ from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BRANCH_ASSOCIATION_VERSION = 5
+GLOBAL_BRANCH_ASSOCIATION_VERSION = 6
 
 PROVENANCE_DIRECTIONAL_BOUNDARY = 0
 PROVENANCE_LOCAL_EXACT_DEFERRED = SOURCE_LOCAL_EXACT_DEFERRED
@@ -46,6 +46,7 @@ PROVENANCE_SUBWINDOW_UNRESOLVED = SOURCE_SUBWINDOW_UNRESOLVED
 PROVENANCE_CONTEXT_DISPUTED = 3
 PROVENANCE_SINGLE_WINDOW = 4
 PROVENANCE_OVERLAP_VALIDATED = 5
+PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY = 6
 PROVENANCE_NAMES = {
     PROVENANCE_DIRECTIONAL_BOUNDARY: "directional-boundary",
     PROVENANCE_LOCAL_EXACT_DEFERRED: "local-exact-deferred",
@@ -53,6 +54,9 @@ PROVENANCE_NAMES = {
     PROVENANCE_CONTEXT_DISPUTED: "context-disputed",
     PROVENANCE_SINGLE_WINDOW: "single-window",
     PROVENANCE_OVERLAP_VALIDATED: "overlap-validated",
+    PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY: (
+        "local-order-resolved-boundary"
+    ),
 }
 
 DECISION_INPUT_BRANCH_CARRIER_DEFERRED = 1
@@ -172,13 +176,18 @@ def _candidate_order(
         if provenance_priority is None
         else np.asarray(provenance_priority, dtype=np.int8)
     )
+    construction_tier = np.zeros(len(priority), dtype=np.uint8)
+    construction_tier[priority == PROVENANCE_DIRECTIONAL_BOUNDARY] = 1
+    construction_tier[
+        priority == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
+    ] = 2
     return np.lexsort(
         (
             np.asarray(target, dtype=np.int64),
             np.asarray(source, dtype=np.int64),
             -priority,
             -np.asarray(score, dtype=np.float64),
-            priority == PROVENANCE_DIRECTIONAL_BOUNDARY,
+            construction_tier,
         )
     )
 
@@ -706,14 +715,19 @@ def _weakest_retained_candidate(
     endpoint_pair: np.ndarray,
     provenance_priority: np.ndarray,
 ) -> int:
+    provenance_priority = np.asarray(provenance_priority, dtype=np.int8)
+    construction_tier = np.zeros(len(provenance_priority), dtype=np.uint8)
+    construction_tier[
+        provenance_priority == PROVENANCE_DIRECTIONAL_BOUNDARY
+    ] = 1
+    construction_tier[
+        provenance_priority == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
+    ] = 2
     return int(
         min(
             candidate_indices,
             key=lambda index: (
-                int(
-                    provenance_priority[index]
-                    != PROVENANCE_DIRECTIONAL_BOUNDARY
-                ),
+                -int(construction_tier[index]),
                 float(score[index]),
                 int(provenance_priority[index]),
                 int(endpoint_pair[index, 0]),
@@ -1059,6 +1073,9 @@ def associate_global_branches(
         ),
         axis=1,
     ).astype(np.uint32)
+    boundary_locally_order_resolved = boundary[
+        "candidateLocallyOrderResolved"
+    ][boundary_indices].astype(bool)
     if len(boundary_indices):
         if not np.all(
             node_identity[boundary_endpoint_node] == boundary_endpoint_pair
@@ -1077,13 +1094,13 @@ def associate_global_branches(
         provenance = np.concatenate(
             [
                 provenance,
-                np.full(
-                    len(boundary_indices),
+                np.where(
+                    boundary_locally_order_resolved,
+                    PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY,
                     PROVENANCE_DIRECTIONAL_BOUNDARY,
-                    dtype=np.uint8,
                 ),
             ]
-        )
+        ).astype(np.uint8)
         branch_pair = np.concatenate([branch_pair, boundary_branch_pair])
         observation_count = np.concatenate(
             [observation_count, np.ones(len(boundary_indices), dtype=np.uint8)]
@@ -1091,6 +1108,29 @@ def associate_global_branches(
         acceptance_count = np.concatenate(
             [acceptance_count, np.ones(len(boundary_indices), dtype=np.uint8)]
         )
+
+    local_order_observation_count = np.zeros(len(endpoint_pair), dtype=np.uint8)
+    local_order_feasible_count = np.zeros(len(endpoint_pair), dtype=np.uint8)
+    local_order_same_branch_count = np.zeros(len(endpoint_pair), dtype=np.uint8)
+    local_order_blocked_count = np.zeros(len(endpoint_pair), dtype=np.uint8)
+    local_order_cyclic_count = np.zeros(len(endpoint_pair), dtype=np.uint8)
+    if len(boundary_indices):
+        boundary_slice = slice(boundary_candidate_offset, len(endpoint_pair))
+        local_order_observation_count[boundary_slice] = boundary[
+            "candidateLocalOrderObservationCount"
+        ][boundary_indices]
+        local_order_feasible_count[boundary_slice] = boundary[
+            "candidateLocalOrderFeasibleCount"
+        ][boundary_indices]
+        local_order_same_branch_count[boundary_slice] = boundary[
+            "candidateLocalOrderSameBranchCount"
+        ][boundary_indices]
+        local_order_blocked_count[boundary_slice] = boundary[
+            "candidateLocalOrderBlockedCount"
+        ][boundary_indices]
+        local_order_cyclic_count[boundary_slice] = boundary[
+            "candidateLocalOrderCyclicCount"
+        ][boundary_indices]
 
     if not len(endpoint_pair):
         raise ValueError("all selected global join evidence is already linked")
@@ -1390,6 +1430,13 @@ def associate_global_branches(
         ],
         minlength=len(association_branch_count),
     ).astype(np.uint16)
+    association_local_order_resolved_boundary_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join]
+            == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
     exact_groups = [value["exact"] for value in final_geometries]
     for value in exact_groups:
         association_id = int(value["associationId"])
@@ -1409,12 +1456,20 @@ def associate_global_branches(
         directional_boundary_count = int(
             association_directional_boundary_join_count[association_id]
         )
+        local_order_resolved_boundary_count = int(
+            association_local_order_resolved_boundary_join_count[
+                association_id
+            ]
+        )
         value["overlapValidatedJoinCount"] = overlap_count
         value["singleWindowJoinCount"] = single_count
         value["contextDisputedJoinCount"] = context_count
         value["subwindowUnresolvedJoinCount"] = subwindow_count
         value["localExactDeferredJoinCount"] = local_exact_count
         value["directionalBoundaryJoinCount"] = directional_boundary_count
+        value["localOrderResolvedBoundaryJoinCount"] = (
+            local_order_resolved_boundary_count
+        )
         active_provenance = [
             name
             for name, count in (
@@ -1424,6 +1479,10 @@ def associate_global_branches(
                 ("subwindow-unresolved", subwindow_count),
                 ("local-exact-deferred", local_exact_count),
                 ("directional-boundary", directional_boundary_count),
+                (
+                    "local-order-resolved-boundary",
+                    local_order_resolved_boundary_count,
+                ),
             )
             if count
         ]
@@ -1451,6 +1510,11 @@ def associate_global_branches(
         candidateBranchTarget=branch_pair[:, 1],
         candidateObservationCount=observation_count,
         candidateAcceptanceCount=acceptance_count,
+        candidateLocalOrderObservationCount=local_order_observation_count,
+        candidateLocalOrderFeasibleCount=local_order_feasible_count,
+        candidateLocalOrderSameBranchCount=local_order_same_branch_count,
+        candidateLocalOrderBlockedCount=local_order_blocked_count,
+        candidateLocalOrderCyclicCount=local_order_cyclic_count,
         candidateMinimumScore=aggregate["minimumScore"],
         candidateMeanScore=aggregate["meanScore"],
         candidateMaximumScore=aggregate["maximumScore"],
@@ -1532,6 +1596,9 @@ def associate_global_branches(
         associationDirectionalBoundaryJoinCount=(
             association_directional_boundary_join_count
         ),
+        associationLocalOrderResolvedBoundaryJoinCount=(
+            association_local_order_resolved_boundary_join_count
+        ),
         integrityRoundIndex=np.asarray(
             [value[0] for value in violation_records], dtype=np.uint16
         ),
@@ -1609,6 +1676,23 @@ def associate_global_branches(
                 ),
                 "observationCount": int(observation_count[candidate_index]),
                 "acceptanceCount": int(acceptance_count[candidate_index]),
+                "localOrder": {
+                    "observationCount": int(
+                        local_order_observation_count[candidate_index]
+                    ),
+                    "feasibleCount": int(
+                        local_order_feasible_count[candidate_index]
+                    ),
+                    "sameBranchCount": int(
+                        local_order_same_branch_count[candidate_index]
+                    ),
+                    "blockedCount": int(
+                        local_order_blocked_count[candidate_index]
+                    ),
+                    "cyclicCount": int(
+                        local_order_cyclic_count[candidate_index]
+                    ),
+                },
                 "unacceptedObservationCount": int(
                     observation_count[candidate_index]
                     - acceptance_count[candidate_index]
@@ -1715,6 +1799,7 @@ def associate_global_branches(
         included_tiers.append("local-exact-deferred")
     if include_directional_boundary:
         included_tiers.append("directional-boundary")
+        included_tiers.append("local-order-resolved-boundary")
     input_rule = (
         "integrity-clean endpoint evidence enters in explicit provenance tiers: "
         + ", ".join(included_tiers)
@@ -1728,7 +1813,10 @@ def associate_global_branches(
         input_rule += (
             "; directional-boundary candidates were absent from every local candidate "
             "list and passed the whole-volume exposure, material, order, and collision "
-            "screen before complete-branch reconstruction"
+            "screen before complete-branch reconstruction; candidates deferred only "
+            "by the cyclic whole-volume order graph enter a still-lower tier only "
+            "when at least two observing local windows unanimously report acyclic, "
+            "unblocked order"
         )
     result = {
         "identity": identity,
@@ -1738,11 +1826,12 @@ def associate_global_branches(
                 "the minimum accepted local score controls deterministic global "
                 "construction; overlap-validated, then single-window, then "
                 "context-disputed, then subwindow-unresolved, then local-exact-deferred "
-                "then directional-boundary evidence wins exact score ties, and every "
+                "then directional-boundary, then local-order-resolved-boundary evidence "
+                "wins exact score ties, and every "
                 "supporting score, residual, and provenance label is retained; all "
                 "local-evidence joins are constructed before directional-boundary "
-                "joins, and a directional-only construction edge is pruned before "
-                "any local-evidence edge"
+                "joins, locally order-resolved boundaries are constructed last, and "
+                "the weakest boundary tier is pruned before any stronger edge"
             ),
             "pairGate": (
                 "each join reconstructed from its complete global branches must pass "
@@ -1786,7 +1875,14 @@ def associate_global_branches(
                 candidate_summary["stats"]["candidateBranchPairCount"]
             ),
             "inputDirectionalBoundaryCandidateCount": int(
-                boundary_summary["stats"]["selectedNovelBranchPairCount"]
+                boundary_summary["stats"][
+                    "globallySelectedNovelBranchPairCount"
+                ]
+            ),
+            "inputLocalOrderResolvedBoundaryCandidateCount": int(
+                boundary_summary["stats"][
+                    "locallyOrderResolvedNovelBranchPairCount"
+                ]
             ),
             "eligibleTierEvidenceJoinCount": int(np.count_nonzero(selected)),
             "excludedQuarantinedEvidenceCount": len(
@@ -1805,8 +1901,16 @@ def associate_global_branches(
                 accepted_tier_candidate_count
             ),
             "selectedRescueCandidateJoinCount": len(rescue_indices),
-            "selectedDirectionalBoundaryCandidateJoinCount": len(
-                boundary_indices
+            "selectedBoundaryCandidateJoinCount": len(boundary_indices),
+            "selectedDirectionalBoundaryCandidateJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_DIRECTIONAL_BOUNDARY
+                )
+            ),
+            "selectedLocalOrderResolvedBoundaryCandidateJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
+                )
             ),
             "selectedOverlapValidatedJoinCount": int(
                 np.count_nonzero(
@@ -1834,6 +1938,11 @@ def associate_global_branches(
             "selectedDirectionalBoundaryJoinCount": int(
                 np.count_nonzero(
                     provenance == PROVENANCE_DIRECTIONAL_BOUNDARY
+                )
+            ),
+            "selectedLocalOrderResolvedBoundaryJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
                 )
             ),
             "selectedTouchedGlobalBranchCount": len(touched),
@@ -1883,6 +1992,18 @@ def associate_global_branches(
                     aggregate["maximumScore"] - aggregate["minimumScore"]
                 )[provenance == PROVENANCE_DIRECTIONAL_BOUNDARY],
                 7,
+            ),
+            "localOrderResolvedBoundaryCandidateScoreObservationRange": (
+                _quantiles(
+                    (
+                        aggregate["maximumScore"]
+                        - aggregate["minimumScore"]
+                    )[
+                        provenance
+                        == PROVENANCE_LOCAL_ORDER_RESOLVED_BOUNDARY
+                    ],
+                    7,
+                )
             ),
             "pairExactPassCount": int(np.count_nonzero(pair_exact["passed"])),
             "pairExactDeferredCount": int(
@@ -1982,6 +2103,7 @@ def associate_global_branches(
                     "subwindow-unresolved-only",
                     "local-exact-deferred-only",
                     "directional-boundary-only",
+                    "local-order-resolved-boundary-only",
                     "mixed",
                 )
             },

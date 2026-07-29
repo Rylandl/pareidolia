@@ -15,8 +15,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Apply local evidence and directionally exposed whole-volume boundary "
-            "candidates to the global sparse branch graph with collision, exact-"
-            "carrier, and mesh-integrity gates."
+            "candidates, including overlap-resolved local-order deferrals, to the "
+            "global sparse branch graph with collision, exact-carrier, and mesh-"
+            "integrity gates."
         )
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
@@ -25,7 +26,7 @@ def main() -> None:
     evidence_mode.add_argument(
         "--local-evidence-only",
         action="store_true",
-        help="exclude directional-boundary discovery and reproduce the v4 scope",
+        help="exclude both whole-volume boundary tiers and reproduce the v4 scope",
     )
     evidence_mode.add_argument(
         "--accepted-only",
