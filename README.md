@@ -201,6 +201,22 @@ silently using synthetic padding.
   focused candidates for denser local Acus re-analysis rather than permissive
   CT-only filling. Gap maps and exact previews are stored under
   `work/cross-scroll-analysis-z512/sheetlet-gaps-v1`.
+- `python3 scripts/reanalyze-sheetlet-gaps.py --root
+  work/cross-scroll-analysis-z512 --ranks 11,12` re-extracts Acus needles only
+  around CT-positive enclosed gaps. It uses an 8-voxel cell covering,
+  2-voxel candidate spacing, up to 640 needles per cell, and the GPU Hessian
+  path, then requires a 0.55 carrier score, a 0.50 depth-aligned CT texture
+  score, best-vs-second mode separation, and best ownership across all 121
+  carriers. The two-rank run takes 9.5 seconds and checks 39 new modes against
+  every carrier. Rank 11 remains empty for a useful reason: its two
+  near-surface modes are about 88.3 degrees from the carrier fiber, while the
+  matching fiber family is at least 13.5 voxels away. Rank 12 gains one
+  independently fitted flake with 56 needles, 3.744-voxel height residual,
+  5.491-degree normal residual, and 1.980-degree fiber residual. That single
+  flake supports all 133 pixels of the enclosed hole while changing median
+  carrier height residual from 1.408 to 1.431 voxels and median normal residual
+  from 3.014 to 3.017 degrees. Outputs are stored under
+  `work/cross-scroll-analysis-z512/sheetlet-gap-reanalysis-v1`.
 
 The included bounded Zarr importer reads raw, uncompressed Zarr v2 chunks into
 a local `.npy` cuboid. Whole-scroll multiscale navigation and demand-loaded

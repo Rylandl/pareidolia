@@ -43,8 +43,14 @@ from backend.slab_carrier_gaps import (
     _axial_angle_difference,
     _internal_gap_components,
 )
+from backend.slab_gap_reanalysis import (
+    _accepted_candidates,
+    _cell_normal,
+    _mask_covering_points,
+)
 from backend.slab_analysis import (
     CELL_DTYPE,
+    NEEDLE_DTYPE,
     _macro_radial_fit,
     run_slab_analysis,
     slab_overview,
@@ -52,6 +58,58 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_targeted_gap_acceptance_requires_ct_and_global_ownership(self) -> None:
+        candidate = {
+            "targetRank": 1,
+            "targetGapId": 1,
+            "sampleId": 0,
+            "center": [4.0, 5.0, 6.0],
+            "_needleIds": {1, 2, 3},
+            "depthAlignedTextureScore": 0.49,
+        }
+        scores = np.asarray([[0.56], [0.0]], dtype=np.float32)
+        metrics = {
+            "heightResidual": np.asarray([3.7], dtype=np.float32),
+            "normalAngle": np.asarray([5.5], dtype=np.float32),
+            "fiberAngle": np.asarray([2.0], dtype=np.float32),
+            "nearestPlanarDistance": np.asarray([20.0], dtype=np.float32),
+        }
+        accepted, diagnostics = _accepted_candidates(
+            [candidate], scores, metrics, 0.55, 0.04, 0.04, 0.5, 8.0
+        )
+        self.assertEqual(accepted, [])
+        self.assertIn("ct-evidence", diagnostics[0]["rejectionReasons"])
+        candidate["depthAlignedTextureScore"] = 0.51
+        accepted, diagnostics = _accepted_candidates(
+            [candidate], scores, metrics, 0.55, 0.04, 0.04, 0.5, 8.0
+        )
+        self.assertEqual(accepted, [0])
+        self.assertTrue(diagnostics[0]["accepted"])
+
+    def test_gap_covering_and_independent_cell_normal(self) -> None:
+        mask = np.zeros((28, 32), dtype=bool)
+        mask[3:25, 4:28] = True
+        mask[12:25, 16:28] = False
+        covering = _mask_covering_points(mask, spacing_pixels=4.0)
+        self.assertGreater(len(covering), 1)
+        pixels = np.argwhere(mask)
+        distance2 = np.sum(
+            (pixels[:, None, :] - covering[None, :, :]) ** 2, axis=2
+        )
+        self.assertLessEqual(float(np.sqrt(np.max(np.min(distance2, axis=1)))), 4.0)
+
+        records = np.zeros(16, dtype=NEEDLE_DTYPE)
+        angles = np.linspace(0.0, 2.0 * np.pi, len(records), endpoint=False)
+        records["direction"][:, 0] = np.cos(angles)
+        records["direction"][:, 1] = np.sin(angles)
+        records["score"] = 1.0
+        normal, confidence, stats = _cell_normal(records)
+        self.assertIsNotNone(normal)
+        assert normal is not None
+        self.assertGreater(abs(float(normal[2])), 0.99)
+        self.assertGreater(confidence, 0.9)
+        self.assertLess(stats["medianPlaneResidualDeg"], 0.01)
+
     def test_carrier_gap_components_exclude_open_boundaries(self) -> None:
         mask = np.zeros((24, 28), dtype=bool)
         mask[2:22, 3:25] = True
