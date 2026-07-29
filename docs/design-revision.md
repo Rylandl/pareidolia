@@ -154,27 +154,43 @@ consistency rejects 5,417 more. The final 783,846-edge graph has:
 - 531 branches spanning at least 11 of 14 axial planes; and
 - 235 branches spanning all 14 planes.
 
-The first global association pass consumes only the 125 endpoint joins that are
-both integrity-clean and accepted by every one of at least two observing
-windows. The minimum of the two local scores controls deterministic ordering,
-and both observations remain stored; all 125 score pairs agree exactly.
-Reconstructing each candidate from its two complete global branches leaves all
-125 below the established 3-voxel / 6-degree median carrier gates. The full
-solve retains every join with no cell collision, forming 118 associations over
-243 original branches and 2,151 flakes: 111 have two branches and seven have
-three.
+The global association pass preserves two provenance tiers. Tier one contains
+the 125 integrity-clean endpoint joins accepted by every one of at least two
+observing windows. Tier two adds 214 clean candidates observed in one window.
+The minimum observed score controls deterministic ordering, and the stronger
+provenance wins exact score ties. Both observations of every tier-one join agree
+exactly.
 
-Every transitive association also passes exact reconstruction without pruning.
-The final carrier medians are 1.24 voxels in height and 3.82 degrees in normal;
-the maxima are 2.90 voxels and 5.99 degrees. Triangulating all 118 carriers
-produces 40 overlapping bounding-box pairs, 16,811 broad-phase triangle pairs,
-and 1,474 narrow-phase checks with zero support-skirt or evidence-core
-intersections. Five associations span at least 11 axial planes and three span
-all 14. This reduces the 63,783 linked global branches to 63,658 branch groups.
+Every candidate is reconstructed from its complete global branches. All 125
+overlap-validated joins and 213 of 214 single-window joins remain below the
+established 3-voxel / 6-degree median carrier gates. The deferred candidate is
+informative: its local 2.02-voxel / 3.40-degree fit looked coherent, but its
+158-flake global source branch already fits at 18.12 voxels / 13.40 degrees.
+Joining a clean three-flake target leaves the reconstruction at 17.13 voxels /
+13.92 degrees. The decision is therefore recorded as an input-branch carrier
+deferral rather than blamed on the gap itself.
 
-This is a deliberately narrow region-wide construction result, not a sheet
-census: only 125 joins satisfy the current two-window requirement, and
-unassociated global branches are outside the carrier-intersection audit. The
+A standalone carrier census of the 663 touched branches finds 64 failures, but
+63 are sparse 2–25-flake fragments whose joined reconstructions pass. Standalone
+fit is therefore retained as diagnostic context, not used as a blanket veto; a
+passing joined carrier remains the construction criterion.
+
+The 338 retained joins have no cell collisions and form 323 associations over
+661 branches and 5,703 flakes: 309 pairs, 13 triples, and one four-branch group.
+Of those, 118 use only overlap-validated joins and 205 use only single-window
+joins; none mix tiers in the current graph. Every transitive association passes
+exact reconstruction without pruning. Final carrier medians are 1.23 voxels in
+height and 3.81 degrees in normal, with maxima of 2.91 voxels and 5.99 degrees.
+
+Triangulating all 323 carriers produces 177 overlapping bounding-box pairs,
+67,544 broad-phase triangle pairs, and 2,042 narrow-phase checks with zero
+support-skirt or evidence-core intersections. Twelve associations span at least
+11 axial planes and four span all 14. This reduces the 63,783 linked global
+branches to 63,445 branch groups.
+
+This remains a deliberately narrow region-wide construction result, not a sheet
+census. Unassociated global branches are outside the carrier-intersection audit,
+and single-window provenance is never relabeled as independent replication. The
 output identities remain sparse exact-coherent surface hypotheses rather than
 pages or physical papyrus layers.
 

@@ -282,17 +282,19 @@ silently using synthetic padding.
   equal. These remain sparse local surface branches, not pages or sheets.
   Detailed contracts and findings are in `docs/design-revision.md`.
 - `python3 scripts/associate-global-branches.py --root
-  work/cross-scroll-analysis-z512` applies only the 125 integrity-clean joins
-  accepted in both observing windows. Every join is reconstructed from its two
-  complete global branches before construction; all 125 pass the established
-  3-voxel / 6-degree median MLS gates. Descending-score collision solving forms
-  118 associations—111 branch pairs and seven three-branch groups—covering
-  2,151 flakes. All transitive groups pass exact reconstruction with no pruning,
-  and a final 118-carrier mesh audit finds zero intersections after 16,811
-  broad-phase and 1,474 narrow-phase triangle checks. The six-second result
-  reduces 63,783 linked branches to 63,658 linked branch groups while leaving
-  every input observation, score, residual, and decision traceable in
-  `global-branch-association-v1`.
+  work/cross-scroll-analysis-z512` preserves two evidence tiers: 125 joins
+  accepted in both observing windows and 214 clean single-window candidates.
+  Every candidate is reconstructed from its complete global branches. All 125
+  overlap-validated joins and 213 single-window joins pass the established
+  3-voxel / 6-degree median MLS gates; one single-window join is deferred because
+  its 158-flake source branch is already carrier-incoherent before the join.
+  Descending-score collision solving forms 323 associations over 661 branches
+  and 5,703 flakes: 309 pairs, 13 triples, and one four-branch group. Every
+  transitive carrier passes exact reconstruction, and a 323-carrier audit finds
+  zero intersections after 67,544 broad-phase and 2,042 narrow-phase triangle
+  checks. The ten-second result reduces 63,783 linked branches to 63,445 linked
+  branch groups while retaining every observation, provenance label, residual,
+  and decision in `global-branch-association-v2`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

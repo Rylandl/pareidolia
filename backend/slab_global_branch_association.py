@@ -17,8 +17,8 @@ from .slab_association_integrity import (
 )
 from .slab_branch_association import (
     BRANCH_ASSOCIATION_VERSION,
-    DECISION_REDUNDANT,
-    DECISION_RETAINED,
+    DECISION_REDUNDANT as LOCAL_DECISION_REDUNDANT,
+    DECISION_RETAINED as LOCAL_DECISION_RETAINED,
     DEFAULT_SETTINGS as BRANCH_SETTINGS,
     _exact_carrier_stats,
 )
@@ -28,16 +28,25 @@ from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BRANCH_ASSOCIATION_VERSION = 1
+GLOBAL_BRANCH_ASSOCIATION_VERSION = 2
 
-DECISION_EXACT_PAIR_DEFERRED = 1
-DECISION_CELL_COLLISION = 2
-DECISION_EXACT_GROUP_PRUNED = 3
-DECISION_INTEGRITY_QUARANTINED = 4
-DECISION_RETAINED = 5
-DECISION_REDUNDANT = 6
+PROVENANCE_SINGLE_WINDOW = 1
+PROVENANCE_OVERLAP_VALIDATED = 2
+PROVENANCE_NAMES = {
+    PROVENANCE_SINGLE_WINDOW: "single-window",
+    PROVENANCE_OVERLAP_VALIDATED: "overlap-validated",
+}
+
+DECISION_INPUT_BRANCH_CARRIER_DEFERRED = 1
+DECISION_EXACT_PAIR_DEFERRED = 2
+DECISION_CELL_COLLISION = 3
+DECISION_EXACT_GROUP_PRUNED = 4
+DECISION_INTEGRITY_QUARANTINED = 5
+DECISION_RETAINED = 6
+DECISION_REDUNDANT = 7
 
 DECISION_NAMES = {
+    DECISION_INPUT_BRANCH_CARRIER_DEFERRED: "input-branch-carrier-deferred",
     DECISION_EXACT_PAIR_DEFERRED: "exact-pair-deferred",
     DECISION_CELL_COLLISION: "cell-collision",
     DECISION_EXACT_GROUP_PRUNED: "exact-group-pruned",
@@ -51,7 +60,8 @@ GRAPH_RETAINED = 2
 GRAPH_REDUNDANT = 3
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "minimumOverlapObservations": 2,
+    "includeSingleWindowCandidates": True,
+    "minimumOverlapValidatedObservations": 2,
     "maximumExactMedianHeightResidualVoxels": BRANCH_SETTINGS[
         "maximumExactMedianHeightResidualVoxels"
     ],
@@ -130,12 +140,21 @@ def _quantiles(values: np.ndarray, digits: int = 4) -> dict[str, float | None]:
 
 
 def _candidate_order(
-    score: np.ndarray, source: np.ndarray, target: np.ndarray
+    score: np.ndarray,
+    source: np.ndarray,
+    target: np.ndarray,
+    provenance_priority: np.ndarray | None = None,
 ) -> np.ndarray:
+    priority = (
+        np.zeros(len(score), dtype=np.int8)
+        if provenance_priority is None
+        else np.asarray(provenance_priority, dtype=np.int8)
+    )
     return np.lexsort(
         (
             np.asarray(target, dtype=np.int64),
             np.asarray(source, dtype=np.int64),
+            -priority,
             -np.asarray(score, dtype=np.float64),
         )
     )
@@ -148,6 +167,7 @@ def _solve_candidate_graph(
     score: np.ndarray,
     eligible: np.ndarray,
     branch_cells: dict[int, set[int]],
+    provenance_priority: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     source = np.asarray(source, dtype=np.int64)
     target = np.asarray(target, dtype=np.int64)
@@ -176,7 +196,9 @@ def _solve_candidate_graph(
         return root
 
     decisions = np.zeros(len(source), dtype=np.uint8)
-    for candidate_index in _candidate_order(score, source, target):
+    for candidate_index in _candidate_order(
+        score, source, target, provenance_priority
+    ):
         if not bool(eligible[candidate_index]):
             continue
         source_root = find(int(source[candidate_index]))
@@ -277,7 +299,7 @@ def _candidate_observations(
         with np.load(association_path) as payload:
             accepted = np.isin(
                 payload["candidateFinalDecision"],
-                [DECISION_RETAINED, DECISION_REDUNDANT],
+                [LOCAL_DECISION_RETAINED, LOCAL_DECISION_REDUNDANT],
             )
             for local_candidate_index in np.flatnonzero(accepted):
                 first = int(
@@ -350,6 +372,56 @@ def _aggregate_observations(
     }
 
 
+def _candidate_tier_selection(
+    unanimous: np.ndarray,
+    overlap_validated: np.ndarray,
+    observation_count: np.ndarray,
+    include_single_window: bool,
+    minimum_overlap_observations: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    unanimous = np.asarray(unanimous, dtype=bool)
+    overlap_validated = np.asarray(overlap_validated, dtype=bool)
+    observation_count = np.asarray(observation_count, dtype=np.int32)
+    overlap_selected = (
+        unanimous
+        & overlap_validated
+        & (observation_count >= minimum_overlap_observations)
+    )
+    single_window_selected = (
+        unanimous
+        & ~overlap_validated
+        & (observation_count == 1)
+        & include_single_window
+    )
+    selected = overlap_selected | single_window_selected
+    provenance = np.where(
+        overlap_selected[selected],
+        PROVENANCE_OVERLAP_VALIDATED,
+        PROVENANCE_SINGLE_WINDOW,
+    ).astype(np.uint8)
+    return selected, provenance
+
+
+def _pair_gate_state(
+    pair_exact_pass: np.ndarray,
+    input_branch_standalone_pass: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    pair_exact_pass = np.asarray(pair_exact_pass, dtype=bool)
+    input_branch_standalone_pass = np.asarray(
+        input_branch_standalone_pass, dtype=bool
+    )
+    if len(pair_exact_pass) != len(input_branch_standalone_pass):
+        raise ValueError("pair and standalone gate arrays must have equal length")
+    decisions = np.zeros(len(pair_exact_pass), dtype=np.uint8)
+    decisions[
+        ~pair_exact_pass & ~input_branch_standalone_pass
+    ] = DECISION_INPUT_BRANCH_CARRIER_DEFERRED
+    decisions[
+        ~pair_exact_pass & input_branch_standalone_pass
+    ] = DECISION_EXACT_PAIR_DEFERRED
+    return pair_exact_pass.copy(), decisions
+
+
 def _pair_exact_audit(
     source: np.ndarray,
     target: np.ndarray,
@@ -388,6 +460,47 @@ def _pair_exact_audit(
                         <= float(settings["maximumExactMedianNormalResidualDeg"])
                     )
                 },
+            )
+    passed = (
+        height <= float(settings["maximumExactMedianHeightResidualVoxels"])
+    ) & (normal <= float(settings["maximumExactMedianNormalResidualDeg"]))
+    return {
+        "medianHeightResidualVoxels": height,
+        "p90HeightResidualVoxels": p90_height,
+        "medianNormalResidualDeg": normal,
+        "p90NormalResidualDeg": p90_normal,
+        "passed": passed,
+    }
+
+
+def _branch_exact_audit(
+    branch_ids: np.ndarray,
+    members: dict[int, np.ndarray],
+    flakes: dict[int, dict[str, Any]],
+    settings: dict[str, Any],
+    progress: Callable[[str, int, int, dict[str, Any]], None] | None,
+) -> dict[str, np.ndarray]:
+    height = np.empty(len(branch_ids), dtype=np.float32)
+    p90_height = np.empty(len(branch_ids), dtype=np.float32)
+    normal = np.empty(len(branch_ids), dtype=np.float32)
+    p90_normal = np.empty(len(branch_ids), dtype=np.float32)
+    for branch_index, branch_id in enumerate(branch_ids):
+        exact = _exact_carrier_stats(
+            [flakes[int(node)] for node in members[int(branch_id)]], settings
+        )
+        height[branch_index] = exact["medianHeightResidualVoxels"]
+        p90_height[branch_index] = exact["p90HeightResidualVoxels"]
+        normal[branch_index] = exact["medianNormalResidualDeg"]
+        p90_normal[branch_index] = exact["p90NormalResidualDeg"]
+        if progress is not None and (
+            (branch_index + 1) % 100 == 0
+            or branch_index + 1 == len(branch_ids)
+        ):
+            progress(
+                "branch-exact",
+                branch_index + 1,
+                len(branch_ids),
+                {},
             )
     passed = (
         height <= float(settings["maximumExactMedianHeightResidualVoxels"])
@@ -540,12 +653,14 @@ def _weakest_retained_candidate(
     candidate_indices: np.ndarray,
     score: np.ndarray,
     endpoint_pair: np.ndarray,
+    provenance_priority: np.ndarray,
 ) -> int:
     return int(
         min(
             candidate_indices,
             key=lambda index: (
                 float(score[index]),
+                int(provenance_priority[index]),
                 int(endpoint_pair[index, 0]),
                 int(endpoint_pair[index, 1]),
             ),
@@ -601,7 +716,13 @@ def associate_global_branches(
             )
         ],
     }
-    stem = f"global-branch-association-v{GLOBAL_BRANCH_ASSOCIATION_VERSION}"
+    mode_suffix = (
+        "" if bool(resolved["includeSingleWindowCandidates"]) else "-overlap-only"
+    )
+    stem = (
+        f"global-branch-association-v{GLOBAL_BRANCH_ASSOCIATION_VERSION}"
+        f"{mode_suffix}"
+    )
     summary_path = root / f"{stem}.json"
     artifact_path = root / f"{stem}.npz"
     if summary_path.is_file() and artifact_path.is_file() and not force:
@@ -617,13 +738,12 @@ def associate_global_branches(
     with np.load(graph_artifact_path) as payload:
         graph = {key: np.asarray(payload[key]) for key in payload.files}
 
-    selected = (
-        tiled["branchJoinUnanimous"].astype(bool)
-        & tiled["branchJoinOverlapValidated"].astype(bool)
-        & (
-            tiled["branchJoinObservationCount"]
-            >= int(resolved["minimumOverlapObservations"])
-        )
+    selected, provenance = _candidate_tier_selection(
+        tiled["branchJoinUnanimous"],
+        tiled["branchJoinOverlapValidated"],
+        tiled["branchJoinObservationCount"],
+        bool(resolved["includeSingleWindowCandidates"]),
+        int(resolved["minimumOverlapValidatedObservations"]),
     )
     endpoint_pair = tiled["branchJoinEndpointIdentity"][selected].astype(np.uint64)
     observation_count = tiled["branchJoinObservationCount"][selected].astype(
@@ -635,7 +755,7 @@ def associate_global_branches(
     if np.any(observation_count != acceptance_count):
         raise ValueError("a selected global join is not unanimous")
     if not len(endpoint_pair):
-        raise ValueError("no overlap-validated global branch joins are available")
+        raise ValueError("no eligible unanimous global branch joins are available")
     quarantined = {
         (int(value[0]), int(value[1]))
         for value in tiled["quarantinedBranchJoinEndpointIdentity"]
@@ -691,6 +811,19 @@ def associate_global_branches(
         for branch_id, nodes in members.items()
     }
     branch_count = int(np.max(component, initial=0)) + 1
+    branch_exact = _branch_exact_audit(
+        touched,
+        members,
+        flakes,
+        resolved,
+        progress,
+    )
+    source_branch_audit_index = np.searchsorted(touched, branch_pair[:, 0])
+    target_branch_audit_index = np.searchsorted(touched, branch_pair[:, 1])
+    input_branch_standalone_pass = (
+        branch_exact["passed"][source_branch_audit_index]
+        & branch_exact["passed"][target_branch_audit_index]
+    )
     pair_exact = _pair_exact_audit(
         branch_pair[:, 0],
         branch_pair[:, 1],
@@ -699,7 +832,9 @@ def associate_global_branches(
         resolved,
         progress,
     )
-    eligible = pair_exact["passed"].copy()
+    eligible, pair_gate_decision = _pair_gate_state(
+        pair_exact["passed"], input_branch_standalone_pass
+    )
     group_pruned = np.zeros(len(endpoint_pair), dtype=bool)
     integrity_quarantined = np.zeros(len(endpoint_pair), dtype=bool)
     rounds = []
@@ -716,6 +851,7 @@ def associate_global_branches(
             aggregate["minimumScore"],
             eligible,
             branch_cells,
+            provenance,
         )
         geometries = _association_geometries(
             solve["branchAssociation"],
@@ -748,6 +884,7 @@ def associate_global_branches(
                 retained_candidates,
                 aggregate["minimumScore"],
                 endpoint_pair,
+                provenance,
             )
             eligible[candidate_index] = False
             group_pruned[candidate_index] = True
@@ -815,8 +952,7 @@ def associate_global_branches(
 
     if final_solve is None or final_integrity is None:
         raise RuntimeError("global association solve did not produce a final state")
-    final_decision = np.zeros(len(endpoint_pair), dtype=np.uint8)
-    final_decision[~pair_exact["passed"]] = DECISION_EXACT_PAIR_DEFERRED
+    final_decision = pair_gate_decision.copy()
     final_decision[group_pruned] = DECISION_EXACT_GROUP_PRUNED
     final_decision[integrity_quarantined] = DECISION_INTEGRITY_QUARANTINED
     remaining = eligible
@@ -845,6 +981,42 @@ def associate_global_branches(
     linked_association_count = len(
         np.unique(branch_association[linked_global_branch])
     )
+    construction_join = np.isin(
+        final_decision, [DECISION_RETAINED, DECISION_REDUNDANT]
+    )
+    construction_association = branch_association[
+        branch_pair[:, 0][construction_join]
+    ]
+    association_overlap_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_OVERLAP_VALIDATED
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
+    association_single_window_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_SINGLE_WINDOW
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
+    exact_groups = [value["exact"] for value in final_geometries]
+    for value in exact_groups:
+        association_id = int(value["associationId"])
+        overlap_count = int(association_overlap_join_count[association_id])
+        single_count = int(
+            association_single_window_join_count[association_id]
+        )
+        value["overlapValidatedJoinCount"] = overlap_count
+        value["singleWindowJoinCount"] = single_count
+        value["provenance"] = (
+            "mixed"
+            if overlap_count and single_count
+            else (
+                "overlap-validated-only"
+                if overlap_count
+                else "single-window-only"
+            )
+        )
     violation_records = [
         (history_index, value)
         for history_index, history in enumerate(integrity_history)
@@ -859,6 +1031,7 @@ def associate_global_branches(
         artifact_path,
         candidateEndpointIdentity=endpoint_pair,
         candidateEndpointNodeIndex=endpoint_node,
+        candidateProvenance=provenance,
         candidateBranchSource=branch_pair[:, 0],
         candidateBranchTarget=branch_pair[:, 1],
         candidateObservationCount=observation_count,
@@ -885,6 +1058,7 @@ def associate_global_branches(
             "p90NormalResidualDeg"
         ],
         candidateExactPass=pair_exact["passed"],
+        candidateInputBranchStandalonePass=input_branch_standalone_pass,
         candidateExactGroupPruned=group_pruned,
         candidateIntegrityQuarantined=integrity_quarantined,
         candidateFinalDecision=final_decision,
@@ -897,10 +1071,26 @@ def associate_global_branches(
         observationMedianNormalResidualDeg=observations[
             "medianNormalResidualDeg"
         ],
+        auditedBranchId=touched,
+        auditedBranchExactMedianHeightResidualVoxels=branch_exact[
+            "medianHeightResidualVoxels"
+        ],
+        auditedBranchExactP90HeightResidualVoxels=branch_exact[
+            "p90HeightResidualVoxels"
+        ],
+        auditedBranchExactMedianNormalResidualDeg=branch_exact[
+            "medianNormalResidualDeg"
+        ],
+        auditedBranchExactP90NormalResidualDeg=branch_exact[
+            "p90NormalResidualDeg"
+        ],
+        auditedBranchExactPass=branch_exact["passed"],
         branchAssociation=branch_association,
         nodeAssociation=node_association,
         associationBranchCount=association_branch_count,
         associationNodeCount=association_node_count,
+        associationOverlapValidatedJoinCount=association_overlap_join_count,
+        associationSingleWindowJoinCount=association_single_window_join_count,
         integrityRoundIndex=np.asarray(
             [value[0] for value in violation_records], dtype=np.uint16
         ),
@@ -943,25 +1133,106 @@ def associate_global_branches(
         ),
     )
 
-    exact_groups = [value["exact"] for value in final_geometries]
     top_associations = sorted(
         exact_groups,
         key=lambda value: (-int(value["flakeCount"]), int(value["associationId"])),
     )[:20]
+    deferred_candidates = []
+    for candidate_index in np.flatnonzero(
+        ~np.isin(final_decision, [DECISION_RETAINED, DECISION_REDUNDANT])
+    ):
+        source_audit_index = int(source_branch_audit_index[candidate_index])
+        target_audit_index = int(target_branch_audit_index[candidate_index])
+        observation_indices = np.flatnonzero(
+            observations["candidateIndex"] == candidate_index
+        )
+        deferred_candidates.append(
+            {
+                "candidateIndex": int(candidate_index),
+                "decision": DECISION_NAMES[int(final_decision[candidate_index])],
+                "provenance": PROVENANCE_NAMES[int(provenance[candidate_index])],
+                "endpointIdentity": endpoint_pair[candidate_index].astype(int).tolist(),
+                "endpointCellXYZ": node_cell[
+                    endpoint_node[candidate_index]
+                ].astype(int).tolist(),
+                "branchSource": int(branch_pair[candidate_index, 0]),
+                "branchTarget": int(branch_pair[candidate_index, 1]),
+                "sourceBranchFlakeCount": len(
+                    members[int(branch_pair[candidate_index, 0])]
+                ),
+                "targetBranchFlakeCount": len(
+                    members[int(branch_pair[candidate_index, 1])]
+                ),
+                "minimumScore": round(
+                    float(aggregate["minimumScore"][candidate_index]), 6
+                ),
+                "observedWindowOrigins": [
+                    schedule["windows"][int(window_index)]["originCellXYZ"]
+                    for window_index in observations["windowIndex"][
+                        observation_indices
+                    ]
+                ],
+                "sourceStandaloneCarrier": {
+                    "medianHeightResidualVoxels": float(
+                        branch_exact["medianHeightResidualVoxels"][
+                            source_audit_index
+                        ]
+                    ),
+                    "medianNormalResidualDeg": float(
+                        branch_exact["medianNormalResidualDeg"][
+                            source_audit_index
+                        ]
+                    ),
+                    "gatesPass": bool(branch_exact["passed"][source_audit_index]),
+                },
+                "targetStandaloneCarrier": {
+                    "medianHeightResidualVoxels": float(
+                        branch_exact["medianHeightResidualVoxels"][
+                            target_audit_index
+                        ]
+                    ),
+                    "medianNormalResidualDeg": float(
+                        branch_exact["medianNormalResidualDeg"][
+                            target_audit_index
+                        ]
+                    ),
+                    "gatesPass": bool(branch_exact["passed"][target_audit_index]),
+                },
+                "joinedCarrier": {
+                    "medianHeightResidualVoxels": float(
+                        pair_exact["medianHeightResidualVoxels"][candidate_index]
+                    ),
+                    "medianNormalResidualDeg": float(
+                        pair_exact["medianNormalResidualDeg"][candidate_index]
+                    ),
+                    "gatesPass": bool(pair_exact["passed"][candidate_index]),
+                },
+            }
+        )
     result = {
         "identity": identity,
         "contract": {
             "inputRule": (
-                "only integrity-clean endpoint joins accepted by every observing "
-                "window and observed in at least two windows enter the solve"
+                (
+                    "integrity-clean unanimous endpoint joins enter in two explicit "
+                    "tiers: overlap-validated joins observed in at least two windows "
+                    "and weaker-provenance candidates observed in one window"
+                )
+                if bool(resolved["includeSingleWindowCandidates"])
+                else (
+                    "only integrity-clean unanimous endpoint joins observed in at "
+                    "least two windows enter the solve"
+                )
             ),
             "scoreRule": (
                 "the minimum local candidate score controls deterministic global "
-                "construction; every local score and exact residual is retained"
+                "construction; overlap-validated evidence wins exact score ties, and "
+                "every local score, residual, and provenance label is retained"
             ),
             "pairGate": (
-                "each join is reconstructed from both complete global branches and "
-                "must pass the 3-voxel/6-degree median MLS carrier gates"
+                "each join reconstructed from its complete global branches must pass "
+                "the 3-voxel/6-degree median MLS gates; standalone branch fits are "
+                "diagnostic because sparse fragments may stabilize only after joining"
             ),
             "transitiveGate": (
                 "descending-score joins may never create a repeated Acus cell; each "
@@ -985,6 +1256,7 @@ def associate_global_branches(
         "settings": resolved,
         "rounds": rounds,
         "topAssociations": top_associations,
+        "deferredCandidates": deferred_candidates,
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),
             "cacheHit": False,
@@ -992,16 +1264,53 @@ def associate_global_branches(
             "inputQuarantinedJoinCount": len(
                 tiled["quarantinedBranchJoinEndpointIdentity"]
             ),
-            "selectedOverlapValidatedJoinCount": len(endpoint_pair),
+            "selectedCandidateJoinCount": len(endpoint_pair),
+            "selectedOverlapValidatedJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_OVERLAP_VALIDATED
+                )
+            ),
+            "selectedSingleWindowJoinCount": int(
+                np.count_nonzero(provenance == PROVENANCE_SINGLE_WINDOW)
+            ),
             "selectedTouchedGlobalBranchCount": len(touched),
             "localObservationCount": len(observations["score"]),
             "minimumCandidateScore": _quantiles(aggregate["minimumScore"]),
             "candidateScoreObservationRange": _quantiles(
                 aggregate["maximumScore"] - aggregate["minimumScore"], 7
             ),
+            "overlapValidatedCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_OVERLAP_VALIDATED],
+                7,
+            ),
             "pairExactPassCount": int(np.count_nonzero(pair_exact["passed"])),
             "pairExactDeferredCount": int(
-                np.count_nonzero(~pair_exact["passed"])
+                np.count_nonzero(
+                    input_branch_standalone_pass & ~pair_exact["passed"]
+                )
+            ),
+            "auditedInputBranchCount": len(touched),
+            "standaloneCarrierPassingInputBranchCount": int(
+                np.count_nonzero(branch_exact["passed"])
+            ),
+            "standaloneCarrierFailingInputBranchCount": int(
+                np.count_nonzero(~branch_exact["passed"])
+            ),
+            "candidateWithStandaloneCarrierFailureCount": int(
+                np.count_nonzero(~input_branch_standalone_pass)
+            ),
+            "standaloneFailureCandidatePassingJoinedCarrierCount": int(
+                np.count_nonzero(
+                    ~input_branch_standalone_pass & pair_exact["passed"]
+                )
+            ),
+            "inputBranchMedianHeightResidualVoxels": _quantiles(
+                branch_exact["medianHeightResidualVoxels"]
+            ),
+            "inputBranchMedianNormalResidualDeg": _quantiles(
+                branch_exact["medianNormalResidualDeg"]
             ),
             "pairMedianHeightResidualVoxels": _quantiles(
                 pair_exact["medianHeightResidualVoxels"]
@@ -1020,6 +1329,18 @@ def associate_global_branches(
             "finalDecisionCounts": {
                 name: int(np.count_nonzero(final_decision == value))
                 for value, name in DECISION_NAMES.items()
+            },
+            "finalDecisionCountsByProvenance": {
+                provenance_name: {
+                    name: int(
+                        np.count_nonzero(
+                            (provenance == provenance_value)
+                            & (final_decision == decision_value)
+                        )
+                    )
+                    for decision_value, name in DECISION_NAMES.items()
+                }
+                for provenance_value, provenance_name in PROVENANCE_NAMES.items()
             },
             "exactGroupPrunedCount": int(np.count_nonzero(group_pruned)),
             "integrityQuarantinedCount": int(
@@ -1051,6 +1372,14 @@ def associate_global_branches(
                 )
                 for value in np.unique(
                     association_branch_count[association_branch_count >= 2]
+                )
+            },
+            "finalAssociationProvenanceCounts": {
+                name: sum(value["provenance"] == name for value in exact_groups)
+                for name in (
+                    "overlap-validated-only",
+                    "single-window-only",
+                    "mixed",
                 )
             },
             "finalAssociationNodeCount": _quantiles(

@@ -14,18 +14,26 @@ from backend.slab_global_branch_association import associate_global_branches
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply overlap-validated joins to the global sparse branch graph with "
-            "collision, exact-carrier, and mesh-integrity gates."
+            "Apply unanimous overlap-validated and single-window joins to the global "
+            "sparse branch graph with collision, exact-carrier, and mesh-integrity "
+            "gates."
         )
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--overlap-only",
+        action="store_true",
+        help="exclude the weaker-provenance single-window candidate tier",
+    )
     args = parser.parse_args()
 
     def progress(
         stage: str, completed: int, total: int, value: dict[str, object]
     ) -> None:
-        if stage == "pair-exact":
+        if stage == "branch-exact":
+            print(f"branch exact {completed}/{total}", file=sys.stderr, flush=True)
+        elif stage == "pair-exact":
             print(f"pair exact {completed}/{total}", file=sys.stderr, flush=True)
         else:
             print(
@@ -39,6 +47,9 @@ def main() -> None:
     result = associate_global_branches(
         args.root,
         force=args.force,
+        settings={
+            "includeSingleWindowCandidates": not args.overlap_only,
+        },
         progress=progress,
     )
     print(
@@ -47,6 +58,7 @@ def main() -> None:
                 "contract": result["contract"],
                 "stats": result["stats"],
                 "topAssociations": result["topAssociations"],
+                "deferredCandidates": result["deferredCandidates"],
                 "artifact": result["artifact"],
             },
             indent=2,

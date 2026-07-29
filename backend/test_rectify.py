@@ -101,7 +101,13 @@ from backend.slab_global_branch_association import (
     GRAPH_CELL_COLLISION,
     GRAPH_REDUNDANT,
     GRAPH_RETAINED,
+    DECISION_EXACT_PAIR_DEFERRED,
+    DECISION_INPUT_BRANCH_CARRIER_DEFERRED,
+    PROVENANCE_OVERLAP_VALIDATED,
+    PROVENANCE_SINGLE_WINDOW,
     _aggregate_observations,
+    _candidate_tier_selection,
+    _pair_gate_state,
     _solve_candidate_graph,
 )
 from backend.slab_analysis import (
@@ -114,6 +120,34 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_global_pair_gate_lets_joined_carrier_stabilize_sparse_input(
+        self,
+    ) -> None:
+        eligible, decisions = _pair_gate_state(
+            np.asarray([True, False, False]),
+            np.asarray([False, False, True]),
+        )
+        np.testing.assert_array_equal(eligible, [True, False, False])
+        self.assertEqual(int(decisions[0]), 0)
+        self.assertEqual(
+            int(decisions[1]), DECISION_INPUT_BRANCH_CARRIER_DEFERRED
+        )
+        self.assertEqual(int(decisions[2]), DECISION_EXACT_PAIR_DEFERRED)
+
+    def test_global_branch_join_tiers_preserve_weaker_provenance(self) -> None:
+        selected, provenance = _candidate_tier_selection(
+            np.asarray([True, True, False, True]),
+            np.asarray([True, False, True, True]),
+            np.asarray([2, 1, 2, 1]),
+            True,
+            2,
+        )
+        np.testing.assert_array_equal(selected, [True, True, False, False])
+        np.testing.assert_array_equal(
+            provenance,
+            [PROVENANCE_OVERLAP_VALIDATED, PROVENANCE_SINGLE_WINDOW],
+        )
+
     def test_global_branch_join_aggregation_uses_conservative_score(self) -> None:
         aggregate = _aggregate_observations(
             {
@@ -174,6 +208,22 @@ class RectifierTests(unittest.TestCase):
             [GRAPH_RETAINED, GRAPH_RETAINED, GRAPH_REDUNDANT],
         )
         self.assertEqual(len(np.unique(result["branchAssociation"])), 1)
+
+    def test_global_branch_join_score_tie_prefers_overlap_provenance(self) -> None:
+        result = _solve_candidate_graph(
+            3,
+            np.asarray([0, 1]),
+            np.asarray([1, 2]),
+            np.asarray([0.7, 0.7]),
+            np.ones(2, dtype=bool),
+            {0: {10}, 1: {11}, 2: {10}},
+            np.asarray(
+                [PROVENANCE_SINGLE_WINDOW, PROVENANCE_OVERLAP_VALIDATED]
+            ),
+        )
+        np.testing.assert_array_equal(
+            result["decisions"], [GRAPH_CELL_COLLISION, GRAPH_RETAINED]
+        )
 
     def test_window_scheduler_end_aligns_axis_coverage(self) -> None:
         origins = _axis_origins(242, 32, 24)
