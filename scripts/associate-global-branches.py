@@ -14,17 +14,23 @@ from backend.slab_global_branch_association import associate_global_branches
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply unanimous overlap-validated and single-window joins to the global "
-            "sparse branch graph with collision, exact-carrier, and mesh-integrity "
-            "gates."
+            "Apply overlap-validated, single-window, and context-disputed endpoint "
+            "evidence to the global sparse branch graph with collision, exact-carrier, "
+            "and mesh-integrity gates."
         )
     )
     parser.add_argument("--root", default="work/cross-scroll-analysis-z512")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
+    evidence_mode = parser.add_mutually_exclusive_group()
+    evidence_mode.add_argument(
+        "--clean-only",
+        action="store_true",
+        help="exclude context-disputed candidates but retain clean single-window joins",
+    )
+    evidence_mode.add_argument(
         "--overlap-only",
         action="store_true",
-        help="exclude the weaker-provenance single-window candidate tier",
+        help="exclude both weaker-provenance candidate tiers",
     )
     args = parser.parse_args()
 
@@ -48,6 +54,9 @@ def main() -> None:
         args.root,
         force=args.force,
         settings={
+            "includeContextDisputedCandidates": not (
+                args.clean_only or args.overlap_only
+            ),
             "includeSingleWindowCandidates": not args.overlap_only,
         },
         progress=progress,
@@ -59,6 +68,10 @@ def main() -> None:
                 "stats": result["stats"],
                 "topAssociations": result["topAssociations"],
                 "deferredCandidates": result["deferredCandidates"],
+                "alreadyLinkedEvidence": result["alreadyLinkedEvidence"],
+                "excludedQuarantinedEvidence": result[
+                    "excludedQuarantinedEvidence"
+                ],
                 "artifact": result["artifact"],
             },
             indent=2,

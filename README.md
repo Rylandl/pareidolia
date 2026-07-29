@@ -282,19 +282,25 @@ silently using synthetic padding.
   equal. These remain sparse local surface branches, not pages or sheets.
   Detailed contracts and findings are in `docs/design-revision.md`.
 - `python3 scripts/associate-global-branches.py --root
-  work/cross-scroll-analysis-z512` preserves two evidence tiers: 125 joins
-  accepted in both observing windows and 214 clean single-window candidates.
-  Every candidate is reconstructed from its complete global branches. All 125
-  overlap-validated joins and 213 single-window joins pass the established
-  3-voxel / 6-degree median MLS gates; one single-window join is deferred because
-  its 158-flake source branch is already carrier-incoherent before the join.
-  Descending-score collision solving forms 323 associations over 661 branches
-  and 5,703 flakes: 309 pairs, 13 triples, and one four-branch group. Every
-  transitive carrier passes exact reconstruction, and a 323-carrier audit finds
-  zero intersections after 67,544 broad-phase and 2,042 narrow-phase triangle
-  checks. The ten-second result reduces 63,783 linked branches to 63,445 linked
-  branch groups while retaining every observation, provenance label, residual,
-  and decision in `global-branch-association-v2`.
+  work/cross-scroll-analysis-z512` preserves three evidence tiers rather than
+  hiding crop disagreement: 125 overlap-validated joins, 214 unanimous
+  single-window joins, and 172 context-disputed endpoint observations. Of the
+  latter, two remain excluded by the local mesh quarantine and 13 are already
+  linked inside one global branch, leaving 157 novel disputed candidates. Every
+  novel candidate is reconstructed from its complete global branches. The solve
+  retains all 125 overlap joins, 213 single-window joins, and 141 disputed joins;
+  13 fail because an input carrier remains incoherent, two cause cell collisions,
+  and the two weakest disputed edges in intersecting carrier pairs are removed.
+  The resulting 479 joins form 458 exact-coherent associations over 937 branches
+  and 9,415 flakes: 439 pairs, 17 triples, and two four-branch groups. Final
+  carrier medians are 1.25 voxels / 3.88 degrees, with zero exact failures and
+  zero intersections after 101,818 broad-phase and 2,486 narrow-phase triangle
+  checks. The 25-second result reduces 63,783 linked branches to 63,304 groups.
+  In the full catalog it adds 17 fragments with at least 25 flakes, four with at
+  least 100 flakes, eight spanning at least 11 planes, and six spanning all 14
+  relative to the unassociated graph. `--clean-only` exactly reproduces all 17
+  compared v2 geometric and decision arrays. Evidence, provenance, residuals,
+  and decisions are retained in `global-branch-association-v3`.
 - `python3 scripts/fill-sheetlet-gaps.py --root
   work/cross-scroll-analysis-z512 --top 24` audits only fully enclosed holes in
   the final carriers. It projects every flake hypothesis into each flattened

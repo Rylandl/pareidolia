@@ -28,11 +28,13 @@ from .slab_monotone_layers import MONOTONE_LAYER_VERSION, window_artifact_suffix
 from .slab_window_scheduler import WINDOW_SCHEDULER_VERSION
 
 
-GLOBAL_BRANCH_ASSOCIATION_VERSION = 2
+GLOBAL_BRANCH_ASSOCIATION_VERSION = 3
 
-PROVENANCE_SINGLE_WINDOW = 1
-PROVENANCE_OVERLAP_VALIDATED = 2
+PROVENANCE_CONTEXT_DISPUTED = 1
+PROVENANCE_SINGLE_WINDOW = 2
+PROVENANCE_OVERLAP_VALIDATED = 3
 PROVENANCE_NAMES = {
+    PROVENANCE_CONTEXT_DISPUTED: "context-disputed",
     PROVENANCE_SINGLE_WINDOW: "single-window",
     PROVENANCE_OVERLAP_VALIDATED: "overlap-validated",
 }
@@ -60,6 +62,7 @@ GRAPH_RETAINED = 2
 GRAPH_REDUNDANT = 3
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "includeContextDisputedCandidates": True,
     "includeSingleWindowCandidates": True,
     "minimumOverlapValidatedObservations": 2,
     "maximumExactMedianHeightResidualVoxels": BRANCH_SETTINGS[
@@ -376,12 +379,22 @@ def _candidate_tier_selection(
     unanimous: np.ndarray,
     overlap_validated: np.ndarray,
     observation_count: np.ndarray,
+    acceptance_count: np.ndarray,
     include_single_window: bool,
+    include_context_disputed: bool,
     minimum_overlap_observations: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     unanimous = np.asarray(unanimous, dtype=bool)
     overlap_validated = np.asarray(overlap_validated, dtype=bool)
     observation_count = np.asarray(observation_count, dtype=np.int32)
+    acceptance_count = np.asarray(acceptance_count, dtype=np.int32)
+    if not (
+        len(unanimous)
+        == len(overlap_validated)
+        == len(observation_count)
+        == len(acceptance_count)
+    ):
+        raise ValueError("candidate evidence arrays must have equal length")
     overlap_selected = (
         unanimous
         & overlap_validated
@@ -393,12 +406,22 @@ def _candidate_tier_selection(
         & (observation_count == 1)
         & include_single_window
     )
-    selected = overlap_selected | single_window_selected
-    provenance = np.where(
-        overlap_selected[selected],
-        PROVENANCE_OVERLAP_VALIDATED,
-        PROVENANCE_SINGLE_WINDOW,
-    ).astype(np.uint8)
+    context_disputed_selected = (
+        ~unanimous
+        & overlap_validated
+        & (observation_count >= minimum_overlap_observations)
+        & (acceptance_count > 0)
+        & (acceptance_count < observation_count)
+        & include_context_disputed
+    )
+    selected = (
+        overlap_selected | single_window_selected | context_disputed_selected
+    )
+    provenance = np.full(
+        int(np.count_nonzero(selected)), PROVENANCE_CONTEXT_DISPUTED, dtype=np.uint8
+    )
+    provenance[overlap_selected[selected]] = PROVENANCE_OVERLAP_VALIDATED
+    provenance[single_window_selected[selected]] = PROVENANCE_SINGLE_WINDOW
     return selected, provenance
 
 
@@ -668,6 +691,49 @@ def _weakest_retained_candidate(
     )
 
 
+def _weakest_integrity_candidates(
+    violations: list[dict[str, Any]],
+    branch_association: np.ndarray,
+    branch_pair: np.ndarray,
+    graph_decision: np.ndarray,
+    eligible: np.ndarray,
+    score: np.ndarray,
+    endpoint_pair: np.ndarray,
+    provenance_priority: np.ndarray,
+) -> np.ndarray:
+    branch_association = np.asarray(branch_association, dtype=np.int64)
+    branch_pair = np.asarray(branch_pair, dtype=np.int64)
+    graph_decision = np.asarray(graph_decision, dtype=np.uint8)
+    eligible = np.asarray(eligible, dtype=bool)
+    source_association = branch_association[branch_pair[:, 0]]
+    target_association = branch_association[branch_pair[:, 1]]
+    selected = set()
+    for violation in violations:
+        association_ids = (
+            int(violation["associationSource"]),
+            int(violation["associationTarget"]),
+        )
+        candidates = np.flatnonzero(
+            eligible
+            & (source_association == target_association)
+            & np.isin(source_association, association_ids)
+            & (graph_decision == GRAPH_RETAINED)
+        )
+        if not len(candidates):
+            raise RuntimeError(
+                "an integrity violation has no retained construction edge to prune"
+            )
+        selected.add(
+            _weakest_retained_candidate(
+                candidates,
+                score,
+                endpoint_pair,
+                provenance_priority,
+            )
+        )
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
 def associate_global_branches(
     output_root: str | Path,
     force: bool = False,
@@ -716,9 +782,18 @@ def associate_global_branches(
             )
         ],
     }
-    mode_suffix = (
-        "" if bool(resolved["includeSingleWindowCandidates"]) else "-overlap-only"
+    include_context_disputed = bool(
+        resolved["includeContextDisputedCandidates"]
     )
+    include_single_window = bool(resolved["includeSingleWindowCandidates"])
+    if include_context_disputed and include_single_window:
+        mode_suffix = ""
+    elif include_single_window:
+        mode_suffix = "-clean-only"
+    elif not include_context_disputed:
+        mode_suffix = "-overlap-only"
+    else:
+        mode_suffix = "-context-no-single"
     stem = (
         f"global-branch-association-v{GLOBAL_BRANCH_ASSOCIATION_VERSION}"
         f"{mode_suffix}"
@@ -738,45 +813,89 @@ def associate_global_branches(
     with np.load(graph_artifact_path) as payload:
         graph = {key: np.asarray(payload[key]) for key in payload.files}
 
-    selected, provenance = _candidate_tier_selection(
+    selected, evidence_provenance = _candidate_tier_selection(
         tiled["branchJoinUnanimous"],
         tiled["branchJoinOverlapValidated"],
         tiled["branchJoinObservationCount"],
-        bool(resolved["includeSingleWindowCandidates"]),
+        tiled["branchJoinAcceptanceCount"],
+        include_single_window,
+        include_context_disputed,
         int(resolved["minimumOverlapValidatedObservations"]),
     )
-    endpoint_pair = tiled["branchJoinEndpointIdentity"][selected].astype(np.uint64)
-    observation_count = tiled["branchJoinObservationCount"][selected].astype(
+    evidence_endpoint_pair = tiled["branchJoinEndpointIdentity"][selected].astype(
+        np.uint64
+    )
+    evidence_observation_count = tiled["branchJoinObservationCount"][selected].astype(
         np.uint8
     )
-    acceptance_count = tiled["branchJoinAcceptanceCount"][selected].astype(
+    evidence_acceptance_count = tiled["branchJoinAcceptanceCount"][selected].astype(
         np.uint8
     )
-    if np.any(observation_count != acceptance_count):
-        raise ValueError("a selected global join is not unanimous")
-    if not len(endpoint_pair):
-        raise ValueError("no eligible unanimous global branch joins are available")
+    clean_evidence = evidence_provenance != PROVENANCE_CONTEXT_DISPUTED
+    if np.any(
+        evidence_observation_count[clean_evidence]
+        != evidence_acceptance_count[clean_evidence]
+    ):
+        raise ValueError("a clean-tier global join is not unanimous")
+    if not len(evidence_endpoint_pair):
+        raise ValueError("no eligible global branch join evidence is available")
     quarantined = {
         (int(value[0]), int(value[1]))
         for value in tiled["quarantinedBranchJoinEndpointIdentity"]
     }
-    if any((int(value[0]), int(value[1])) in quarantined for value in endpoint_pair):
-        raise ValueError("an integrity-quarantined local join entered global input")
+    locally_quarantined = np.asarray(
+        [
+            (int(value[0]), int(value[1])) in quarantined
+            for value in evidence_endpoint_pair
+        ],
+        dtype=bool,
+    )
+    excluded_quarantined_endpoint_pair = evidence_endpoint_pair[
+        locally_quarantined
+    ]
+    excluded_quarantined_provenance = evidence_provenance[locally_quarantined]
+    excluded_quarantined_observation_count = evidence_observation_count[
+        locally_quarantined
+    ]
+    excluded_quarantined_acceptance_count = evidence_acceptance_count[
+        locally_quarantined
+    ]
+    integrity_clean = ~locally_quarantined
+    evidence_endpoint_pair = evidence_endpoint_pair[integrity_clean]
+    evidence_provenance = evidence_provenance[integrity_clean]
+    evidence_observation_count = evidence_observation_count[integrity_clean]
+    evidence_acceptance_count = evidence_acceptance_count[integrity_clean]
 
     node_identity = graph["nodeIdentity"].astype(np.uint64)
-    endpoint_node = np.searchsorted(node_identity, endpoint_pair).astype(np.uint32)
-    endpoint_inside = endpoint_node < len(node_identity)
-    endpoint_matches = np.zeros(endpoint_pair.shape, dtype=bool)
+    evidence_endpoint_node = np.searchsorted(
+        node_identity, evidence_endpoint_pair
+    ).astype(np.uint32)
+    endpoint_inside = evidence_endpoint_node < len(node_identity)
+    endpoint_matches = np.zeros(evidence_endpoint_pair.shape, dtype=bool)
     endpoint_matches[endpoint_inside] = (
-        node_identity[endpoint_node[endpoint_inside]]
-        == endpoint_pair[endpoint_inside]
+        node_identity[evidence_endpoint_node[endpoint_inside]]
+        == evidence_endpoint_pair[endpoint_inside]
     )
     if not np.all(endpoint_matches):
         raise ValueError("a global join endpoint is absent from the graph")
     component = graph["component"].astype(np.uint32)
-    branch_pair = component[endpoint_node].astype(np.uint32)
-    if np.any(branch_pair[:, 0] == branch_pair[:, 1]):
-        raise ValueError("a selected gap join is already inside one global branch")
+    evidence_branch_pair = component[evidence_endpoint_node].astype(np.uint32)
+    already_linked = evidence_branch_pair[:, 0] == evidence_branch_pair[:, 1]
+    already_linked_endpoint_pair = evidence_endpoint_pair[already_linked]
+    already_linked_endpoint_node = evidence_endpoint_node[already_linked]
+    already_linked_provenance = evidence_provenance[already_linked]
+    already_linked_branch = evidence_branch_pair[already_linked, 0]
+    already_linked_observation_count = evidence_observation_count[already_linked]
+    already_linked_acceptance_count = evidence_acceptance_count[already_linked]
+    novel = ~already_linked
+    endpoint_pair = evidence_endpoint_pair[novel]
+    endpoint_node = evidence_endpoint_node[novel]
+    provenance = evidence_provenance[novel]
+    branch_pair = evidence_branch_pair[novel]
+    observation_count = evidence_observation_count[novel]
+    acceptance_count = evidence_acceptance_count[novel]
+    if not len(endpoint_pair):
+        raise ValueError("all selected global join evidence is already linked")
     canonical_branch_pair = np.sort(branch_pair, axis=1)
     if len(np.unique(canonical_branch_pair, axis=0)) != len(branch_pair):
         raise ValueError("multiple endpoint joins address the same global branch pair")
@@ -912,25 +1031,18 @@ def associate_global_branches(
             continue
 
         integrity = _integrity_audit(geometries, resolved)
-        violating_associations = {
-            int(value[key])
-            for value in integrity["violations"]
-            for key in ("associationSource", "associationTarget")
-        }
         quarantined_indices = np.empty(0, dtype=np.int64)
-        if violating_associations:
-            source_association = solve["branchAssociation"][branch_pair[:, 0]]
-            target_association = solve["branchAssociation"][branch_pair[:, 1]]
-            quarantine = (
-                eligible
-                & (source_association == target_association)
-                & np.isin(source_association, list(violating_associations))
+        if integrity["violations"]:
+            quarantined_indices = _weakest_integrity_candidates(
+                integrity["violations"],
+                solve["branchAssociation"],
+                branch_pair,
+                solve["decisions"],
+                eligible,
+                aggregate["minimumScore"],
+                endpoint_pair,
+                provenance,
             )
-            quarantined_indices = np.flatnonzero(quarantine)
-            if not len(quarantined_indices):
-                raise RuntimeError(
-                    "an integrity violation has no candidate joins to quarantine"
-                )
             eligible[quarantined_indices] = False
             integrity_quarantined[quarantined_indices] = True
         round_value["integrity"] = integrity["stats"]
@@ -999,6 +1111,12 @@ def associate_global_branches(
         ],
         minlength=len(association_branch_count),
     ).astype(np.uint16)
+    association_context_disputed_join_count = np.bincount(
+        construction_association[
+            provenance[construction_join] == PROVENANCE_CONTEXT_DISPUTED
+        ],
+        minlength=len(association_branch_count),
+    ).astype(np.uint16)
     exact_groups = [value["exact"] for value in final_geometries]
     for value in exact_groups:
         association_id = int(value["associationId"])
@@ -1006,16 +1124,25 @@ def associate_global_branches(
         single_count = int(
             association_single_window_join_count[association_id]
         )
+        context_count = int(
+            association_context_disputed_join_count[association_id]
+        )
         value["overlapValidatedJoinCount"] = overlap_count
         value["singleWindowJoinCount"] = single_count
-        value["provenance"] = (
-            "mixed"
-            if overlap_count and single_count
-            else (
-                "overlap-validated-only"
-                if overlap_count
-                else "single-window-only"
+        value["contextDisputedJoinCount"] = context_count
+        active_provenance = [
+            name
+            for name, count in (
+                ("overlap-validated", overlap_count),
+                ("single-window", single_count),
+                ("context-disputed", context_count),
             )
+            if count
+        ]
+        value["provenance"] = (
+            f"{active_provenance[0]}-only"
+            if len(active_provenance) == 1
+            else "mixed"
         )
     violation_records = [
         (history_index, value)
@@ -1062,6 +1189,20 @@ def associate_global_branches(
         candidateExactGroupPruned=group_pruned,
         candidateIntegrityQuarantined=integrity_quarantined,
         candidateFinalDecision=final_decision,
+        alreadyLinkedEndpointIdentity=already_linked_endpoint_pair,
+        alreadyLinkedEndpointNodeIndex=already_linked_endpoint_node,
+        alreadyLinkedProvenance=already_linked_provenance,
+        alreadyLinkedBranch=already_linked_branch,
+        alreadyLinkedObservationCount=already_linked_observation_count,
+        alreadyLinkedAcceptanceCount=already_linked_acceptance_count,
+        excludedQuarantinedEndpointIdentity=excluded_quarantined_endpoint_pair,
+        excludedQuarantinedProvenance=excluded_quarantined_provenance,
+        excludedQuarantinedObservationCount=(
+            excluded_quarantined_observation_count
+        ),
+        excludedQuarantinedAcceptanceCount=(
+            excluded_quarantined_acceptance_count
+        ),
         observationCandidateIndex=observations["candidateIndex"],
         observationWindowIndex=observations["windowIndex"],
         observationScore=observations["score"],
@@ -1091,6 +1232,9 @@ def associate_global_branches(
         associationNodeCount=association_node_count,
         associationOverlapValidatedJoinCount=association_overlap_join_count,
         associationSingleWindowJoinCount=association_single_window_join_count,
+        associationContextDisputedJoinCount=(
+            association_context_disputed_join_count
+        ),
         integrityRoundIndex=np.asarray(
             [value[0] for value in violation_records], dtype=np.uint16
         ),
@@ -1166,6 +1310,12 @@ def associate_global_branches(
                 "minimumScore": round(
                     float(aggregate["minimumScore"][candidate_index]), 6
                 ),
+                "observationCount": int(observation_count[candidate_index]),
+                "acceptanceCount": int(acceptance_count[candidate_index]),
+                "unacceptedObservationCount": int(
+                    observation_count[candidate_index]
+                    - acceptance_count[candidate_index]
+                ),
                 "observedWindowOrigins": [
                     schedule["windows"][int(window_index)]["originCellXYZ"]
                     for window_index in observations["windowIndex"][
@@ -1209,25 +1359,79 @@ def associate_global_branches(
                 },
             }
         )
+    already_linked_evidence = [
+        {
+            "evidenceIndex": int(index),
+            "provenance": PROVENANCE_NAMES[
+                int(already_linked_provenance[index])
+            ],
+            "endpointIdentity": already_linked_endpoint_pair[index]
+            .astype(int)
+            .tolist(),
+            "endpointCellXYZ": node_cell[
+                already_linked_endpoint_node[index]
+            ]
+            .astype(int)
+            .tolist(),
+            "globalBranch": int(already_linked_branch[index]),
+            "branchFlakeCount": int(
+                global_branch_node_count[int(already_linked_branch[index])]
+            ),
+            "observationCount": int(already_linked_observation_count[index]),
+            "acceptanceCount": int(already_linked_acceptance_count[index]),
+        }
+        for index in range(len(already_linked_endpoint_pair))
+    ]
+    excluded_quarantined_evidence = [
+        {
+            "evidenceIndex": int(index),
+            "provenance": PROVENANCE_NAMES[
+                int(excluded_quarantined_provenance[index])
+            ],
+            "endpointIdentity": excluded_quarantined_endpoint_pair[index]
+            .astype(int)
+            .tolist(),
+            "observationCount": int(
+                excluded_quarantined_observation_count[index]
+            ),
+            "acceptanceCount": int(
+                excluded_quarantined_acceptance_count[index]
+            ),
+            "reason": "a local association containing this join failed the mesh-intersection audit",
+        }
+        for index in range(len(excluded_quarantined_endpoint_pair))
+    ]
+    if include_context_disputed and include_single_window:
+        input_rule = (
+            "integrity-clean endpoint evidence enters in three explicit tiers: "
+            "overlap-validated joins accepted by at least two windows, unanimous "
+            "single-window joins, and context-disputed joins accepted by only a "
+            "subset of observing windows"
+        )
+    elif include_single_window:
+        input_rule = (
+            "only unanimous overlap-validated and single-window endpoint joins "
+            "enter the solve"
+        )
+    elif include_context_disputed:
+        input_rule = (
+            "overlap-validated and context-disputed endpoint evidence enters the "
+            "solve; unanimous single-window joins are excluded"
+        )
+    else:
+        input_rule = (
+            "only integrity-clean unanimous endpoint joins observed in at least "
+            "two windows enter the solve"
+        )
     result = {
         "identity": identity,
         "contract": {
-            "inputRule": (
-                (
-                    "integrity-clean unanimous endpoint joins enter in two explicit "
-                    "tiers: overlap-validated joins observed in at least two windows "
-                    "and weaker-provenance candidates observed in one window"
-                )
-                if bool(resolved["includeSingleWindowCandidates"])
-                else (
-                    "only integrity-clean unanimous endpoint joins observed in at "
-                    "least two windows enter the solve"
-                )
-            ),
+            "inputRule": input_rule,
             "scoreRule": (
-                "the minimum local candidate score controls deterministic global "
-                "construction; overlap-validated evidence wins exact score ties, and "
-                "every local score, residual, and provenance label is retained"
+                "the minimum accepted local score controls deterministic global "
+                "construction; overlap-validated, then single-window, then "
+                "context-disputed evidence wins exact score ties, and every accepted "
+                "local score, residual, and provenance label is retained"
             ),
             "pairGate": (
                 "each join reconstructed from its complete global branches must pass "
@@ -1241,8 +1445,9 @@ def associate_global_branches(
             ),
             "integrityGate": (
                 "merged association carriers are triangle-intersection audited; all "
-                "joins in any intersecting association are quarantined and the solve "
-                "is repeated; unassociated global branches remain outside this audit"
+                "intersecting carrier pairs lose their weakest retained construction "
+                "edge and the solve repeats to a zero-intersection fixed point; "
+                "unassociated global branches remain outside this audit"
             ),
             "directionMeaning": (
                 "normal and fiber axes remain unsigned; branch parity is only a "
@@ -1257,12 +1462,26 @@ def associate_global_branches(
         "rounds": rounds,
         "topAssociations": top_associations,
         "deferredCandidates": deferred_candidates,
+        "alreadyLinkedEvidence": already_linked_evidence,
+        "excludedQuarantinedEvidence": excluded_quarantined_evidence,
         "stats": {
             "elapsedMs": round((time.monotonic() - started) * 1000.0, 2),
             "cacheHit": False,
             "inputTiledJoinCount": len(tiled["branchJoinEndpointIdentity"]),
             "inputQuarantinedJoinCount": len(
                 tiled["quarantinedBranchJoinEndpointIdentity"]
+            ),
+            "eligibleTierEvidenceJoinCount": int(np.count_nonzero(selected)),
+            "excludedQuarantinedEvidenceCount": len(
+                excluded_quarantined_endpoint_pair
+            ),
+            "selectedEvidenceJoinCount": len(evidence_endpoint_pair),
+            "alreadyLinkedEvidenceCount": len(already_linked_endpoint_pair),
+            "alreadyLinkedContextDisputedEvidenceCount": int(
+                np.count_nonzero(
+                    already_linked_provenance
+                    == PROVENANCE_CONTEXT_DISPUTED
+                )
             ),
             "selectedCandidateJoinCount": len(endpoint_pair),
             "selectedOverlapValidatedJoinCount": int(
@@ -1272,6 +1491,11 @@ def associate_global_branches(
             ),
             "selectedSingleWindowJoinCount": int(
                 np.count_nonzero(provenance == PROVENANCE_SINGLE_WINDOW)
+            ),
+            "selectedContextDisputedJoinCount": int(
+                np.count_nonzero(
+                    provenance == PROVENANCE_CONTEXT_DISPUTED
+                )
             ),
             "selectedTouchedGlobalBranchCount": len(touched),
             "localObservationCount": len(observations["score"]),
@@ -1283,6 +1507,18 @@ def associate_global_branches(
                 (
                     aggregate["maximumScore"] - aggregate["minimumScore"]
                 )[provenance == PROVENANCE_OVERLAP_VALIDATED],
+                7,
+            ),
+            "singleWindowCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_SINGLE_WINDOW],
+                7,
+            ),
+            "contextDisputedCandidateScoreObservationRange": _quantiles(
+                (
+                    aggregate["maximumScore"] - aggregate["minimumScore"]
+                )[provenance == PROVENANCE_CONTEXT_DISPUTED],
                 7,
             ),
             "pairExactPassCount": int(np.count_nonzero(pair_exact["passed"])),
@@ -1379,6 +1615,7 @@ def associate_global_branches(
                 for name in (
                     "overlap-validated-only",
                     "single-window-only",
+                    "context-disputed-only",
                     "mixed",
                 )
             },

@@ -103,12 +103,14 @@ from backend.slab_global_branch_association import (
     GRAPH_RETAINED,
     DECISION_EXACT_PAIR_DEFERRED,
     DECISION_INPUT_BRANCH_CARRIER_DEFERRED,
+    PROVENANCE_CONTEXT_DISPUTED,
     PROVENANCE_OVERLAP_VALIDATED,
     PROVENANCE_SINGLE_WINDOW,
     _aggregate_observations,
     _candidate_tier_selection,
     _pair_gate_state,
     _solve_candidate_graph,
+    _weakest_integrity_candidates,
 )
 from backend.slab_analysis import (
     CELL_DTYPE,
@@ -136,13 +138,37 @@ class RectifierTests(unittest.TestCase):
 
     def test_global_branch_join_tiers_preserve_weaker_provenance(self) -> None:
         selected, provenance = _candidate_tier_selection(
-            np.asarray([True, True, False, True]),
-            np.asarray([True, False, True, True]),
-            np.asarray([2, 1, 2, 1]),
+            np.asarray([True, True, False, True, False]),
+            np.asarray([True, False, True, True, True]),
+            np.asarray([2, 1, 2, 1, 2]),
+            np.asarray([2, 1, 1, 1, 0]),
+            True,
             True,
             2,
         )
-        np.testing.assert_array_equal(selected, [True, True, False, False])
+        np.testing.assert_array_equal(
+            selected, [True, True, True, False, False]
+        )
+        np.testing.assert_array_equal(
+            provenance,
+            [
+                PROVENANCE_OVERLAP_VALIDATED,
+                PROVENANCE_SINGLE_WINDOW,
+                PROVENANCE_CONTEXT_DISPUTED,
+            ],
+        )
+
+    def test_global_branch_join_tiers_can_exclude_disputed_context(self) -> None:
+        selected, provenance = _candidate_tier_selection(
+            np.asarray([True, True, False]),
+            np.asarray([True, False, True]),
+            np.asarray([2, 1, 2]),
+            np.asarray([2, 1, 1]),
+            True,
+            False,
+            2,
+        )
+        np.testing.assert_array_equal(selected, [True, True, False])
         np.testing.assert_array_equal(
             provenance,
             [PROVENANCE_OVERLAP_VALIDATED, PROVENANCE_SINGLE_WINDOW],
@@ -224,6 +250,45 @@ class RectifierTests(unittest.TestCase):
         np.testing.assert_array_equal(
             result["decisions"], [GRAPH_CELL_COLLISION, GRAPH_RETAINED]
         )
+
+    def test_global_integrity_pruning_removes_only_weakest_construction_edge(
+        self,
+    ) -> None:
+        selected = _weakest_integrity_candidates(
+            [
+                {
+                    "associationSource": 0,
+                    "associationTarget": 2,
+                }
+            ],
+            np.asarray([0, 0, 2, 2]),
+            np.asarray([[0, 1], [2, 3]]),
+            np.asarray([GRAPH_RETAINED, GRAPH_RETAINED]),
+            np.ones(2, dtype=bool),
+            np.asarray([0.61, 0.54]),
+            np.asarray([[10, 11], [20, 21]], dtype=np.uint64),
+            np.asarray(
+                [PROVENANCE_CONTEXT_DISPUTED, PROVENANCE_CONTEXT_DISPUTED]
+            ),
+        )
+        np.testing.assert_array_equal(selected, [1])
+
+    def test_global_integrity_pruning_prefers_weaker_provenance_on_score_tie(
+        self,
+    ) -> None:
+        selected = _weakest_integrity_candidates(
+            [{"associationSource": 0, "associationTarget": 2}],
+            np.asarray([0, 0, 2, 2]),
+            np.asarray([[0, 1], [2, 3]]),
+            np.asarray([GRAPH_RETAINED, GRAPH_RETAINED]),
+            np.ones(2, dtype=bool),
+            np.asarray([0.54, 0.54]),
+            np.asarray([[10, 11], [20, 21]], dtype=np.uint64),
+            np.asarray(
+                [PROVENANCE_SINGLE_WINDOW, PROVENANCE_CONTEXT_DISPUTED]
+            ),
+        )
+        np.testing.assert_array_equal(selected, [1])
 
     def test_window_scheduler_end_aligns_axis_coverage(self) -> None:
         origins = _axis_origins(242, 32, 24)
