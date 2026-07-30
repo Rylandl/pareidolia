@@ -31,9 +31,16 @@ from backend.cubical.flatten import (
     sample_depth_stack,
     tangent_atlas_chart,
 )
-from backend.cubical.contracts import VolumeSource
+from backend.cubical.contracts import RawAcusSettings, VolumeSource
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
 from backend.cubical.selection import ConfigurationOption
+from backend.cubical.stratigraphic_continuity import (
+    PatchFingerprintTable,
+    StratigraphicContinuitySettings,
+    _calibrate_records,
+    build_patch_fingerprints,
+    score_patch_fingerprints,
+)
 from backend.cubical.stratigraphy import LayerModeTable
 from backend.cubical.topology import GridSpec, cell_edges, cell_face
 from backend.cubical.tables import PatchTable, read_patch_shard, write_patch_shard
@@ -79,6 +86,140 @@ class CubicalGeometryTests(unittest.TestCase):
         orientation.union(2, 3, False)
         self.assertTrue(orientation.compatible(1, 3, False))
         self.assertFalse(orientation.compatible(1, 3, True))
+
+    def test_stratigraphic_fingerprint_resolves_axial_depth_gauge(self) -> None:
+        depths = np.arange(-10.0, 11.0, 5.0, dtype=np.float32)
+        first_density = np.asarray((0.0, 1.0, 0.25, 0.5, 0.0), dtype=np.float32)
+        first_moment = first_density * np.asarray(
+            (0.0, -1.0, 1.0, -0.5, 0.0), dtype=np.float32
+        )
+        table = PatchFingerprintTable(
+            patch_id=np.asarray((1, 2), dtype=np.uint64),
+            anchor_valid=np.asarray((True, True)),
+            anchor_shard_index=np.asarray((0, 0), dtype=np.int16),
+            anchor_mode_index=np.asarray((1, 1), dtype=np.int32),
+            anchor_height_residual_voxels=np.zeros(2, dtype=np.float32),
+            anchor_normal_residual_degrees=np.zeros(2, dtype=np.float32),
+            anchor_fiber_residual_degrees=np.zeros(2, dtype=np.float32),
+            context_mode_count=np.asarray((3, 3), dtype=np.uint16),
+            support_low_voxels=np.asarray((-10.0, -10.0), dtype=np.float32),
+            support_high_voxels=np.asarray((10.0, 10.0), dtype=np.float32),
+            normal_xyz=np.asarray(
+                ((0.0, 0.0, 1.0), (0.0, 0.0, -1.0)), dtype=np.float32
+            ),
+            depth_offsets_voxels=depths,
+            density=np.vstack((first_density, first_density[::-1])),
+            orientation_moment=np.vstack(
+                (first_moment, first_moment[::-1])
+            ),
+        )
+        table.validate()
+        score = score_patch_fingerprints(
+            table,
+            0,
+            1,
+            StratigraphicContinuitySettings(
+                minimum_common_depth_span_voxels=5.0
+            ),
+        )
+        self.assertEqual(score["status"], "scored")
+        self.assertTrue(score["normalGaugeReversed"])
+        self.assertAlmostEqual(score["mismatch"], 0.0, places=6)
+
+    def test_full_mode_fingerprint_anchors_selected_plane_exactly(self) -> None:
+        grid = GridSpec(
+            (1, 1, 1),
+            cell_size_xyz=(32.0, 32.0, 32.0),
+            coordinate_unit="source-voxel",
+        )
+        estimate = PlaneEstimate.isotropic(
+            (0.0, 0.0, 1.0),
+            0.0,
+            angular_std_radians=math.radians(1.0),
+            height_std=0.5,
+            fiber_xyz=(1.0, 0.0, 0.0),
+            fiber_angular_std_radians=math.radians(2.0),
+            confidence=0.9,
+        )
+        patch = clip_plane_to_cell(grid, (0, 0, 0), estimate, patch_id=7)
+        assert patch is not None
+        patches = PatchTable.from_patches(
+            grid, (patch,), normal_family={7: 0}
+        )
+        covariance = np.tile(
+            np.asarray(
+                (
+                    math.radians(1.0) ** 2,
+                    0.0,
+                    0.0,
+                    math.radians(1.0) ** 2,
+                    0.0,
+                    0.25,
+                ),
+                dtype=np.float32,
+            ),
+            (3, 1),
+        )
+        modes = LayerModeTable(
+            cell_xyz=np.asarray(((0, 0, 0),), dtype=np.int32),
+            mode_offset=np.asarray((0, 3), dtype=np.uint64),
+            normal_hypothesis=np.zeros(3, dtype=np.int8),
+            normal_xyz=np.tile((0.0, 0.0, 1.0), (3, 1)).astype(np.float32),
+            height=np.asarray((-8.0, 0.0, 8.0), dtype=np.float32),
+            covariance=covariance,
+            fiber_xyz=np.asarray(
+                ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                dtype=np.float32,
+            ),
+            fiber_angular_std_radians=np.full(
+                3, math.radians(2.0), dtype=np.float32
+            ),
+            confidence=np.full(3, 0.9, dtype=np.float32),
+            source_depth_voxels=np.asarray((-8.0, 0.0, 8.0), dtype=np.float32),
+            source_orientation_degrees=np.asarray((90.0, 0.0, 90.0), dtype=np.float32),
+            evidence_score=np.full(3, 0.9, dtype=np.float32),
+            material_probability=np.full(3, 0.8, dtype=np.float32),
+            effective_support=np.full(3, 8.0, dtype=np.float32),
+        )
+        fingerprints, statistics = build_patch_fingerprints(
+            patches,
+            {"x0000-y0000-z0000": modes},
+            RawAcusSettings(),
+        )
+        self.assertEqual(statistics["anchoredPatches"], 1)
+        self.assertEqual(int(fingerprints.anchor_mode_index[0]), 1)
+        self.assertEqual(int(fingerprints.context_mode_count[0]), 2)
+        for depth in (-8.0, 8.0):
+            index = int(np.argmin(np.abs(fingerprints.depth_offsets_voxels - depth)))
+            self.assertGreater(fingerprints.density[0, index], 0.5)
+            self.assertLess(fingerprints.orientation_moment[0, index], -0.5)
+
+    def test_stratigraphic_gate_requires_local_and_multicell_outliers(self) -> None:
+        records = []
+        for index in range(40):
+            local = 0.1
+            neighborhood = 0.1
+            if index in (37, 39):
+                local = 0.9
+            if index in (38, 39):
+                neighborhood = 0.9
+            records.append(
+                {
+                    "key": (index + 1, index + 101, 0, (index, 0, 0)),
+                    "local": {"status": "scored", "mismatch": local},
+                    "neighborhood": {
+                        "status": "scored",
+                        "mismatch": neighborhood,
+                    },
+                }
+            )
+        calibration = _calibrate_records(
+            records, StratigraphicContinuitySettings()
+        )
+        self.assertEqual(calibration["0"]["state"], "calibrated")
+        self.assertFalse(records[37]["rejected"])
+        self.assertFalse(records[38]["rejected"])
+        self.assertTrue(records[39]["rejected"])
 
     def test_axis_aligned_plane_clips_to_four_edge_loop(self) -> None:
         grid = GridSpec((2, 2, 2))

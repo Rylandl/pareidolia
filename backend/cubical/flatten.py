@@ -21,6 +21,9 @@ from .contracts import (
 )
 from .continuity import apply_join_continuity_refinement
 from .export import rgb_png
+from .stratigraphic_continuity import (
+    apply_stratigraphic_continuity_refinement,
+)
 from .tables import read_patch_shard
 
 
@@ -1378,6 +1381,7 @@ def _identity(
     maximum_pixels: int,
     maximum_chart_normal_deviation_degrees: float,
     join_refinement_root: Path | None,
+    stratigraphic_refinement_root: Path | None,
 ) -> dict[str, Any]:
     implementation_root = Path(__file__).resolve().parent
     payload: dict[str, Any] = {
@@ -1400,11 +1404,19 @@ def _identity(
             "joinRefinementRoot": (
                 str(join_refinement_root) if join_refinement_root is not None else None
             ),
+            "stratigraphicRefinementRoot": (
+                str(stratigraphic_refinement_root)
+                if stratigraphic_refinement_root is not None
+                else None
+            ),
         },
         "implementationSha256": {
             "flatten.py": sha256_file(implementation_root / "flatten.py"),
             "block.py": sha256_file(implementation_root / "block.py"),
             "continuity.py": sha256_file(implementation_root / "continuity.py"),
+            "stratigraphic_continuity.py": sha256_file(
+                implementation_root / "stratigraphic_continuity.py"
+            ),
             "geometry.py": sha256_file(implementation_root / "geometry.py"),
             "tables.py": sha256_file(implementation_root / "tables.py"),
             "export.py": sha256_file(implementation_root / "export.py"),
@@ -1415,6 +1427,16 @@ def _identity(
         payload["joinRefinementSha256"] = {
             "manifest": sha256_file(join_refinement_root / "refinement.json"),
             "table": sha256_file(join_refinement_root / "join-continuity-v1.npz"),
+        }
+    if stratigraphic_refinement_root is not None:
+        payload["stratigraphicRefinementSha256"] = {
+            "manifest": sha256_file(
+                stratigraphic_refinement_root / "stratigraphic-refinement.json"
+            ),
+            "table": sha256_file(
+                stratigraphic_refinement_root
+                / "join-stratigraphic-continuity-v1.npz"
+            ),
         }
     payload["identitySha256"] = canonical_json_hash(payload)
     return payload
@@ -1431,6 +1453,7 @@ def run_component_flattening(
     maximum_chart_normal_deviation_degrees: float = 40.0,
     leaf_shape_cells_xyz: tuple[int, int, int] = (4, 4, 3),
     join_refinement_root: str | Path | None = None,
+    stratigraphic_refinement_root: str | Path | None = None,
     force: bool = False,
     progress: Any | None = None,
 ) -> dict[str, Any]:
@@ -1453,6 +1476,11 @@ def run_component_flattening(
         if join_refinement_root is not None
         else None
     )
+    stratigraphic_root = (
+        Path(stratigraphic_refinement_root).resolve()
+        if stratigraphic_refinement_root is not None
+        else None
+    )
     identity = _identity(
         root,
         source,
@@ -1462,6 +1490,7 @@ def run_component_flattening(
         maximum_pixels,
         maximum_chart_normal_deviation_degrees,
         refinement_root,
+        stratigraphic_root,
     )
     identity_sha256 = str(identity["identitySha256"])
     manifest_path = output / "flattening.json"
@@ -1495,6 +1524,10 @@ def run_component_flattening(
     )
     if refinement_root is not None:
         block = apply_join_continuity_refinement(block, refinement_root)
+    if stratigraphic_root is not None:
+        block = apply_stratigraphic_continuity_refinement(
+            block, stratigraphic_root
+        )
     ordered_components = sorted(
         block.components, key=lambda value: (-len(value.patch_ids), value.component_id)
     )
@@ -1581,6 +1614,9 @@ def run_component_flattening(
         "inputRoot": str(root),
         "joinRefinementRoot": (
             str(refinement_root) if refinement_root is not None else None
+        ),
+        "stratigraphicRefinementRoot": (
+            str(stratigraphic_root) if stratigraphic_root is not None else None
         ),
         "directions": "all surface normals remain axial; depth montage sign is a chart gauge",
         "surfaceSampling": "exact piecewise-planar patches with one fixed component-wide depth offset",

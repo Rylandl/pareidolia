@@ -329,6 +329,79 @@ topological improvement. The unchanged large-component sizes are also an
 important result: local CT mismatch safely removes obvious discontinuities,
 but does not by itself establish ply identity.
 
+## Full-mode stratigraphic continuity
+
+A locally plausible face match can still jump to a nearby ply. The next stage
+therefore uses the complete pre-pruning Acus mode bank as context rather than
+loosening or retuning the geometric face matcher:
+
+```bash
+python3 -m backend.cubical refine-stratigraphic-continuity \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1 \
+  --mode-bank /mnt/t5/pareidolia/raw-acus-16x16x14-mode-bank-v2 \
+  --join-refinement /mnt/t5/pareidolia/raw-acus-16x16x14-join-continuity-final-v2 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-stratigraphic-continuity-final-v1
+```
+
+Every selected patch is first matched to its exact same-normal-family bank
+mode. The match is a provenance check, not another fit. On this slab all
+11,622 patches anchor successfully: height residual is exactly zero, maximum
+normal residual is 0.0231 degrees, and maximum unsigned-fiber residual is
+0.000006 degrees. Removing the anchor itself leaves 135,177 contextual modes,
+with a median of twelve per patch.
+
+Each contextual mode contributes a confidence-weighted kernel at its signed
+depth relative to the anchor plane. A second channel records whether its
+unsigned fiber is parallel or transverse to the anchor fiber. Normal signs are
+still not observations: the two axial normals are put into one pairwise gauge,
+which determines whether the depth sequence must reverse. Flipping both gauges
+leaves the comparison unchanged.
+
+The local comparison is repeated over graph-connected three-hop neighborhoods.
+For a tested face, the two neighborhoods are constrained to their respective
+spatial half-spaces and the tested join is removed, so evidence does not leak
+directly across the seam under test. At least three valid patches are required
+on each side. Density overlap uses the common physically observable depth
+interval; missing terminal modes outside that interval are not treated as
+disagreements.
+
+Scores are calibrated independently for the three face axes. A join is removed
+only when both its single-cell signature and its multi-cell signature exceed
+the four-robust-standard-deviation tail. Of 12,370 joins surviving the native
+CT pass, 12,287 have usable local signatures, 7,953 have sufficient multi-cell
+context, and 7,906 enter joint calibration. Twenty-four joins fail both gates.
+They split twelve components while retaining 12,346 joins. The largest
+component remains 201 patches. The second component loses one independently
+inconsistent three-patch appendage, changing from 194 to 191; the other large
+checkpoint components retain their patch counts. The complete fingerprint and
+join pass takes 25.2 seconds on the pilot slab.
+
+The stage is deliberately selective rather than a visual cleanup heuristic.
+The still-questionable rank-7 geometry is unchanged, so this result does not
+claim that every remaining component follows one physical ply. It says that
+the 24 removed joins have both an anomalous local layer neighborhood and an
+anomalous larger surrounding neighborhood under the same full-Acus evidence.
+The native-CT stage remains the independent appearance check.
+
+The refined connectivity composes with the existing visual checkpoint:
+
+```bash
+python3 -m backend.cubical flatten-components \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1 \
+  --join-refinement /mnt/t5/pareidolia/raw-acus-16x16x14-join-continuity-final-v2 \
+  --stratigraphic-refinement /mnt/t5/pareidolia/raw-acus-16x16x14-stratigraphic-continuity-final-v1 \
+  --component-ranks 1 2 3 7 \
+  --depth-min -12 --depth-max 12 --depth-step 1 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-flattened-stratigraphic-final-v1
+```
+
+The fingerprint artifact is a fixed-width structure of arrays and the
+neighborhood radius is bounded. Construction is linear in selected patches,
+retained local modes, and joins, so this contributes directly to the scalable
+pipeline. A volume scheduler can shard fingerprints by owned cells and score
+faces after loading only the bounded graph halo; no native-CT or Acus rerun is
+required.
+
 The raw and local-inference stages are already independently sharded. The
 selected-patch assembler is hierarchical. Configuration selection currently
 runs one window at a time; full-slab operation should schedule overlapping

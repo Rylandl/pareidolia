@@ -95,6 +95,15 @@ intensity-mismatch outliers split connectivity; noisier texture-angle and
 normal-profile-shift measurements remain auditable diagnostics. Its compact
 table can be supplied to `flatten-components` with `--join-refinement`.
 
+`refine-stratigraphic-continuity` adds the larger-context layer test. It
+anchors every selected patch back to its exact same-family mode in the complete
+Acus bank, compares the surrounding depth/fiber distribution across a join,
+and repeats that comparison after averaging graph-connected three-hop
+neighborhoods on the two spatial sides of the face. Connectivity changes only
+when both scales are robust per-axis outer-tail outliers. The resulting table
+can be composed after native CT with the `--stratigraphic-refinement` option to
+`flatten-components`; the selected patch evidence remains immutable.
+
 `flatten-components` is the corresponding visual checkpoint. It unfolds a
 mixed set of reconstructed components into bounded-normal atlases and samples
 the native CT at one component-wide sequence of fixed depth offsets. Cyan marks

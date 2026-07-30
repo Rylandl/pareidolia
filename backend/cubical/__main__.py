@@ -23,6 +23,10 @@ from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
 from .selection import configuration_options
+from .stratigraphic_continuity import (
+    StratigraphicContinuitySettings,
+    run_stratigraphic_continuity_refinement,
+)
 from .stratigraphy import read_configuration_artifact
 from .synthetic import SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, read_patch_shard, write_patch_shard
@@ -524,6 +528,7 @@ def _flatten_components(args: argparse.Namespace) -> None:
         ),
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
         join_refinement_root=args.join_refinement,
+        stratigraphic_refinement_root=args.stratigraphic_refinement,
         force=args.force,
         progress=progress,
     )
@@ -562,6 +567,53 @@ def _refine_join_continuity(args: argparse.Namespace) -> None:
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
         force=args.force,
         progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _refine_stratigraphic_continuity(args: argparse.Namespace) -> None:
+    settings = StratigraphicContinuitySettings(
+        neighborhood_radius_hops=args.neighborhood_radius,
+        minimum_side_patches=args.minimum_side_patches,
+        minimum_context_modes=args.minimum_context_modes,
+        minimum_coverage_fraction=args.minimum_coverage_fraction,
+        minimum_common_depth_span_voxels=args.minimum_common_depth_span,
+        outlier_standard_deviations=args.outlier_standard_deviations,
+        minimum_log_scale=args.minimum_log_scale,
+    )
+    last_fingerprint_report = -1
+    last_join_report = -1
+
+    def fingerprint_progress(completed: int, total: int) -> None:
+        nonlocal last_fingerprint_report
+        bucket = completed // 1000
+        if bucket != last_fingerprint_report or completed == total:
+            last_fingerprint_report = bucket
+            print(
+                f"stratigraphic fingerprints {completed:,}/{total:,}",
+                flush=True,
+            )
+
+    def join_progress(completed: int, total: int) -> None:
+        nonlocal last_join_report
+        bucket = completed // 500
+        if bucket != last_join_report or completed == total:
+            last_join_report = bucket
+            print(
+                f"stratigraphic joins {completed:,}/{total:,}",
+                flush=True,
+            )
+
+    summary = run_stratigraphic_continuity_refinement(
+        args.root,
+        args.mode_bank,
+        args.output,
+        settings=settings,
+        join_refinement_root=args.join_refinement,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        force=args.force,
+        fingerprint_progress=fingerprint_progress,
+        join_progress=join_progress,
     )
     print(json.dumps(summary, indent=2))
 
@@ -885,6 +937,7 @@ def main() -> None:
         "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
     )
     flatten_components.add_argument("--join-refinement", type=Path)
+    flatten_components.add_argument("--stratigraphic-refinement", type=Path)
     flatten_components.add_argument("--force", action="store_true")
     flatten_components.set_defaults(handler=_flatten_components)
     refine_continuity = subparsers.add_parser(
@@ -921,6 +974,47 @@ def main() -> None:
     )
     refine_continuity.add_argument("--force", action="store_true")
     refine_continuity.set_defaults(handler=_refine_join_continuity)
+    refine_stratigraphy = subparsers.add_parser(
+        "refine-stratigraphic-continuity",
+        description=(
+            "Compare full-mode depth/fiber fingerprints across each join and "
+            "split only disagreements repeated over multi-cell neighborhoods."
+        ),
+    )
+    refine_stratigraphy.add_argument("--root", type=Path, required=True)
+    refine_stratigraphy.add_argument("--mode-bank", type=Path, required=True)
+    refine_stratigraphy.add_argument("--output", type=Path, required=True)
+    refine_stratigraphy.add_argument(
+        "--join-refinement",
+        type=Path,
+        help="optional native-CT join refinement to apply before this stage",
+    )
+    refine_stratigraphy.add_argument(
+        "--neighborhood-radius", type=int, default=3
+    )
+    refine_stratigraphy.add_argument(
+        "--minimum-side-patches", type=int, default=3
+    )
+    refine_stratigraphy.add_argument(
+        "--minimum-context-modes", type=int, default=2
+    )
+    refine_stratigraphy.add_argument(
+        "--minimum-coverage-fraction", type=float, default=0.5
+    )
+    refine_stratigraphy.add_argument(
+        "--minimum-common-depth-span", type=float, default=8.0
+    )
+    refine_stratigraphy.add_argument(
+        "--outlier-standard-deviations", type=float, default=4.0
+    )
+    refine_stratigraphy.add_argument(
+        "--minimum-log-scale", type=float, default=0.12
+    )
+    refine_stratigraphy.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    refine_stratigraphy.add_argument("--force", action="store_true")
+    refine_stratigraphy.set_defaults(handler=_refine_stratigraphic_continuity)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(
