@@ -165,6 +165,18 @@ full-context reconstruction by physical geometry, retained joins, and induced
 component partitions. The unsplit result is explicitly a consistency
 reference rather than ground truth.
 
+The cluster solve remains compact by design and therefore is not itself a full
+surface artifact. `materialize-boundary-cluster` is the lossless expansion
+boundary. It takes the selected mutable patches and joins from the cluster,
+then restores every child patch and retained join whose endpoints lie outside
+all participating internal bands. Replaying the complete declared graph through
+the ordinary collision, crossing, and orientation selector must reproduce the
+cluster's certified component count exactly; any rejection is an artifact error,
+not permission to silently alter connectivity. The output owns a standard
+`selected-patches-v1` shard, a hashed `surface-graph-v1` artifact, and per-patch
+source provenance. That complete graph is suitable for measurement, flattening,
+and export into the next composition level.
+
 For a rectangular `X x Y x Z` block and shell depth `d`, selected shell state
 scales with
 `XYZ - (X - 2d)(Y - 2d)(Z - 2d)`, or `O(dN^2)` for an `N^3` block. Component

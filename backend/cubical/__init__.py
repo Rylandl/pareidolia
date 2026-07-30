@@ -13,7 +13,9 @@ from .block import (
     assemble_surface_block,
     merge_surface_blocks,
     rebuild_surface_block,
+    surface_block_from_retained_joins,
 )
+from .cluster_materialization import run_cluster_materialization
 from .continuity import (
     JoinContinuitySettings,
     apply_join_continuity_refinement,
@@ -71,6 +73,11 @@ from .stratigraphy import ConfigurationTable, LayerModeTable
 from .topology import GridEdge, GridFace, GridSpec
 from .synthetic import SyntheticScene, SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, read_patch_shard, write_patch_shard
+from .surface_graph import (
+    component_statistics,
+    read_surface_graph,
+    write_surface_graph,
+)
 
 __all__ = [
     "ClippedPatch",
@@ -124,6 +131,7 @@ __all__ = [
     "load_acus_flake_window",
     "merge_surface_blocks",
     "rebuild_surface_block",
+    "surface_block_from_retained_joins",
     "optimize_configurations",
     "rasterize_chart",
     "extraction_tiles_for_shard",
@@ -136,6 +144,10 @@ __all__ = [
     "score_join_continuity",
     "apply_join_continuity_refinement",
     "run_component_flattening",
+    "run_cluster_materialization",
+    "component_statistics",
+    "read_surface_graph",
+    "write_surface_graph",
     "sample_depth_stack",
     "tangent_atlas_chart",
 ]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -667,6 +667,51 @@ def rebuild_surface_block(
         block.patches,
         retained,
     )
+
+
+def surface_block_from_retained_joins(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+    retained_joins: Iterable[TraceMatch],
+) -> SurfaceBlock:
+    """Materialize exact welded geometry from a complete retained graph.
+
+    Unlike :func:`rebuild_surface_block`, this boundary is allowed to introduce
+    joins because its input is a serialized graph rather than a refinement of
+    an already assembled block.  Every declared join is treated as immutable
+    and is replayed through the same collision, crossing-topology, and
+    orientability selector used during inference.  A rejected declaration is
+    therefore a corrupt or incomplete graph artifact, never a silent change in
+    connectivity.
+    """
+
+    joins = tuple(retained_joins)
+    keys = frozenset(
+        (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        for value in joins
+    )
+    if len(keys) != len(joins):
+        raise ValueError("retained surface graph contains duplicate joins")
+    block = _summarize_block(
+        grid,
+        bounds,
+        patches,
+        joins,
+        fixed_join_keys=keys,
+    )
+    if len(block.joins) != len(joins):
+        reasons = Counter(value.reason for value in block.deferred_joins)
+        raise ValueError(
+            "retained surface graph violates global topology constraints: "
+            f"{dict(sorted(reasons.items()))}"
+        )
+    return block
 
 
 def extend_surface_block_joins(

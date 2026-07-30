@@ -137,6 +137,18 @@ component membership is not identical: connectivity precision/recall on the
 4,069 geometrically mappable patches is about 90.8%, which remains a useful
 target for the next block-level refinement.
 
+`materialize-boundary-cluster` now expands that bounded solve into one complete,
+hashed retained graph without rerunning inference: joint mutable bands replace
+the corresponding child bands, while the certified child interiors contribute
+their original geometry and joins. The real four-child result contains 11,723
+patches and 13,230 joins in 977 fragments. Its largest fragment is 271 cells,
+up from 161 in any independent child; 17 fragments contain at least 128 cells
+versus one before composition, and 153 fragments cross a child boundary. The
+size distribution is also close to the unsplit consistency reference (largest
+278 cells, with the same 17 fragments at or above 128). Component flattening
+automatically consumes this retained graph and emits both diagnostic grid
+overlays and clean native-CT PNGs.
+
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.
 `refine-join-continuity` then scores every retained face using fixed-depth

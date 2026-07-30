@@ -25,6 +25,7 @@ from .export import rgb_png
 from .stratigraphic_continuity import (
     apply_stratigraphic_continuity_refinement,
 )
+from .surface_graph import read_surface_graph
 from .tables import read_patch_shard
 
 
@@ -1371,6 +1372,7 @@ def _identity(
     pixel_step_voxels: float,
     maximum_pixels: int,
     maximum_chart_normal_deviation_degrees: float,
+    surface_graph_root: Path | None,
     join_refinement_root: Path | None,
     stratigraphic_refinement_root: Path | None,
 ) -> dict[str, Any]:
@@ -1392,6 +1394,9 @@ def _identity(
             ),
             "surface": "exact piecewise-planar cubical patches",
             "depthAlignment": "one fixed offset shared by the complete component",
+            "surfaceGraphRoot": (
+                str(surface_graph_root) if surface_graph_root is not None else None
+            ),
             "joinRefinementRoot": (
                 str(join_refinement_root) if join_refinement_root is not None else None
             ),
@@ -1411,9 +1416,17 @@ def _identity(
             "geometry.py": sha256_file(implementation_root / "geometry.py"),
             "tables.py": sha256_file(implementation_root / "tables.py"),
             "export.py": sha256_file(implementation_root / "export.py"),
+            "surface_graph.py": sha256_file(
+                implementation_root / "surface_graph.py"
+            ),
             "rectify.py": sha256_file(implementation_root.parent / "rectify.py"),
         },
     }
+    if surface_graph_root is not None:
+        payload["surfaceGraphSha256"] = {
+            "manifest": sha256_file(surface_graph_root / "surface-graph-v1.json"),
+            "data": sha256_file(surface_graph_root / "surface-graph-v1.npz"),
+        }
     if join_refinement_root is not None:
         payload["joinRefinementSha256"] = {
             "manifest": sha256_file(join_refinement_root / "refinement.json"),
@@ -1443,6 +1456,7 @@ def run_component_flattening(
     maximum_pixels: int = 768,
     maximum_chart_normal_deviation_degrees: float = 40.0,
     leaf_shape_cells_xyz: tuple[int, int, int] = (4, 4, 3),
+    surface_graph_root: str | Path | None = None,
     join_refinement_root: str | Path | None = None,
     stratigraphic_refinement_root: str | Path | None = None,
     force: bool = False,
@@ -1472,6 +1486,13 @@ def run_component_flattening(
         if stratigraphic_refinement_root is not None
         else None
     )
+    graph_root = (
+        Path(surface_graph_root).resolve()
+        if surface_graph_root is not None
+        else root
+        if (root / "surface-graph-v1.json").is_file()
+        else None
+    )
     identity = _identity(
         root,
         source,
@@ -1480,6 +1501,7 @@ def run_component_flattening(
         pixel_step_voxels,
         maximum_pixels,
         maximum_chart_normal_deviation_degrees,
+        graph_root,
         refinement_root,
         stratigraphic_root,
     )
@@ -1507,11 +1529,15 @@ def run_component_flattening(
     atomic_json(manifest_path, manifest)
 
     table = read_patch_shard(root / "selected-patches-v1", verify=True)
-    block = assemble_surface_hierarchy(
-        table.grid,
-        BlockBounds((0, 0, 0), table.grid.shape_cells_xyz),
-        table.to_patches(),
-        maximum_leaf_shape_cells_xyz=leaf_shape_cells_xyz,
+    block = (
+        read_surface_graph(graph_root, table=table, verify=True)
+        if graph_root is not None
+        else assemble_surface_hierarchy(
+            table.grid,
+            BlockBounds((0, 0, 0), table.grid.shape_cells_xyz),
+            table.to_patches(),
+            maximum_leaf_shape_cells_xyz=leaf_shape_cells_xyz,
+        )
     )
     if refinement_root is not None:
         block = apply_join_continuity_refinement(block, refinement_root)
@@ -1529,6 +1555,7 @@ def run_component_flattening(
 
     records = []
     overview_values: list[tuple[int, int, int, np.ndarray]] = []
+    clean_overview_values: list[tuple[int, int, int, np.ndarray]] = []
     manifest["state"] = "flattening"
     atomic_json(manifest_path, manifest)
     for index, rank in enumerate(ranks, start=1):
@@ -1555,6 +1582,7 @@ def run_component_flattening(
         limits = _contrast_limits(stack, raster.mask)
         center_index = int(np.argmin(np.abs(offsets)))
         center_gray = _contrast_plane(stack[center_index], raster.mask, limits)
+        center_raw = np.repeat(center_gray[..., None], 3, axis=2)
         center = _overlay(center_gray, raster, include_boundaries=False)
         center_cells = _overlay(center_gray, raster, include_boundaries=True)
         montage = _depth_montage(stack, raster, offsets, limits)
@@ -1563,6 +1591,7 @@ def run_component_flattening(
         component_root = output / f"rank-{rank:03d}-component-{component.component_id}"
         component_root.mkdir(parents=True, exist_ok=True)
         _write_stack(component_root / "depth-stack-v1.npz", stack, offsets, raster, mesh, chart)
+        _write_bytes(component_root / "center-raw.png", rgb_png(center_raw))
         _write_bytes(component_root / "center.png", rgb_png(center))
         _write_bytes(component_root / "center-with-cells.png", rgb_png(center_cells))
         _write_bytes(component_root / "depth-montage.png", rgb_png(montage))
@@ -1579,6 +1608,9 @@ def run_component_flattening(
             "crossingSelection": crossing_selection,
             "artifacts": {
                 "stack": str((component_root / "depth-stack-v1.npz").relative_to(output)),
+                "centerRaw": str(
+                    (component_root / "center-raw.png").relative_to(output)
+                ),
                 "center": str((component_root / "center.png").relative_to(output)),
                 "centerWithCells": str(
                     (component_root / "center-with-cells.png").relative_to(output)
@@ -1596,13 +1628,19 @@ def run_component_flattening(
         overview_values.append(
             (rank, component.component_id, len(component.patch_ids), center_cells)
         )
+        clean_overview_values.append(
+            (rank, component.component_id, len(component.patch_ids), center_raw)
+        )
     overview = _overview(overview_values)
+    clean_overview = _overview(clean_overview_values)
     _write_bytes(output / "overview.png", rgb_png(overview))
+    _write_bytes(output / "overview-clean.png", rgb_png(clean_overview))
     summary = {
         "schema": "pareidolia.cubical-component-flattening-summary",
         "version": 1,
         "identitySha256": identity_sha256,
         "inputRoot": str(root),
+        "surfaceGraphRoot": str(graph_root) if graph_root is not None else None,
         "joinRefinementRoot": (
             str(refinement_root) if refinement_root is not None else None
         ),
@@ -1613,7 +1651,10 @@ def run_component_flattening(
         "surfaceSampling": "exact piecewise-planar patches with one fixed component-wide depth offset",
         "components": records,
         "timingSeconds": {"total": round(time.monotonic() - started, 6)},
-        "artifacts": {"overview": "overview.png"},
+        "artifacts": {
+            "overview": "overview.png",
+            "cleanOverview": "overview-clean.png",
+        },
     }
     atomic_json(output / "summary.json", summary)
     manifest["state"] = "complete"

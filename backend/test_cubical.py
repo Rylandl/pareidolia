@@ -29,6 +29,7 @@ from backend.cubical.boundary_merge import (
 )
 from backend.cubical.boundary_reselection import run_boundary_band_reselection
 from backend.cubical.cluster_reselection import run_boundary_cluster_reselection
+from backend.cubical.cluster_materialization import run_cluster_materialization
 from backend.cubical.boundary_topology import (
     build_frozen_face_states,
     build_frozen_region_states,
@@ -77,6 +78,7 @@ from backend.cubical.saturation_selection import (
     reweight_saturation_candidates,
 )
 from backend.cubical.sheet_packets import run_dual_axis_packet_connectivity
+from backend.cubical.surface_graph import read_surface_graph
 from backend.cubical.selection import ConfigurationOption, optimize_configurations
 from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
@@ -1817,6 +1819,13 @@ class CubicalGeometryTests(unittest.TestCase):
             summary = run_boundary_cluster_reselection(boundaries, output)
             with np.load(output / "cluster-reselection-v1.npz") as values:
                 combined_cells = np.asarray(values["selectedCellCombinedXYZ"])
+            materialized_root = root / "cluster-materialized"
+            materialized = run_cluster_materialization(
+                output,
+                materialized_root,
+                boundary_roots=boundaries,
+            )
+            materialized_block = read_surface_graph(materialized_root)
             self._write_analytic_candidate_boundary(
                 root / "full",
                 GridSpec((8, 8, 4)),
@@ -1843,6 +1852,22 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(statistics["anchorPatches"], 80)
         self.assertEqual(statistics["recomposedComponents"], 4)
         self.assertEqual(len({tuple(value) for value in combined_cells}), 112)
+        self.assertEqual(len(materialized_block.patches), 256)
+        self.assertEqual(len(materialized_block.joins), 448)
+        self.assertEqual(len(materialized_block.components), 4)
+        self.assertEqual(
+            materialized["independentChildBaseline"][
+                "largestOccupiedCellCount"
+            ],
+            16,
+        )
+        self.assertEqual(
+            materialized["materializedCluster"]["largestOccupiedCellCount"],
+            64,
+        )
+        self.assertEqual(
+            materialized["growth"]["componentsSpanningMultipleChildren"], 4
+        )
         self.assertEqual(
             reference["configurationAgreement"]["allMutable"]["clusterExact"],
             112,

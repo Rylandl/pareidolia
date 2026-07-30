@@ -23,6 +23,7 @@ from .boundary_reselection import (
     run_boundary_band_reselection,
 )
 from .cluster_reselection import run_boundary_cluster_reselection
+from .cluster_materialization import run_cluster_materialization
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
@@ -557,10 +558,21 @@ def _flatten_components(args: argparse.Namespace) -> None:
             args.maximum_chart_normal_deviation
         ),
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        surface_graph_root=args.surface_graph,
         join_refinement_root=args.join_refinement,
         stratigraphic_refinement_root=args.stratigraphic_refinement,
         force=args.force,
         progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _materialize_boundary_cluster(args: argparse.Namespace) -> None:
+    summary = run_cluster_materialization(
+        args.cluster,
+        args.output,
+        boundary_roots=args.boundary,
+        force=args.force,
     )
     print(json.dumps(summary, indent=2))
 
@@ -1242,6 +1254,14 @@ def main() -> None:
     flatten_components.add_argument(
         "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
     )
+    flatten_components.add_argument(
+        "--surface-graph",
+        type=Path,
+        help=(
+            "complete retained surface-graph root; materialized inputs are "
+            "detected automatically"
+        ),
+    )
     flatten_components.add_argument("--join-refinement", type=Path)
     flatten_components.add_argument("--stratigraphic-refinement", type=Path)
     flatten_components.add_argument("--force", action="store_true")
@@ -1536,6 +1556,26 @@ def main() -> None:
     cluster_reselection.add_argument("--maximum-sweeps", type=int, default=12)
     cluster_reselection.add_argument("--force", action="store_true")
     cluster_reselection.set_defaults(handler=_boundary_cluster_reselection)
+    cluster_materialization = subparsers.add_parser(
+        "materialize-boundary-cluster",
+        description=(
+            "Recompose a joint cluster solution with its certified immutable "
+            "child interiors into one complete retained surface graph."
+        ),
+    )
+    cluster_materialization.add_argument("--cluster", type=Path, required=True)
+    cluster_materialization.add_argument("--output", type=Path, required=True)
+    cluster_materialization.add_argument(
+        "--boundary",
+        action="append",
+        type=Path,
+        help=(
+            "optional relocated boundary root; repeat once per child and match "
+            "by immutable boundary identity"
+        ),
+    )
+    cluster_materialization.add_argument("--force", action="store_true")
+    cluster_materialization.set_defaults(handler=_materialize_boundary_cluster)
     selected_subblock = subparsers.add_parser(
         "extract-selected-subblock",
         description=(

@@ -570,6 +570,19 @@ python3 -m backend.cubical reselect-boundary-cluster \
   --boundary /path/to/x0-y1-boundary \
   --boundary /path/to/x1-y1-boundary \
   --output /path/to/cluster-reselection
+
+python3 -m backend.cubical materialize-boundary-cluster \
+  --cluster /path/to/cluster-reselection \
+  --boundary /path/to/x0-y0-boundary \
+  --boundary /path/to/x1-y0-boundary \
+  --boundary /path/to/x0-y1-boundary \
+  --boundary /path/to/x1-y1-boundary \
+  --output /path/to/materialized-cluster
+
+python3 -m backend.cubical flatten-components \
+  --root /path/to/materialized-cluster \
+  --component-ranks 1 2 3 4 5 6 7 8 \
+  --output /path/to/materialized-cluster-flattened
 ```
 
 The exporter does not copy the block interior. It writes the shell's selected
@@ -602,6 +615,16 @@ equal child blocks. It takes the union of their participating face bands,
 adds one immutable cut shell, and runs one sparse configuration and topology
 solve. Every corner or edge cell is represented once, so no later union of
 incompatible pairwise decisions is needed.
+
+The materializer does not perform another configuration or topology search.
+It replaces each child's internal mutable bands with the cluster result and
+copies only complementary immutable child geometry and joins. It writes a
+complete retained graph and verifies that direct reconstruction has the
+cluster-certified component count. `flatten-components` detects that graph
+automatically instead of assembling a new strict graph from the patch table.
+Each flattened component includes `center-raw.png`, an overlap-diagnostic
+`center.png`, a cell-boundary overlay, depth products, and clean and diagnostic
+ranked overview PNGs.
 
 On the full 16 x 16 x 14 result, the two-cell shell contains 2,144 of 3,584
 cells, 7,006 selected patches, 24,131 physical configurations with 52,556
@@ -680,6 +703,17 @@ balance is six toward and zero away. The 2,426 common mappable joins give
 is not identical: co-component precision is 90.74%, recall is 90.88%, and
 Jaccard is 83.17%. These are explicit remaining block-level targets rather
 than evidence for declaring the fragments solved.
+
+Complete materialization makes the fragment growth directly measurable. The
+four independent children contain 1,185 components, with a largest fragment of
+161 occupied cells and only one fragment at or above 128 cells. The joint graph
+contains 977 components, a 271-cell largest fragment, and 17 fragments at or
+above 128 cells. It has 153 multi-child components: 124 span two children, 18
+span three, and 11 span all four. The unsplit consistency reference has a
+278-cell largest fragment and the same count of 17 at or above 128 cells. This
+close size distribution does not imply identical membership, but confirms that
+the bounded solve produces genuinely larger physical fragments rather than only
+changing component labels.
 
 ```bash
 python3 -m backend.cubical audit-multiseam \
