@@ -108,6 +108,18 @@ needle-score decile. Details, commands, threshold sensitivity, and artifact
 contracts are in
 [`docs/raw-acus-cubical-pipeline.md`](docs/raw-acus-cubical-pipeline.md).
 
+Block handoff is now concrete rather than a full-volume reload. A default
+two-cell `export-boundary-band` shell carries selected polygons, retained
+physical alternatives, packet ownership, occupied-cell collision certificates,
+and welded edge/vertex identities. `merge-boundary-bands` rebases two
+world-adjacent local grids and establishes a topology-safe component forest
+without changing either interior. On a deterministic X=8 split of the current
+16 × 16 × 14 result, it recovers all 195 full-graph seam joins among its
+supported alternatives and finishes with 985 components versus 977 unsplit.
+All 98 child/full internal-join differences lie inside the serialized two-cell
+band, with none deeper; this isolates joint narrow-band reselection as the next
+merge step rather than asking global context to repair local inference.
+
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.
 `refine-join-continuity` then scores every retained face using fixed-depth

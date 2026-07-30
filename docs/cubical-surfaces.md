@@ -83,8 +83,12 @@ ancestor block summaries.
 3. Shared-face trace sequences are aligned with uncertainty-normalized costs.
 4. Accepted joins weld global-edge crossings and form polygonal components.
 5. Regular blocks cache internal components and exterior trace graphs.
-6. Neighboring blocks are composed using only their common boundary traces,
-   followed by a narrow-band continuous relaxation.
+6. A completed block serializes a narrow outer band, immutable interior
+   component occupancy, crossing-feature certificates, exterior traces, and
+   retained physical alternatives. World-adjacent blocks can then establish a
+   topology-safe component forest from their shared face without reopening the
+   interior. Joint reselection inside that serialized band is the next merge
+   refinement; it is not yet implied by the conservative bridge artifact.
 7. Papyrus-specific sheet packets add thickness, paired-ply, fiber, and air-gap
    factors without changing the geometric representation.
 
@@ -94,6 +98,52 @@ parallel-to-orthogonal fiber-frame continuations, and reruns the same global
 collision, crossing, and orientability checks for additions. The underlying
 patch shard and strict graph remain immutable. Thickness and air-gap factors
 remain later packet refinements rather than implicit properties of this graph.
+
+## Boundary-band composition
+
+`export-boundary-band` is the block-local handoff. The default two-cell shell
+contains selected clipped patches, packet-component ownership, joins incident
+to the shell, exact exterior trace endpoints, and the physical configuration
+bank for every shell cell. It also stores two compact certificates derived
+from the immutable interior:
+
+- every boundary-touching component's complete occupied-cell set, so a
+  transitive merge cannot silently put two layers from one cell into one
+  component; and
+- the existing welded edge-or-vertex class of every exterior trace endpoint,
+  so a seam cannot introduce an impossible crossing cycle.
+
+Component and patch IDs are namespaced by input during composition. Blocks are
+located by their world-space grid origins, not by assuming their local integer
+coordinates or IDs are globally unique. Parallel-fiber seam matching uses the
+ordinary strict policy. Orthogonal-fiber candidates are a separate packet
+addition and alone receive the configured 15-degree normal and fiber-frame
+caps.
+
+`merge-boundary-bands` aligns complete trace sequences on each shared unit
+face. It serializes all supported alternatives and retains one representative
+per component pair as a cell-collision-safe, crossing-feature-safe forest.
+The forest is automatically orientable; redundant matches remain evidence
+rather than being promoted to unconstrained topology cycles. Neither input's
+interior geometry or configuration selection is changed.
+
+For a rectangular `X x Y x Z` block and shell depth `d`, selected shell state
+scales with
+`XYZ - (X - 2d)(Y - 2d)(Z - 2d)`, or `O(dN^2)` for an `N^3` block. Component
+occupancy certificates may reference deeper cells, but they contain integer
+cell identities rather than voxels or patch geometry.
+
+The deterministic real-block split audit provides a regression target for the
+contract. Splitting the current 16 x 16 x 14 selected result at X=8,
+independently rebuilding the two child packet graphs, and recomposing their
+two-cell bands recovers all 195 retained full-block seam joins among 239
+supported seam alternatives. The conservative forest retains 74 bridges, 70
+of which are exact full-graph joins, and yields 985 components versus 977 in
+the unsplit graph. All 98 child/full internal-join disagreements are confined
+to the serialized band: 90 lie in the seam-adjacent layer, eight in the next
+layer, and zero deeper. This both justifies the current two-cell default and
+isolates the remaining eight-component difference as narrow-band reselection,
+not missing global context.
 
 The geometry stages are validated independently on analytic surfaces. The
 native-CT implementation and its measured pilot are documented in

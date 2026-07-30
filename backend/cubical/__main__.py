@@ -10,6 +10,9 @@ import numpy as np
 
 from .acus_adapter import AcusAdapterSettings, load_acus_flake_window
 from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarchy
+from .boundary_audit import run_boundary_split_audit
+from .boundary_band import BoundaryBandSettings, run_boundary_band_export
+from .boundary_merge import run_boundary_band_merge
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
@@ -41,6 +44,7 @@ from .stratigraphic_continuity import (
     StratigraphicContinuitySettings,
     run_stratigraphic_continuity_refinement,
 )
+from .subblock import extract_selected_patch_subblock
 from .stratigraphy import read_configuration_artifact
 from .synthetic import SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, read_patch_shard, write_patch_shard
@@ -771,6 +775,52 @@ def _dual_axis_packets(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _boundary_band(args: argparse.Namespace) -> None:
+    summary = run_boundary_band_export(
+        args.root,
+        args.output,
+        packet_root=args.packet_root,
+        candidate_root=args.candidate_root,
+        settings=BoundaryBandSettings(
+            depth_cells=args.depth_cells,
+            leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _boundary_merge(args: argparse.Namespace) -> None:
+    summary = run_boundary_band_merge(
+        args.first,
+        args.second,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _selected_subblock(args: argparse.Namespace) -> None:
+    summary = extract_selected_patch_subblock(
+        args.root,
+        args.output,
+        start_cell_xyz=tuple(args.start),
+        stop_cell_xyz_exclusive=tuple(args.stop),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _boundary_split_audit(args: argparse.Namespace) -> None:
+    summary = run_boundary_split_audit(
+        args.full_packet_root,
+        args.merge_root,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _gap_repair_search(args: argparse.Namespace) -> None:
     root = Path(args.root)
     pipeline_manifest = json.loads((root / "pipeline.json").read_text())
@@ -1313,6 +1363,60 @@ def main() -> None:
     )
     packet_connectivity.add_argument("--force", action="store_true")
     packet_connectivity.set_defaults(handler=_dual_axis_packets)
+    boundary_band = subparsers.add_parser(
+        "export-boundary-band",
+        description=(
+            "Serialize bounded outer-cell geometry, graph ownership, exterior "
+            "traces, and physical alternatives for adjacent-block composition."
+        ),
+    )
+    boundary_band.add_argument("--root", type=Path, required=True)
+    boundary_band.add_argument("--output", type=Path, required=True)
+    boundary_band.add_argument("--packet-root", type=Path)
+    boundary_band.add_argument("--candidate-root", type=Path)
+    boundary_band.add_argument("--depth-cells", type=int, default=2)
+    boundary_band.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    boundary_band.add_argument("--force", action="store_true")
+    boundary_band.set_defaults(handler=_boundary_band)
+    boundary_merge = subparsers.add_parser(
+        "merge-boundary-bands",
+        description=(
+            "Compose two adjacent boundary artifacts into collision-safe, "
+            "crossing-safe component bridges without reopening either interior."
+        ),
+    )
+    boundary_merge.add_argument("--first", type=Path, required=True)
+    boundary_merge.add_argument("--second", type=Path, required=True)
+    boundary_merge.add_argument("--output", type=Path, required=True)
+    boundary_merge.add_argument("--force", action="store_true")
+    boundary_merge.set_defaults(handler=_boundary_merge)
+    selected_subblock = subparsers.add_parser(
+        "extract-selected-subblock",
+        description=(
+            "Rebase a selected-patch subset for deterministic block-composition "
+            "audits; this does not replace independent raw-CT inference."
+        ),
+    )
+    selected_subblock.add_argument("--root", type=Path, required=True)
+    selected_subblock.add_argument("--output", type=Path, required=True)
+    selected_subblock.add_argument("--start", nargs=3, type=int, required=True)
+    selected_subblock.add_argument("--stop", nargs=3, type=int, required=True)
+    selected_subblock.add_argument("--force", action="store_true")
+    selected_subblock.set_defaults(handler=_selected_subblock)
+    split_audit = subparsers.add_parser(
+        "audit-boundary-split",
+        description=(
+            "Compare a deterministic split/recompose seam with the retained "
+            "joins in its unsplit full-block packet graph."
+        ),
+    )
+    split_audit.add_argument("--full-packet-root", type=Path, required=True)
+    split_audit.add_argument("--merge-root", type=Path, required=True)
+    split_audit.add_argument("--output", type=Path, required=True)
+    split_audit.add_argument("--force", action="store_true")
+    split_audit.set_defaults(handler=_boundary_split_audit)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

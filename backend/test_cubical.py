@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import tempfile
 import unittest
@@ -16,6 +17,14 @@ from backend.cubical.block import (
     extend_surface_block_joins,
     merge_surface_blocks,
     rebuild_surface_block,
+)
+from backend.cubical.boundary_band import (
+    BoundaryBandSettings,
+    run_boundary_band_export,
+)
+from backend.cubical.boundary_merge import (
+    _ordered_packet_alignment,
+    run_boundary_band_merge,
 )
 from backend.cubical.continuity import score_join_continuity
 from backend.cubical.contextual_growth import (
@@ -41,7 +50,7 @@ from backend.cubical.flatten import (
     sample_depth_stack,
     tangent_atlas_chart,
 )
-from backend.cubical.contracts import RawAcusSettings, VolumeSource
+from backend.cubical.contracts import RawAcusSettings, VolumeSource, sha256_file
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
 from backend.cubical.saturation import classify_cell_structural_evidence
 from backend.cubical.saturation_reselection import (
@@ -59,6 +68,7 @@ from backend.cubical.stratigraphic_continuity import (
     score_patch_fingerprints,
 )
 from backend.cubical.stratigraphy import ConfigurationTable, LayerModeTable
+from backend.cubical.subblock import extract_selected_patch_subblock
 from backend.cubical.topology import GridSpec, cell_edges, cell_face
 from backend.cubical.tables import PatchTable, read_patch_shard, write_patch_shard
 from backend.cubical.synthetic import (
@@ -1184,6 +1194,399 @@ class CubicalGeometryTests(unittest.TestCase):
                 [value.t for value in expected.vertices],
                 [value.t for value in actual.vertices],
                 atol=2.0e-5,
+            )
+
+    def test_boundary_band_freezes_interior_and_preserves_exterior_identity(
+        self,
+    ) -> None:
+        grid = GridSpec(
+            (4, 4, 4),
+            cell_size_xyz=(2.0, 3.0, 5.0),
+            origin_xyz=(10.0, 20.0, 30.0),
+            coordinate_unit="voxel",
+        )
+        patches = tuple(
+            self._horizontal_patch(
+                grid,
+                (x, y, z),
+                0.0,
+                1 + x + 4 * y + 16 * z,
+            )
+            for z in range(4)
+            for y in range(4)
+            for x in range(4)
+        )
+        table = PatchTable.from_patches(grid, patches)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "selected"
+            output = Path(directory) / "boundary"
+            write_patch_shard(root / "selected-patches-v1", table)
+            summary = run_boundary_band_export(
+                root,
+                output,
+                settings=BoundaryBandSettings(depth_cells=1),
+            )
+            restored = read_patch_shard(output / "boundary-patches-v1")
+            with np.load(output / "boundary-interface-v1.npz") as values:
+                component_ids = np.asarray(values["componentId"])
+                component_face_masks = np.asarray(
+                    values["componentExteriorFaceMask"]
+                )
+                component_cell_count = len(values["componentCellXYZ"])
+                crossing_feature_kind = np.asarray(
+                    values["crossingGroupFeatureKind"]
+                )
+                trace_points = np.concatenate(
+                    (
+                        values["traceFirstPointWorldXYZ"],
+                        values["traceSecondPointWorldXYZ"],
+                    ),
+                    axis=0,
+                )
+                trace_count = len(values["tracePatchId"])
+
+        statistics = summary["statistics"]
+        self.assertEqual(statistics["boundaryBandCells"], 56)
+        self.assertEqual(statistics["boundaryCellsWithPatches"], 56)
+        self.assertEqual(statistics["boundaryPatches"], 56)
+        self.assertEqual(statistics["frozenInteriorCells"], 8)
+        self.assertEqual(statistics["boundaryComponents"], 4)
+        self.assertEqual(statistics["boundaryComponentOccupiedCells"], 64)
+        self.assertEqual(statistics["boundaryCrossingGroups"], 64)
+        self.assertEqual(statistics["exteriorTraces"], 64)
+        self.assertIsNone(summary["artifacts"]["configurations"])
+        self.assertEqual(restored.patch_count, 56)
+        self.assertEqual(len(component_ids), 4)
+        self.assertEqual(component_cell_count, 64)
+        np.testing.assert_array_equal(component_face_masks, np.full(4, 15))
+        np.testing.assert_array_equal(crossing_feature_kind, np.zeros(64))
+        self.assertEqual(trace_count, 64)
+        self.assertTrue(np.all(np.isfinite(trace_points)))
+        self.assertGreaterEqual(float(np.min(trace_points[:, 0])), 10.0)
+        self.assertGreaterEqual(float(np.min(trace_points[:, 1])), 20.0)
+        self.assertGreaterEqual(float(np.min(trace_points[:, 2])), 30.0)
+
+    def test_boundary_band_preserves_selected_physical_alternative_index(
+        self,
+    ) -> None:
+        grid = GridSpec((4, 4, 4))
+        cells = np.asarray(
+            [
+                (x, y, z)
+                for z in range(4)
+                for y in range(4)
+                for x in range(4)
+            ],
+            dtype=np.int32,
+        )
+        count = len(cells)
+        candidates = ConfigurationTable(
+            cells,
+            np.arange(count + 1, dtype=np.uint64),
+            np.zeros(count, dtype=np.uint16),
+            np.zeros(count, dtype=np.float32),
+            np.zeros(count, dtype=np.int8),
+            np.arange(count + 1, dtype=np.uint64),
+            np.tile((0.0, 0.0, 1.0), (count, 1)).astype(np.float32),
+            np.zeros(count, dtype=np.float32),
+            np.tile(
+                (0.001, 0.0, 0.0, 0.001, 0.0, 0.001),
+                (count, 1),
+            ).astype(np.float32),
+            np.tile((1.0, 0.0, 0.0), (count, 1)).astype(np.float32),
+            np.full(count, math.radians(2.0), dtype=np.float32),
+            np.ones(count, dtype=np.float32),
+            np.ones(count, dtype=np.float32),
+            np.ones(count, dtype=np.float32),
+            np.ones(count, dtype=np.float32),
+        )
+        candidates.validate()
+        patches = tuple(
+            self._horizontal_patch(
+                grid,
+                tuple(int(value) for value in cell),
+                0.0,
+                index + 1,
+            )
+            for index, cell in enumerate(cells)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            selected_root = Path(directory) / "selected"
+            candidate_root = Path(directory) / "candidates"
+            output = Path(directory) / "boundary"
+            write_patch_shard(
+                selected_root / "selected-patches-v1",
+                PatchTable.from_patches(grid, patches),
+            )
+            candidate_root.mkdir(parents=True)
+            candidate_path = candidate_root / "saturation-configurations-v1.npz"
+            metadata = {
+                name: np.ones(count, dtype=np.float32)
+                for name in (
+                    "evidenceLogScore",
+                    "physicalLogScore",
+                    "totalLogScore",
+                    "coveredEvidenceMass",
+                    "totalEvidenceMass",
+                )
+            }
+            metadata["isCurrent"] = np.ones(count, dtype=np.uint8)
+            with candidate_path.open("wb") as handle:
+                np.savez_compressed(handle, **candidates.arrays(), **metadata)
+            candidate_sha = sha256_file(candidate_path)
+            (candidate_root / "saturation-configurations-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.cubical-saturation-configurations",
+                        "version": 1,
+                        "identitySha256": "analytic-candidates",
+                        "data": {
+                            "path": candidate_path.name,
+                            "bytes": candidate_path.stat().st_size,
+                            "sha256": candidate_sha,
+                        },
+                    }
+                )
+            )
+            selection_path = selected_root / "selection-v1.npz"
+            with selection_path.open("wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    cellXYZ=cells,
+                    optionId=np.arange(count, dtype=np.uint64),
+                    sourceTableIndex=np.zeros(count, dtype=np.uint32),
+                    sourceConfigurationIndex=np.arange(count, dtype=np.uint32),
+                    localConfigurationId=np.zeros(count, dtype=np.uint16),
+                    configurationLogWeight=np.zeros(count, dtype=np.float32),
+                    selectedLayerCount=np.ones(count, dtype=np.uint16),
+                )
+            selection_sha = sha256_file(selection_path)
+            (selected_root / "selection-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.raw-acus-configuration-selection",
+                        "version": 1,
+                        "data": {
+                            "path": selection_path.name,
+                            "bytes": selection_path.stat().st_size,
+                            "sha256": selection_sha,
+                        },
+                    }
+                )
+            )
+            (selected_root / "variant.json").write_text(
+                json.dumps(
+                    {
+                        "identity": {"candidateDataSha256": candidate_sha}
+                    }
+                )
+            )
+            summary = run_boundary_band_export(
+                selected_root,
+                output,
+                candidate_root=candidate_root,
+                settings=BoundaryBandSettings(depth_cells=1),
+            )
+            with np.load(output / "boundary-configurations-v1.npz") as values:
+                selected_index = np.asarray(
+                    values["selectedConfigurationIndex"]
+                )
+                source_index = np.asarray(values["sourceConfigurationIndex"])
+                selected_source = np.asarray(
+                    values["selectedSourceConfigurationIndex"]
+                )
+
+        self.assertEqual(
+            summary["artifacts"]["configurations"]["selectedCells"], 56
+        )
+        self.assertEqual(len(selected_index), 56)
+        np.testing.assert_array_equal(
+            source_index[selected_index], selected_source
+        )
+
+    def test_boundary_merge_rebases_world_adjacent_blocks_and_freezes_interiors(
+        self,
+    ) -> None:
+        grids = (
+            GridSpec((4, 4, 4), origin_xyz=(0.0, 0.0, 0.0)),
+            GridSpec((4, 4, 4), origin_xyz=(4.0, 0.0, 0.0)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            roots = []
+            for block_index, grid in enumerate(grids):
+                patches = tuple(
+                    self._horizontal_patch(
+                        grid,
+                        (x, y, z),
+                        0.0,
+                        1 + x + 4 * y + 16 * z,
+                    )
+                    for z in range(4)
+                    for y in range(4)
+                    for x in range(4)
+                )
+                selected = Path(directory) / f"selected-{block_index}"
+                boundary = Path(directory) / f"boundary-{block_index}"
+                write_patch_shard(
+                    selected / "selected-patches-v1",
+                    PatchTable.from_patches(grid, patches),
+                )
+                run_boundary_band_export(
+                    selected,
+                    boundary,
+                    settings=BoundaryBandSettings(depth_cells=1),
+                )
+                roots.append(boundary)
+            output = Path(directory) / "merge"
+            summary = run_boundary_band_merge(roots[0], roots[1], output)
+            with np.load(output / "boundary-merge-v1.npz") as values:
+                pair_support = np.asarray(values["pairSupportMatchCount"])
+                pair_disposition = np.asarray(values["pairDisposition"])
+                selected_bridges = np.asarray(values["matchSelectedBridge"])
+
+        self.assertEqual(summary["grid"]["shapeCellsXYZ"], [8, 4, 4])
+        self.assertEqual(summary["adjacency"]["axis"], 0)
+        self.assertEqual(summary["statistics"]["seamUnitFaces"], 16)
+        self.assertEqual(summary["statistics"]["alignedMatches"], 16)
+        self.assertEqual(summary["statistics"]["unmatchedTraces"], 0)
+        self.assertEqual(summary["statistics"]["componentPairHypotheses"], 4)
+        self.assertEqual(summary["statistics"]["retainedComponentBridges"], 4)
+        np.testing.assert_array_equal(pair_support, np.full(4, 4))
+        np.testing.assert_array_equal(
+            pair_disposition,
+            np.full(4, "retained-forest-bridge"),
+        )
+        self.assertEqual(int(np.sum(selected_bridges)), 4)
+
+    def test_boundary_packet_policy_caps_only_quarter_turn_additions(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        face = cell_face((0, 0, 0), 0, 1)
+        angle = math.radians(16.0)
+        first = clip_plane_to_cell(
+            grid,
+            (0, 0, 0),
+            PlaneEstimate.isotropic(
+                (math.sin(angle), 0.0, math.cos(angle)),
+                0.5 * math.sin(angle),
+                angular_std_radians=math.radians(10.0),
+                height_std=0.1,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=1,
+        )
+        second = clip_plane_to_cell(
+            grid,
+            (1, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                0.0,
+                angular_std_radians=math.radians(10.0),
+                height_std=0.1,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=2,
+        )
+        assert first is not None and second is not None
+        policy = {
+            "normalAndFiberPolarity": "axial/unsigned",
+            "parallelMatching": {
+                "orthogonalFiberEquivalence": False,
+                "maximumNormalAngleDegrees": 90.0,
+                "maximumFiberResidualDegrees": 90.0,
+            },
+            "quarterTurnAdmission": {
+                "enabled": True,
+                "maximumNormalAngleDegrees": 15.0,
+                "maximumFiberFrameResidualDegrees": 15.0,
+            },
+            "strictParallelMatchesHavePriority": True,
+        }
+        parallel, _, _, _, _ = _ordered_packet_alignment(
+            (first,), (second,), face, policy, grid
+        )
+        self.assertEqual(len(parallel), 1)
+        self.assertGreater(
+            math.degrees(parallel[0].normal_angle_radians), 15.0
+        )
+        self.assertFalse(parallel[0].fiber_quarter_turn)
+
+        orthogonal_second = clip_plane_to_cell(
+            grid,
+            (1, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                0.0,
+                angular_std_radians=math.radians(1.0),
+                height_std=0.1,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=4,
+        )
+        axial_first = self._horizontal_patch(
+            grid,
+            (0, 0, 0),
+            0.0,
+            3,
+            height_std=0.1,
+        )
+        assert orthogonal_second is not None
+        quarter, _, _, _, _ = _ordered_packet_alignment(
+            (axial_first,), (orthogonal_second,), face, policy, grid
+        )
+        self.assertEqual(len(quarter), 1)
+        self.assertTrue(quarter[0].fiber_quarter_turn)
+
+    def test_selected_subblock_preserves_world_geometry_and_patch_identity(
+        self,
+    ) -> None:
+        grid = GridSpec(
+            (4, 2, 2),
+            cell_size_xyz=(2.0, 3.0, 5.0),
+            origin_xyz=(10.0, 20.0, 30.0),
+            coordinate_unit="voxel",
+        )
+        patches = tuple(
+            self._horizontal_patch(
+                grid,
+                (x, y, z),
+                0.0,
+                1 + x + 4 * y + 8 * z,
+            )
+            for z in range(2)
+            for y in range(2)
+            for x in range(4)
+        )
+        source_by_id = {value.patch_id: value for value in patches}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "selected"
+            output = Path(directory) / "subblock"
+            write_patch_shard(
+                source / "selected-patches-v1",
+                PatchTable.from_patches(grid, patches),
+            )
+            summary = extract_selected_patch_subblock(
+                source,
+                output,
+                start_cell_xyz=(2, 0, 0),
+                stop_cell_xyz_exclusive=(4, 2, 2),
+            )
+            restored = read_patch_shard(output / "selected-patches-v1")
+
+        self.assertEqual(summary["patches"], 8)
+        self.assertEqual(restored.grid.shape_cells_xyz, (2, 2, 2))
+        self.assertEqual(restored.grid.origin_xyz, (14.0, 20.0, 30.0))
+        self.assertEqual(set(int(value) for value in restored.patch_id), {
+            value.patch_id for value in patches if value.cell_xyz[0] >= 2
+        })
+        for patch in restored.to_patches():
+            source_patch = source_by_id[patch.patch_id]
+            np.testing.assert_allclose(
+                sorted(value.point_xyz for value in patch.vertices),
+                sorted(value.point_xyz for value in source_patch.vertices),
+                atol=1.0e-6,
             )
 
     def test_noisy_synthetic_stack_remains_pure_and_connected(self) -> None:

@@ -530,6 +530,75 @@ The packet graph remains a downstream interpretation layer; block merging can
 exchange its retained boundary traces without changing Acus extraction,
 physical stack selection, or the strict ply graph.
 
+## Boundary-band handoff and split/recompose audit
+
+A completed selected block can now emit the bounded state required by a
+neighbor. The physical candidate bank is optional for a connectivity-only
+probe but should be included when the next stage will jointly reselect the
+meeting bands:
+
+```bash
+python3 -m backend.cubical export-boundary-band \
+  --root /path/to/selected-block \
+  --packet-root /path/to/dual-axis-packets \
+  --candidate-root /path/to/saturation-reselection \
+  --depth-cells 2 \
+  --output /path/to/boundary-band
+
+python3 -m backend.cubical merge-boundary-bands \
+  --first /path/to/first-boundary-band \
+  --second /path/to/second-boundary-band \
+  --output /path/to/boundary-merge
+```
+
+The exporter does not copy the block interior. It writes the shell's selected
+patches, every shell-cell physical alternative, exterior traces in world
+coordinates, packet ownership, full occupied-cell certificates for components
+that reach the shell, and existing welded edge/vertex identities. The merger
+therefore handles independently local patch IDs, validates exact world-grid
+adjacency, and enforces same-cell collision, crossing-feature, ordered-trace,
+unsigned-direction, and orientability invariants without loading native CT.
+
+On the full 16 x 16 x 14 result, the two-cell shell contains 2,144 of 3,584
+cells, 7,006 selected patches, 24,131 physical configurations with 52,556
+layers, 11,252 component-cell certificates, and 4,434 crossing groups. The
+complete compressed handoff is 2.4 MB; 1,440 interior cells remain frozen.
+The shell fraction is high only because this pilot is small. For an `N^3`
+block at fixed depth it becomes `O(N^2)` rather than `O(N^3)`.
+
+The rebase and comparison utilities make the merge contract reproducible on
+one known block without presenting that as independent raw-CT evidence:
+
+```bash
+python3 -m backend.cubical extract-selected-subblock \
+  --root /path/to/selected-block --start 0 0 0 --stop 8 16 14 \
+  --output /tmp/left-selected
+
+# Repeat for X=8..16, rebuild dual-axis-packets and export-boundary-band for
+# both children, then merge them as above.
+
+python3 -m backend.cubical audit-boundary-split \
+  --full-packet-root /path/to/full-dual-axis-packets \
+  --merge-root /tmp/recomposed-boundary \
+  --output /tmp/boundary-split-audit.json
+```
+
+At the X=8 split, child packet rebuilding takes about 20 seconds per half,
+each connectivity-only boundary artifact is about 0.5 MB, and seam composition
+takes 4.1 seconds. The recomposed evidence contains every one of the full
+graph's 195 retained seam joins, plus 44 admissible alternatives. The
+conservative topology forest retains 74 component bridges; 70 are exact
+full-graph joins. It leaves 985 components versus the full graph's 977.
+
+That eight-component difference has a sharply bounded cause. Relative to the
+unsplit graph, the child graphs contain 72 alternate internal joins and omit
+26; 90 of those 98 differences are in the seam-adjacent cell layer, eight are
+in the second layer, and none lie outside the serialized two-cell band. Thus
+the current handoff captures all state that must be reconsidered. The next
+merge refinement is joint topology/configuration reselection inside that band;
+the present merger intentionally does not mutate child selections to make the
+audit look exact.
+
 ## Tests
 
 ```bash
