@@ -123,6 +123,20 @@ one above the 977-component reference. The full block is a consistency
 reference rather than ground truth; importantly, all 15 changes that reach an
 exact reference configuration move toward it and none move away.
 
+Multi-seam composition now solves a complete regular 2 x 2 x 2 child cluster
+once instead of unioning incompatible pairwise seams. Each boundary export
+contains the 26 valid one-, two-, and three-face frozen-region certificates;
+`reselect-boundary-cluster` removes the participating face bands as a union,
+runs one sparse conditional configuration solve, and reconstructs one global
+strict/dual-axis topology. On four independently inferred 8 x 8 x 14 blocks,
+the 16 x 16 x 14 solve handles 1,568 mutable cells in 48.9 seconds and resolves
+all 23 pairwise corner conflicts. Against the unsplit consistency reference,
+layer-count agreement improves from 1,456 to 1,527 cells, comparable retained
+joins agree at 98.38% Jaccard, and both graphs contain 977 components. Exact
+component membership is not identical: connectivity precision/recall on the
+4,069 geometrically mappable patches is about 90.8%, which remains a useful
+target for the next block-level refinement.
+
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.
 `refine-join-continuity` then scores every retained face using fixed-depth

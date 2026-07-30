@@ -56,6 +56,72 @@ class FrozenFaceState:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenRegionState:
+    face_mask: int
+    depth_cells: int
+    frozen_component_count: int
+    detached_component_count: int
+    components: tuple[FrozenComponent, ...]
+    crossings: tuple[FrozenCrossing, ...]
+
+    @property
+    def faces(self) -> tuple[tuple[int, int], ...]:
+        return faces_from_mask(self.face_mask)
+
+    @property
+    def anchor_patch_ids(self) -> tuple[int, ...]:
+        return tuple(
+            patch_id
+            for component in self.components
+            for patch_id in component.anchor_patch_ids
+        )
+
+
+def face_mask(faces: Iterable[tuple[int, int]]) -> int:
+    result = 0
+    axes: set[int] = set()
+    for axis, side in faces:
+        if axis not in (0, 1, 2) or side not in (0, 1):
+            raise ValueError("region faces require axis and side in range")
+        if axis in axes:
+            raise ValueError("a merge region cannot use both sides of one axis")
+        axes.add(axis)
+        result |= 1 << (2 * axis + side)
+    if result == 0:
+        raise ValueError("a frozen region requires at least one mutable face")
+    return result
+
+
+def faces_from_mask(value: int) -> tuple[tuple[int, int], ...]:
+    if value <= 0 or value >= 1 << 6:
+        raise ValueError("frozen region face mask is invalid")
+    result = tuple(
+        (axis, side)
+        for axis in range(3)
+        for side in range(2)
+        if value & (1 << (2 * axis + side))
+    )
+    if len({axis for axis, _ in result}) != len(result):
+        raise ValueError("frozen region uses both sides of one axis")
+    return result
+
+
+def compatible_face_masks() -> tuple[int, ...]:
+    masks: list[int] = []
+    for x_side in (-1, 0, 1):
+        for y_side in (-1, 0, 1):
+            for z_side in (-1, 0, 1):
+                faces = tuple(
+                    (axis, side)
+                    for axis, side in enumerate((x_side, y_side, z_side))
+                    if side >= 0
+                )
+                if faces:
+                    masks.append(face_mask(faces))
+    return tuple(sorted(masks))
+
+
+@dataclass(frozen=True, slots=True)
 class ComponentSeed:
     key: Hashable
     total_patch_count: int
@@ -410,6 +476,191 @@ def select_joins_with_frozen_topology(
     )
 
 
+def _build_frozen_region_state(
+    patches: Iterable[ClippedPatch],
+    joins: Iterable[TraceMatch],
+    shape_cells_xyz: Int3,
+    depth_cells: int,
+    region_face_mask: int,
+) -> FrozenRegionState:
+    faces = faces_from_mask(region_face_mask)
+    cuts = {
+        (axis, depth_cells if side == 0 else shape_cells_xyz[axis] - depth_cells)
+        for axis, side in faces
+    }
+    patch_values = tuple(patches)
+    patch_by_id = {value.patch_id: value for value in patch_values}
+    join_values = tuple(joins)
+
+    def mutable(patch: ClippedPatch) -> bool:
+        return any(
+            patch.cell_xyz[axis] < depth_cells
+            if side == 0
+            else patch.cell_xyz[axis] >= shape_cells_xyz[axis] - depth_cells
+            for axis, side in faces
+        )
+
+    def cut_trace(patch_id: int, edge: GridEdge | None = None) -> bool:
+        return any(
+            (trace.face.axis, trace.face.anchor_xyz[trace.face.axis]) in cuts
+            and (edge is None or edge in trace.endpoint_edges)
+            for trace in patch_by_id[patch_id].traces
+        )
+
+    frozen_ids = {
+        patch.patch_id for patch in patch_values if not mutable(patch)
+    }
+    frozen_joins = tuple(
+        value
+        for value in join_values
+        if value.first_patch_id in frozen_ids
+        and value.second_patch_id in frozen_ids
+    )
+    component_set = _DisjointSet(frozen_ids)
+    orientation_set = _ParityDisjointSet(frozen_ids)
+    for join in frozen_joins:
+        component_set.union(join.first_patch_id, join.second_patch_id)
+        orientation_set.union(
+            join.first_patch_id,
+            join.second_patch_id,
+            join_orientation_xor(patch_by_id, join),
+        )
+    members: dict[Hashable, list[int]] = defaultdict(list)
+    for patch_id in frozen_ids:
+        members[component_set.find(patch_id)].append(patch_id)
+    component_id_by_patch = {
+        patch_id: min(component_members)
+        for component_members in members.values()
+        for patch_id in component_members
+    }
+    anchor_ids = {
+        patch_id for patch_id in frozen_ids if cut_trace(patch_id)
+    }
+    participating = {
+        component_id_by_patch[patch_id] for patch_id in anchor_ids
+    }
+    member_by_component = {
+        min(values): tuple(sorted(values)) for values in members.values()
+    }
+    components: list[FrozenComponent] = []
+    for component_id in sorted(participating):
+        values = member_by_component[component_id]
+        anchors = tuple(sorted(anchor_ids & set(values)))
+        representative = anchors[0]
+        _, representative_parity = orientation_set.find(representative)
+        parity = tuple(
+            orientation_set.find(value)[1] ^ representative_parity
+            for value in anchors
+        )
+        cells = tuple(
+            sorted({patch_by_id[value].cell_xyz for value in values})
+        )
+        components.append(
+            FrozenComponent(
+                component_id,
+                len(values),
+                cells,
+                anchors,
+                parity,
+            )
+        )
+
+    observations = tuple(
+        (patch_id, vertex.edge)
+        for patch_id in frozen_ids
+        for vertex in patch_by_id[patch_id].vertices
+    )
+    crossing_set = _DisjointSet(observations)
+    for join in frozen_joins:
+        for agreement in join.endpoint_agreements:
+            crossing_set.union(
+                (join.first_patch_id, agreement.first_edge),
+                (join.second_patch_id, agreement.second_edge),
+            )
+    crossing_members: dict[Hashable, list[Observation]] = defaultdict(list)
+    for observation in observations:
+        crossing_members[crossing_set.find(observation)].append(observation)
+    referenced = {
+        crossing_set.find((patch_id, vertex.edge))
+        for patch_id in anchor_ids
+        for trace in patch_by_id[patch_id].traces
+        if (trace.face.axis, trace.face.anchor_xyz[trace.face.axis]) in cuts
+        for vertex in (trace.first, trace.second)
+    }
+    ordered_crossings = sorted(
+        referenced,
+        key=lambda value: min(crossing_members[value]),
+    )
+    crossings: list[FrozenCrossing] = []
+    for group_id, root in enumerate(ordered_crossings):
+        all_observations = crossing_members[root]
+        feature: Feature = all_observations[0][1]
+        owner_edges: dict[int, GridEdge] = {}
+        for _, edge in all_observations[1:]:
+            combined = _combine_features(feature, edge)
+            if combined is None:
+                raise ValueError(
+                    "retained frozen topology has no common crossing feature"
+                )
+            feature = combined
+        for patch_id, edge in all_observations:
+            if patch_id in owner_edges and owner_edges[patch_id] != edge:
+                raise ValueError(
+                    "retained frozen crossing assigns one patch to multiple cube edges"
+                )
+            owner_edges[patch_id] = edge
+        anchor_observations = tuple(
+            sorted(
+                value
+                for value in all_observations
+                if value[0] in anchor_ids and cut_trace(value[0], value[1])
+            )
+        )
+        crossings.append(
+            FrozenCrossing(
+                group_id,
+                feature,
+                anchor_observations,
+                tuple(sorted(owner_edges.items())),
+            )
+        )
+    return FrozenRegionState(
+        region_face_mask,
+        depth_cells,
+        len(members),
+        len(members) - len(participating),
+        tuple(components),
+        tuple(crossings),
+    )
+
+
+def build_frozen_region_states(
+    patches: Iterable[ClippedPatch],
+    joins: Iterable[TraceMatch],
+    shape_cells_xyz: Int3,
+    depth_cells: int,
+    *,
+    face_masks: Iterable[int] | None = None,
+) -> tuple[FrozenRegionState, ...]:
+    """Summarize immutable topology after removing compatible outer bands."""
+
+    if depth_cells <= 0 or any(2 * depth_cells >= value for value in shape_cells_xyz):
+        raise ValueError("frozen region states require a nonempty interior")
+    patch_values = tuple(patches)
+    join_values = tuple(joins)
+    masks = tuple(sorted(set(face_masks or compatible_face_masks())))
+    return tuple(
+        _build_frozen_region_state(
+            patch_values,
+            join_values,
+            shape_cells_xyz,
+            depth_cells,
+            value,
+        )
+        for value in masks
+    )
+
+
 def build_frozen_face_states(
     patches: Iterable[ClippedPatch],
     joins: Iterable[TraceMatch],
@@ -418,165 +669,30 @@ def build_frozen_face_states(
 ) -> tuple[FrozenFaceState, ...]:
     """Cut each outer face band away and summarize the immutable remainder."""
 
-    if depth_cells <= 0 or any(2 * depth_cells >= value for value in shape_cells_xyz):
-        raise ValueError("frozen face states require a nonempty interior")
-    patch_values = tuple(patches)
-    patch_by_id = {value.patch_id: value for value in patch_values}
-    join_values = tuple(joins)
-    states: list[FrozenFaceState] = []
-    for axis in range(3):
-        for side in range(2):
-            cut = depth_cells if side == 0 else shape_cells_xyz[axis] - depth_cells
-
-            def mutable(patch: ClippedPatch) -> bool:
-                coordinate = patch.cell_xyz[axis]
-                return coordinate < cut if side == 0 else coordinate >= cut
-
-            frozen_ids = {
-                patch.patch_id for patch in patch_values if not mutable(patch)
-            }
-            frozen_joins = tuple(
-                value
-                for value in join_values
-                if value.first_patch_id in frozen_ids
-                and value.second_patch_id in frozen_ids
+    regions = build_frozen_region_states(
+        patches,
+        joins,
+        shape_cells_xyz,
+        depth_cells,
+        face_masks=(1 << value for value in range(6)),
+    )
+    result: list[FrozenFaceState] = []
+    for region in regions:
+        ((axis, side),) = region.faces
+        cut = depth_cells if side == 0 else shape_cells_xyz[axis] - depth_cells
+        result.append(
+            FrozenFaceState(
+                axis,
+                side,
+                depth_cells,
+                cut,
+                region.frozen_component_count,
+                region.detached_component_count,
+                region.components,
+                region.crossings,
             )
-            component_set = _DisjointSet(frozen_ids)
-            orientation_set = _ParityDisjointSet(frozen_ids)
-            for join in frozen_joins:
-                component_set.union(join.first_patch_id, join.second_patch_id)
-                orientation_set.union(
-                    join.first_patch_id,
-                    join.second_patch_id,
-                    join_orientation_xor(patch_by_id, join),
-                )
-            members: dict[Hashable, list[int]] = defaultdict(list)
-            for patch_id in frozen_ids:
-                members[component_set.find(patch_id)].append(patch_id)
-            component_id_by_patch = {
-                patch_id: min(component_members)
-                for component_members in members.values()
-                for patch_id in component_members
-            }
-            anchor_ids = {
-                patch.patch_id
-                for patch in patch_values
-                if patch.patch_id in frozen_ids
-                and any(
-                    trace.face.axis == axis
-                    and trace.face.anchor_xyz[axis] == cut
-                    for trace in patch.traces
-                )
-            }
-            participating = {
-                component_id_by_patch[patch_id] for patch_id in anchor_ids
-            }
-            member_by_component = {
-                min(values): tuple(sorted(values)) for values in members.values()
-            }
-            components: list[FrozenComponent] = []
-            for component_id in sorted(participating):
-                values = member_by_component[component_id]
-                anchors = tuple(sorted(anchor_ids & set(values)))
-                representative = anchors[0]
-                _, representative_parity = orientation_set.find(representative)
-                parity = tuple(
-                    orientation_set.find(value)[1] ^ representative_parity
-                    for value in anchors
-                )
-                cells = tuple(
-                    sorted({patch_by_id[value].cell_xyz for value in values})
-                )
-                components.append(
-                    FrozenComponent(
-                        component_id,
-                        len(values),
-                        cells,
-                        anchors,
-                        parity,
-                    )
-                )
-
-            observations = tuple(
-                (patch_id, vertex.edge)
-                for patch_id in frozen_ids
-                for vertex in patch_by_id[patch_id].vertices
-            )
-            crossing_set = _DisjointSet(observations)
-            for join in frozen_joins:
-                for agreement in join.endpoint_agreements:
-                    crossing_set.union(
-                        (join.first_patch_id, agreement.first_edge),
-                        (join.second_patch_id, agreement.second_edge),
-                    )
-            crossing_members: dict[Hashable, list[Observation]] = defaultdict(list)
-            for observation in observations:
-                crossing_members[crossing_set.find(observation)].append(observation)
-            referenced = {
-                crossing_set.find((patch_id, vertex.edge))
-                for patch_id in anchor_ids
-                for trace in patch_by_id[patch_id].traces
-                if trace.face.axis == axis
-                and trace.face.anchor_xyz[axis] == cut
-                for vertex in (trace.first, trace.second)
-            }
-            ordered_crossings = sorted(
-                referenced,
-                key=lambda value: min(crossing_members[value]),
-            )
-            crossings: list[FrozenCrossing] = []
-            for group_id, root in enumerate(ordered_crossings):
-                all_observations = crossing_members[root]
-                feature: Feature = all_observations[0][1]
-                owner_edges: dict[int, GridEdge] = {}
-                for _, edge in all_observations[1:]:
-                    combined = _combine_features(feature, edge)
-                    if combined is None:
-                        raise ValueError(
-                            "retained frozen topology has no common crossing feature"
-                        )
-                    feature = combined
-                for patch_id, edge in all_observations:
-                    if patch_id in owner_edges and owner_edges[patch_id] != edge:
-                        raise ValueError(
-                            "retained frozen crossing assigns one patch to "
-                            "multiple cube edges"
-                        )
-                    owner_edges[patch_id] = edge
-                anchor_observations = tuple(
-                    sorted(
-                        value
-                        for value in all_observations
-                        if value[0] in anchor_ids
-                        and any(
-                            trace.face.axis == axis
-                            and trace.face.anchor_xyz[axis] == cut
-                            and value[1] in trace.endpoint_edges
-                            for trace in patch_by_id[value[0]].traces
-                        )
-                    )
-                )
-                crossings.append(
-                    FrozenCrossing(
-                        group_id,
-                        feature,
-                        anchor_observations,
-                        tuple(sorted(owner_edges.items())),
-                    )
-                )
-            states.append(
-                FrozenFaceState(
-                    axis,
-                    side,
-                    depth_cells,
-                    cut,
-                    len(members),
-                    len(members) - len(participating),
-                    tuple(components),
-                    tuple(crossings),
-                )
-            )
-    return tuple(states)
+        )
+    return tuple(result)
 
 
 def frozen_topology_arrays(
@@ -708,6 +824,167 @@ def write_frozen_topology_artifact(
     return output
 
 
+def frozen_region_arrays(
+    states: Iterable[FrozenRegionState],
+) -> dict[str, np.ndarray]:
+    """Serialize every compatible multi-face frozen-region certificate."""
+
+    values = tuple(sorted(states, key=lambda value: value.face_mask))
+    if len({value.face_mask for value in values}) != len(values):
+        raise ValueError("frozen region artifact contains duplicate face masks")
+    common = frozen_topology_arrays(
+        FrozenFaceState(
+            0,
+            0,
+            value.depth_cells,
+            0,
+            value.frozen_component_count,
+            value.detached_component_count,
+            value.components,
+            value.crossings,
+        )
+        for value in values
+    )
+    for name in (
+        "faceAxis",
+        "faceSide",
+        "faceDepthCells",
+        "faceCutCoordinate",
+        "faceFrozenComponentCount",
+        "faceDetachedComponentCount",
+    ):
+        del common[name]
+    common["regionComponentOffset"] = common.pop("faceComponentOffset")
+    common["regionCrossingOffset"] = common.pop("faceCrossingOffset")
+    return {
+        "regionFaceMask": np.asarray(
+            [value.face_mask for value in values], dtype=np.uint8
+        ),
+        "regionDepthCells": np.asarray(
+            [value.depth_cells for value in values], dtype=np.uint16
+        ),
+        "regionFrozenComponentCount": np.asarray(
+            [value.frozen_component_count for value in values], dtype=np.uint64
+        ),
+        "regionDetachedComponentCount": np.asarray(
+            [value.detached_component_count for value in values], dtype=np.uint64
+        ),
+        **common,
+    }
+
+
+def write_frozen_region_artifact(
+    path: str | Path,
+    states: Iterable[FrozenRegionState],
+) -> Path:
+    output = Path(path)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **frozen_region_arrays(states))
+    temporary.replace(output)
+    return output
+
+
+def _read_frozen_payload(
+    values: Mapping[str, np.ndarray],
+    record_index: int,
+    *,
+    component_offset_name: str,
+    crossing_offset_name: str,
+) -> tuple[tuple[FrozenComponent, ...], tuple[FrozenCrossing, ...]]:
+    component_low = int(values[component_offset_name][record_index])
+    component_high = int(values[component_offset_name][record_index + 1])
+    components: list[FrozenComponent] = []
+    for component_index in range(component_low, component_high):
+        cell_low = int(values["componentCellOffset"][component_index])
+        cell_high = int(values["componentCellOffset"][component_index + 1])
+        anchor_low = int(values["componentAnchorOffset"][component_index])
+        anchor_high = int(values["componentAnchorOffset"][component_index + 1])
+        components.append(
+            FrozenComponent(
+                int(values["componentId"][component_index]),
+                int(values["componentTotalPatchCount"][component_index]),
+                tuple(
+                    tuple(int(value) for value in row)
+                    for row in values["componentCellXYZ"][cell_low:cell_high]
+                ),
+                tuple(
+                    int(value)
+                    for value in values["anchorPatchId"][anchor_low:anchor_high]
+                ),
+                tuple(
+                    int(value)
+                    for value in values["anchorOrientationParity"][
+                        anchor_low:anchor_high
+                    ]
+                ),
+            )
+        )
+    crossing_low = int(values[crossing_offset_name][record_index])
+    crossing_high = int(values[crossing_offset_name][record_index + 1])
+    crossings: list[FrozenCrossing] = []
+    for crossing_index in range(crossing_low, crossing_high):
+        observation_low = int(values["crossingObservationOffset"][crossing_index])
+        observation_high = int(
+            values["crossingObservationOffset"][crossing_index + 1]
+        )
+        owner_low = int(values["crossingOwnerOffset"][crossing_index])
+        owner_high = int(values["crossingOwnerOffset"][crossing_index + 1])
+        anchor = tuple(
+            int(value)
+            for value in values["crossingFeatureAnchorXYZ"][crossing_index]
+        )
+        feature: Feature
+        if int(values["crossingFeatureKind"][crossing_index]) == 0:
+            feature = GridEdge(
+                int(values["crossingFeatureEdgeAxis"][crossing_index]),
+                anchor,
+            )
+        else:
+            feature = anchor
+        crossings.append(
+            FrozenCrossing(
+                int(values["crossingGroupId"][crossing_index]),
+                feature,
+                tuple(
+                    (
+                        int(patch_id),
+                        GridEdge(
+                            int(edge_axis),
+                            tuple(int(value) for value in edge_anchor),
+                        ),
+                    )
+                    for patch_id, edge_axis, edge_anchor in zip(
+                        values["observationPatchId"][
+                            observation_low:observation_high
+                        ],
+                        values["observationEdgeAxis"][
+                            observation_low:observation_high
+                        ],
+                        values["observationEdgeAnchorXYZ"][
+                            observation_low:observation_high
+                        ],
+                    )
+                ),
+                tuple(
+                    (
+                        int(patch_id),
+                        GridEdge(
+                            int(edge_axis),
+                            tuple(int(value) for value in edge_anchor),
+                        ),
+                    )
+                    for patch_id, edge_axis, edge_anchor in zip(
+                        values["ownerPatchId"][owner_low:owner_high],
+                        values["ownerEdgeAxis"][owner_low:owner_high],
+                        values["ownerEdgeAnchorXYZ"][owner_low:owner_high],
+                    )
+                ),
+            )
+        )
+    return tuple(components), tuple(crossings)
+
+
 def read_frozen_face_state(
     path: str | Path,
     axis: int,
@@ -720,98 +997,12 @@ def read_frozen_face_state(
         if len(records) != 1:
             raise ValueError("frozen topology artifact lacks one requested face")
         face_index = int(records[0])
-        component_low = int(values["faceComponentOffset"][face_index])
-        component_high = int(values["faceComponentOffset"][face_index + 1])
-        components: list[FrozenComponent] = []
-        for component_index in range(component_low, component_high):
-            cell_low = int(values["componentCellOffset"][component_index])
-            cell_high = int(values["componentCellOffset"][component_index + 1])
-            anchor_low = int(values["componentAnchorOffset"][component_index])
-            anchor_high = int(values["componentAnchorOffset"][component_index + 1])
-            components.append(
-                FrozenComponent(
-                    int(values["componentId"][component_index]),
-                    int(values["componentTotalPatchCount"][component_index]),
-                    tuple(
-                        tuple(int(value) for value in row)
-                        for row in values["componentCellXYZ"][cell_low:cell_high]
-                    ),
-                    tuple(
-                        int(value)
-                        for value in values["anchorPatchId"][anchor_low:anchor_high]
-                    ),
-                    tuple(
-                        int(value)
-                        for value in values["anchorOrientationParity"][
-                            anchor_low:anchor_high
-                        ]
-                    ),
-                )
-            )
-        crossing_low = int(values["faceCrossingOffset"][face_index])
-        crossing_high = int(values["faceCrossingOffset"][face_index + 1])
-        crossings: list[FrozenCrossing] = []
-        for crossing_index in range(crossing_low, crossing_high):
-            observation_low = int(
-                values["crossingObservationOffset"][crossing_index]
-            )
-            observation_high = int(
-                values["crossingObservationOffset"][crossing_index + 1]
-            )
-            owner_low = int(values["crossingOwnerOffset"][crossing_index])
-            owner_high = int(values["crossingOwnerOffset"][crossing_index + 1])
-            anchor = tuple(
-                int(value)
-                for value in values["crossingFeatureAnchorXYZ"][crossing_index]
-            )
-            feature: Feature
-            if int(values["crossingFeatureKind"][crossing_index]) == 0:
-                feature = GridEdge(
-                    int(values["crossingFeatureEdgeAxis"][crossing_index]),
-                    anchor,
-                )
-            else:
-                feature = anchor
-            crossings.append(
-                FrozenCrossing(
-                    int(values["crossingGroupId"][crossing_index]),
-                    feature,
-                    tuple(
-                        (
-                            int(patch_id),
-                            GridEdge(
-                                int(edge_axis),
-                                tuple(int(value) for value in edge_anchor),
-                            ),
-                        )
-                        for patch_id, edge_axis, edge_anchor in zip(
-                            values["observationPatchId"][
-                                observation_low:observation_high
-                            ],
-                            values["observationEdgeAxis"][
-                                observation_low:observation_high
-                            ],
-                            values["observationEdgeAnchorXYZ"][
-                                observation_low:observation_high
-                            ],
-                        )
-                    ),
-                    tuple(
-                        (
-                            int(patch_id),
-                            GridEdge(
-                                int(edge_axis),
-                                tuple(int(value) for value in edge_anchor),
-                            ),
-                        )
-                        for patch_id, edge_axis, edge_anchor in zip(
-                            values["ownerPatchId"][owner_low:owner_high],
-                            values["ownerEdgeAxis"][owner_low:owner_high],
-                            values["ownerEdgeAnchorXYZ"][owner_low:owner_high],
-                        )
-                    ),
-                )
-            )
+        components, crossings = _read_frozen_payload(
+            values,
+            face_index,
+            component_offset_name="faceComponentOffset",
+            crossing_offset_name="faceCrossingOffset",
+        )
         return FrozenFaceState(
             axis,
             side,
@@ -821,4 +1012,30 @@ def read_frozen_face_state(
             int(values["faceDetachedComponentCount"][face_index]),
             tuple(components),
             tuple(crossings),
+        )
+
+
+def read_frozen_region_state(
+    path: str | Path,
+    region_face_mask: int,
+) -> FrozenRegionState:
+    faces_from_mask(region_face_mask)
+    with np.load(Path(path)) as values:
+        records = np.flatnonzero(values["regionFaceMask"] == region_face_mask)
+        if len(records) != 1:
+            raise ValueError("frozen region artifact lacks one requested face mask")
+        region_index = int(records[0])
+        components, crossings = _read_frozen_payload(
+            values,
+            region_index,
+            component_offset_name="regionComponentOffset",
+            crossing_offset_name="regionCrossingOffset",
+        )
+        return FrozenRegionState(
+            region_face_mask,
+            int(values["regionDepthCells"][region_index]),
+            int(values["regionFrozenComponentCount"][region_index]),
+            int(values["regionDetachedComponentCount"][region_index]),
+            components,
+            crossings,
         )

@@ -140,6 +140,31 @@ frozen occupancy, crossing, and orientation certificates participate in every
 veto, so the result has the same global invariants as direct assembly without
 reading native CT or either block's private interior.
 
+Pairwise slabs are not independently composable at a corner: the X solve and
+Y solve can legitimately choose different configurations for the same cell,
+and their retained joins can induce different transitive partitions. The
+exporter therefore also stores frozen-region certificates for every compatible
+face mask. A regular 2 x 2 x 2 child has at most one low or high internal face
+per axis, giving exactly `3^3 - 1 = 26` nonempty masks.
+
+`reselect-boundary-cluster` is the hierarchical composition primitive. It
+validates a complete Cartesian child layout, removes the union of every
+participating face band from each child, and loads the certificate built for
+that exact multi-face region. The active configuration graph is sparse: it
+contains the mutable band union and one immutable cut shell, not the full
+cluster cuboid. One conditional solve chooses every physical cell once; one
+strict-then-quarter-turn topology solve then sees all X, Y, and Z seams and
+their intersections together. A two-block cluster reduces to the same bounded
+problem as pairwise reselection, while four- and eight-block clusters avoid
+pairwise corner or edge contradictions by construction.
+
+`audit-multiseam` measures the failure of a pairwise seam network and can
+compare it with a joint cluster result. `audit-boundary-cluster-reference`
+compares independent children and their cluster solve with an unsplit
+full-context reconstruction by physical geometry, retained joins, and induced
+component partitions. The unsplit result is explicitly a consistency
+reference rather than ground truth.
+
 For a rectangular `X x Y x Z` block and shell depth `d`, selected shell state
 scales with
 `XYZ - (X - 2d)(Y - 2d)(Z - 2d)`, or `O(dN^2)` for an `N^3` block. Component
@@ -163,6 +188,19 @@ exactly consistent with the full-context configuration and none become less
 consistent. This does not prove the reference is physically correct, but it
 shows that bounded neighbor context resolves real independent-boundary effects
 in the expected direction rather than merely replaying a deterministic split.
+
+The four-child test independently reruns four 8 x 8 x 14 blocks. Four pairwise
+seam solves disagree on 23 of their 224 shared corner cells and on every
+overlapping component partition, demonstrating why pairwise union is invalid.
+The joint cluster covers 1,568 mutable cells plus 616 immutable shell cells,
+changes 133 configurations, and finishes in 48.9 seconds. It resolves every
+conflict to one locally supported alternative. Relative to the unsplit block,
+30 changes move to an exact reference configuration and three move away; at
+the 224 corner cells the split is six toward and zero away. Of the retained
+joins whose endpoints map geometrically to the reference, 2,426 agree, 19 are
+cluster-only, and 21 are reference-only (98.38% Jaccard). Both graphs have 977
+components, while mapped co-component precision and recall are 90.74% and
+90.88%, so equal component count is not overstated as identical fragmentation.
 
 The geometry stages are validated independently on analytic surfaces. The
 native-CT implementation and its measured pilot are documented in

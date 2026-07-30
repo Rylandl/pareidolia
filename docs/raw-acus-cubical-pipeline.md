@@ -563,6 +563,13 @@ python3 -m backend.cubical reselect-boundary-bands \
   --first /path/to/first-boundary-band \
   --second /path/to/second-boundary-band \
   --output /path/to/boundary-reselection
+
+python3 -m backend.cubical reselect-boundary-cluster \
+  --boundary /path/to/x0-y0-boundary \
+  --boundary /path/to/x1-y0-boundary \
+  --boundary /path/to/x0-y1-boundary \
+  --boundary /path/to/x1-y1-boundary \
+  --output /path/to/cluster-reselection
 ```
 
 The exporter does not copy the block interior. It writes the shell's selected
@@ -575,6 +582,12 @@ world-grid adjacency, and enforce same-cell collision, crossing-feature,
 ordered-trace, unsigned-direction, and orientability invariants without loading
 native CT.
 
+The same export also includes 26 frozen-region certificates: every nonempty
+combination in which each axis contributes no face, its low face, or its high
+face. This is the bounded state needed to remove two or three mutually
+orthogonal bands simultaneously at a child corner. The compressed addition is
+roughly 158--194 KB per 8 x 8 x 14 pilot child.
+
 `merge-boundary-bands` leaves both child selections unchanged and emits a
 conservative component forest. `reselect-boundary-bands` instead builds a
 `2d + 2`-cell-thick slab: `d` mutable layers from each child and one immutable
@@ -583,6 +596,12 @@ the mutable cells. The topology solve admits ordinary strict joins first, then
 fixes that graph while considering separately gated quarter-turn packet joins.
 The private interiors are represented only by compact occupancy, crossing, and
 orientation certificates.
+
+`reselect-boundary-cluster` accepts the complete Cartesian set of two to eight
+equal child blocks. It takes the union of their participating face bands,
+adds one immutable cut shell, and runs one sparse configuration and topology
+solve. Every corner or edge cell is represented once, so no later union of
+incompatible pairwise decisions is needed.
 
 On the full 16 x 16 x 14 result, the two-cell shell contains 2,144 of 3,584
 cells, 7,006 selected patches, 24,131 physical configurations with 52,556
@@ -643,6 +662,39 @@ python3 -m backend.cubical audit-independent-boundary \
   --selected-merge-root /path/to/selected-only-merge \
   --reselection-root /path/to/joint-boundary-reselection \
   --output /path/to/independent-boundary-audit.json
+```
+
+The corresponding 2 x 2 experiment uses four independently inferred
+8 x 8 x 14 children. Pairwise X/Y solves produce 23 contradictory choices in
+224 overlapping corner cells and different component partitions for all four
+crossing seam pairs. The joint cluster solve covers 1,568 mutable cells and
+616 immutable shell cells, changes 133 configurations, retains 6,401 joins,
+and completes in 48.9 seconds. All 23 conflicts resolve to one of the locally
+supported alternatives.
+
+Against the unsplit 16 x 16 x 14 consistency reference, layer-count agreement
+rises from 1,456 to 1,527 cells. Thirty changed cells become exact reference
+configurations and three cease to be exact; in the 224-cell corner subset the
+balance is six toward and zero away. The 2,426 common mappable joins give
+98.38% Jaccard, and both graphs have 977 components. Their mapped connectivity
+is not identical: co-component precision is 90.74%, recall is 90.88%, and
+Jaccard is 83.17%. These are explicit remaining block-level targets rather
+than evidence for declaring the fragments solved.
+
+```bash
+python3 -m backend.cubical audit-multiseam \
+  --reselection /path/to/x-seam-0 \
+  --reselection /path/to/x-seam-1 \
+  --reselection /path/to/y-seam-0 \
+  --reselection /path/to/y-seam-1 \
+  --cluster-root /path/to/cluster-reselection \
+  --output /path/to/multiseam-audit.json
+
+python3 -m backend.cubical audit-boundary-cluster-reference \
+  --full-packet-root /path/to/full-context-packets \
+  --full-selected-root /path/to/full-context-selection \
+  --cluster-root /path/to/cluster-reselection \
+  --output /path/to/cluster-reference-audit.json
 ```
 
 ## Tests

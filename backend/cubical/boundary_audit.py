@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,6 +22,10 @@ INDEPENDENT_BOUNDARY_AUDIT_SCHEMA = (
     "pareidolia.cubical-independent-boundary-audit"
 )
 INDEPENDENT_BOUNDARY_AUDIT_VERSION = 1
+CLUSTER_REFERENCE_AUDIT_SCHEMA = (
+    "pareidolia.cubical-boundary-cluster-reference-audit"
+)
+CLUSTER_REFERENCE_AUDIT_VERSION = 1
 
 
 def _pair(first: int, second: int) -> tuple[int, int]:
@@ -799,6 +803,473 @@ def run_independent_boundary_audit(
             ),
             "jointRetainedBandJoins": int(
                 reselection_manifest["statistics"]["retainedBandJoins"]
+            ),
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(output, result)
+    return result
+
+
+def _grid_offset(
+    source_grid: Any,
+    target_grid: Any,
+) -> tuple[int, int, int]:
+    if source_grid.coordinate_unit != target_grid.coordinate_unit or not np.allclose(
+        source_grid.cell_size_xyz,
+        target_grid.cell_size_xyz,
+        rtol=0.0,
+        atol=1.0e-9,
+    ):
+        raise ValueError("reference grids use incompatible units or cell sizes")
+    raw = (
+        np.asarray(source_grid.origin_xyz, dtype=np.float64)
+        - np.asarray(target_grid.origin_xyz, dtype=np.float64)
+    ) / np.asarray(target_grid.cell_size_xyz, dtype=np.float64)
+    rounded = np.rint(raw).astype(np.int64)
+    if not np.allclose(raw, rounded, rtol=0.0, atol=1.0e-7):
+        raise ValueError("reference grids do not share one cell lattice")
+    return tuple(int(value) for value in rounded)  # type: ignore[return-value]
+
+
+def _patch_rows_agree(
+    first: Any,
+    first_row: int,
+    second: Any,
+    second_row: int,
+    *,
+    height_tolerance_voxels: float,
+    normal_tolerance_degrees: float,
+    fiber_tolerance_degrees: float,
+) -> bool:
+    if (
+        abs(float(first.height[first_row]) - float(second.height[second_row]))
+        > height_tolerance_voxels
+        or _axial_angle_degrees(
+            first.normal_xyz[first_row], second.normal_xyz[second_row]
+        )
+        > normal_tolerance_degrees
+    ):
+        return False
+    first_fiber = first.fiber_xyz[first_row]
+    second_fiber = second.fiber_xyz[second_row]
+    if np.all(np.isfinite(first_fiber)) and np.all(np.isfinite(second_fiber)):
+        return (
+            _axial_angle_degrees(first_fiber, second_fiber)
+            <= fiber_tolerance_degrees
+        )
+    return not (
+        np.any(np.isfinite(first_fiber)) or np.any(np.isfinite(second_fiber))
+    )
+
+
+def _map_patch_subset(
+    source: Any,
+    source_groups: Mapping[tuple[int, int, int], list[int]],
+    reference: Any,
+    reference_groups: Mapping[tuple[int, int, int], list[int]],
+    *,
+    height_tolerance_voxels: float,
+    normal_tolerance_degrees: float,
+    fiber_tolerance_degrees: float,
+) -> dict[int, int]:
+    result: dict[int, int] = {}
+    used_reference: set[int] = set()
+    for cell, source_rows in source_groups.items():
+        candidates: list[tuple[float, int, int]] = []
+        for source_row in source_rows:
+            for reference_row in reference_groups.get(cell, []):
+                if not _patch_rows_agree(
+                    source,
+                    source_row,
+                    reference,
+                    reference_row,
+                    height_tolerance_voxels=height_tolerance_voxels,
+                    normal_tolerance_degrees=normal_tolerance_degrees,
+                    fiber_tolerance_degrees=fiber_tolerance_degrees,
+                ):
+                    continue
+                candidates.append(
+                    (
+                        abs(
+                            float(source.height[source_row])
+                            - float(reference.height[reference_row])
+                        ),
+                        source_row,
+                        reference_row,
+                    )
+                )
+        used_source: set[int] = set()
+        for _, source_row, reference_row in sorted(candidates):
+            if source_row in used_source or reference_row in used_reference:
+                continue
+            used_source.add(source_row)
+            used_reference.add(reference_row)
+            result[int(source.patch_id[source_row])] = int(
+                reference.patch_id[reference_row]
+            )
+    return result
+
+
+def run_cluster_reference_audit(
+    full_packet_root: str | Path,
+    cluster_root: str | Path,
+    output_path: str | Path,
+    *,
+    full_selected_root: str | Path | None = None,
+    height_tolerance_voxels: float = 1.0e-3,
+    normal_tolerance_degrees: float = 0.01,
+    fiber_tolerance_degrees: float = 0.01,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Compare an independent child-cluster solve with one full-context solve."""
+
+    tolerances = (
+        height_tolerance_voxels,
+        normal_tolerance_degrees,
+        fiber_tolerance_degrees,
+    )
+    if any(not math.isfinite(value) or value < 0.0 for value in tolerances):
+        raise ValueError("cluster reference tolerances must be nonnegative")
+    full = Path(full_packet_root).resolve()
+    cluster = Path(cluster_root).resolve()
+    output = Path(output_path).resolve()
+    packet_manifest = json.loads((full / "packets.json").read_text())
+    cluster_manifest_path = cluster / "cluster-reselection-v1.json"
+    cluster_manifest = json.loads(cluster_manifest_path.read_text())
+    if (
+        packet_manifest.get("schema")
+        != "pareidolia.cubical-dual-axis-sheet-packets"
+        or packet_manifest.get("state") != "complete"
+    ):
+        raise ValueError("full-context packet reference is incomplete")
+    if (
+        cluster_manifest.get("schema")
+        != "pareidolia.cubical-boundary-cluster-reselection"
+        or cluster_manifest.get("state") != "complete"
+    ):
+        raise ValueError("cluster reselection is incomplete")
+    selected = Path(
+        full_selected_root or packet_manifest["identity"]["inputRoot"]
+    ).resolve()
+    selected_data = selected / "selected-patches-v1.npz"
+    if sha256_file(selected_data) != packet_manifest["identity"][
+        "inputPatchDataSha256"
+    ]:
+        raise ValueError("full selected patches do not belong to packet reference")
+    cluster_artifact = cluster / "cluster-reselection-v1.npz"
+    identity: dict[str, Any] = {
+        "schema": CLUSTER_REFERENCE_AUDIT_SCHEMA,
+        "version": CLUSTER_REFERENCE_AUDIT_VERSION,
+        "fullPacketRoot": str(full),
+        "fullPacketGraphSha256": sha256_file(full / "packet-graph-v1.npz"),
+        "fullSelectedRoot": str(selected),
+        "fullSelectedDataSha256": sha256_file(selected_data),
+        "clusterRoot": str(cluster),
+        "clusterManifestSha256": sha256_file(cluster_manifest_path),
+        "clusterArtifactSha256": sha256_file(cluster_artifact),
+        "tolerances": {
+            "heightVoxels": height_tolerance_voxels,
+            "normalDegrees": normal_tolerance_degrees,
+            "fiberDegrees": fiber_tolerance_degrees,
+        },
+        "implementationSha256": sha256_file(Path(__file__)),
+    }
+    identity["identitySha256"] = canonical_json_hash(identity)
+    if output.is_file():
+        prior = json.loads(output.read_text())
+        if prior.get("identity", {}).get("identitySha256") != identity[
+            "identitySha256"
+        ]:
+            raise ValueError("cluster reference audit output has another identity")
+        if not force and prior.get("state") == "complete":
+            return prior
+
+    full_table = read_patch_shard(selected / "selected-patches-v1", verify=True)
+    cluster_table = read_patch_shard(
+        cluster / "selected-cluster-patches-v1", verify=True
+    )
+    full_offset = _grid_offset(full_table.grid, cluster_table.grid)
+    full_groups = _patch_groups(full_table, offset=full_offset)
+    cluster_groups = _patch_groups(cluster_table)
+    boundary_records = cluster_manifest["identity"]["inputs"]
+    boundary_manifests = tuple(
+        json.loads(
+            (Path(str(value["root"])) / "boundary-band-v1.json").read_text()
+        )
+        for value in boundary_records
+    )
+    baseline_tables = tuple(
+        read_patch_shard(Path(value["selectedRoot"]) / "selected-patches-v1")
+        for value in boundary_manifests
+    )
+    offsets = tuple(
+        tuple(int(item) for item in value["offsetCellsXYZ"])
+        for value in boundary_records
+    )
+    baseline_groups = tuple(
+        _patch_groups(table, offset=offsets[index])
+        for index, table in enumerate(baseline_tables)
+    )
+    owner: dict[tuple[int, int, int], tuple[int, tuple[int, int, int]]] = {}
+    for block, table in enumerate(baseline_tables):
+        offset = offsets[block]
+        for z in range(table.grid.shape_cells_xyz[2]):
+            for y in range(table.grid.shape_cells_xyz[1]):
+                for x in range(table.grid.shape_cells_xyz[0]):
+                    cell = (x + offset[0], y + offset[1], z + offset[2])
+                    if cell in owner:
+                        raise ValueError("cluster child ownership overlaps")
+                    owner[cell] = (block, (x, y, z))
+    with np.load(cluster_artifact) as values:
+        artifact = {name: np.asarray(values[name]) for name in values.files}
+    mutable_cells = {
+        tuple(int(value) for value in cell)
+        for cell in artifact["selectedCellCombinedXYZ"]
+    }
+    changed_cells = {
+        tuple(int(value) for value in cell)
+        for cell, changed in zip(
+            artifact["selectedCellCombinedXYZ"],
+            artifact["selectedConfigurationChanged"],
+        )
+        if int(changed) == 1
+    }
+    mutable_patch_ids = {
+        int(patch_id)
+        for patch_id, anchor in zip(
+            artifact["patchId"], artifact["patchIsAnchor"]
+        )
+        if int(anchor) == 0
+    }
+
+    baseline_exact: dict[tuple[int, int, int], bool] = {}
+    cluster_exact: dict[tuple[int, int, int], bool] = {}
+    baseline_count: dict[tuple[int, int, int], bool] = {}
+    cluster_count: dict[tuple[int, int, int], bool] = {}
+    scope: dict[tuple[int, int, int], str] = {}
+    block_by_cell: dict[tuple[int, int, int], int] = {}
+    depth = int(cluster_manifest["layout"]["depthCellsPerInput"])
+    for cell in mutable_cells:
+        if cell not in owner:
+            raise ValueError("cluster mutable cell is outside child ownership")
+        block, local_cell = owner[cell]
+        block_by_cell[cell] = block
+        faces = tuple(
+            tuple(int(item) for item in value)
+            for value in boundary_records[block]["internalFaces"]
+        )
+        face_memberships = sum(
+            local_cell[axis] < depth
+            if side == 0
+            else local_cell[axis]
+            >= baseline_tables[block].grid.shape_cells_xyz[axis] - depth
+            for axis, side in faces
+        )
+        scope[cell] = "corner" if face_memberships > 1 else "face-only"
+        baseline_exact[cell], baseline_count[cell] = _configuration_agrees(
+            baseline_tables[block],
+            baseline_groups[block].get(cell, []),
+            full_table,
+            full_groups.get(cell, []),
+            height_tolerance_voxels=height_tolerance_voxels,
+            normal_tolerance_degrees=normal_tolerance_degrees,
+            fiber_tolerance_degrees=fiber_tolerance_degrees,
+        )
+        cluster_exact[cell], cluster_count[cell] = _configuration_agrees(
+            cluster_table,
+            cluster_groups.get(cell, []),
+            full_table,
+            full_groups.get(cell, []),
+            height_tolerance_voxels=height_tolerance_voxels,
+            normal_tolerance_degrees=normal_tolerance_degrees,
+            fiber_tolerance_degrees=fiber_tolerance_degrees,
+        )
+
+    def agreement_record(cells: set[tuple[int, int, int]]) -> dict[str, int]:
+        changed = cells & changed_cells
+        return {
+            "cells": len(cells),
+            "changedCells": len(changed),
+            "baselineExact": sum(baseline_exact[value] for value in cells),
+            "clusterExact": sum(cluster_exact[value] for value in cells),
+            "baselineLayerCountAgreement": sum(
+                baseline_count[value] for value in cells
+            ),
+            "clusterLayerCountAgreement": sum(
+                cluster_count[value] for value in cells
+            ),
+            "changedTowardExact": sum(
+                not baseline_exact[value] and cluster_exact[value]
+                for value in changed
+            ),
+            "changedAwayFromExact": sum(
+                baseline_exact[value] and not cluster_exact[value]
+                for value in changed
+            ),
+        }
+
+    patch_map = _map_patch_subset(
+        cluster_table,
+        cluster_groups,
+        full_table,
+        full_groups,
+        height_tolerance_voxels=height_tolerance_voxels,
+        normal_tolerance_degrees=normal_tolerance_degrees,
+        fiber_tolerance_degrees=fiber_tolerance_degrees,
+    )
+    mapped_mutable_full = {
+        patch_map[value] for value in mutable_patch_ids if value in patch_map
+    }
+    cluster_join_keys: set[tuple[int, int, int, tuple[int, int, int]]] = set()
+    for first, second, axis, anchor in zip(
+        artifact["joinFirstPatchId"],
+        artifact["joinSecondPatchId"],
+        artifact["joinFaceAxis"],
+        artifact["joinFaceAnchorXYZ"],
+    ):
+        first_id = int(first)
+        second_id = int(second)
+        if first_id not in patch_map or second_id not in patch_map:
+            continue
+        pair = _pair(patch_map[first_id], patch_map[second_id])
+        cluster_join_keys.add(
+            (pair[0], pair[1], int(axis), tuple(int(value) for value in anchor))
+        )
+    mapped_full_ids = set(patch_map.values())
+    full_join_keys: set[tuple[int, int, int, tuple[int, int, int]]] = set()
+    with np.load(full / "packet-graph-v1.npz") as values:
+        full_component = {
+            int(patch_id): int(component_id)
+            for patch_id, component_id in zip(
+                values["patchId"], values["componentId"]
+            )
+        }
+        for first, second, axis, anchor in zip(
+            values["firstPatchId"],
+            values["secondPatchId"],
+            values["faceAxis"],
+            values["faceAnchorXYZ"],
+        ):
+            first_id = int(first)
+            second_id = int(second)
+            if (
+                first_id not in mapped_full_ids
+                or second_id not in mapped_full_ids
+                or not (
+                    first_id in mapped_mutable_full
+                    or second_id in mapped_mutable_full
+                )
+            ):
+                continue
+            pair = _pair(first_id, second_id)
+            full_join_keys.add(
+                (
+                    pair[0],
+                    pair[1],
+                    int(axis),
+                    tuple(
+                        int(anchor[index]) + full_offset[index]
+                        for index in range(3)
+                    ),
+                )
+            )
+        full_component_count = len(set(full_component.values()))
+    cluster_component = {
+        int(patch_id): int(component_id)
+        for patch_id, component_id in zip(
+            artifact["componentPatchId"], artifact["componentId"]
+        )
+    }
+    contingency = Counter(
+        (cluster_component[cluster_id], full_component[full_id])
+        for cluster_id, full_id in patch_map.items()
+    )
+    cluster_sizes = Counter(
+        cluster_component[value] for value in patch_map
+    )
+    full_sizes = Counter(full_component[value] for value in patch_map.values())
+
+    def pair_count(values: Mapping[Any, int]) -> int:
+        return sum(value * (value - 1) // 2 for value in values.values())
+
+    same_cluster = pair_count(cluster_sizes)
+    same_full = pair_count(full_sizes)
+    same_both = pair_count(contingency)
+    overlap = cluster_join_keys & full_join_keys
+    result: dict[str, Any] = {
+        "schema": CLUSTER_REFERENCE_AUDIT_SCHEMA,
+        "version": CLUSTER_REFERENCE_AUDIT_VERSION,
+        "state": "complete",
+        "identity": identity,
+        "scope": (
+            "Four child blocks were inferred independently from native CT; the "
+            "unsplit reconstruction is a full-context consistency reference, "
+            "not ground truth."
+        ),
+        "configurationAgreement": {
+            "allMutable": agreement_record(mutable_cells),
+            "corner": agreement_record(
+                {value for value in mutable_cells if scope[value] == "corner"}
+            ),
+            "faceOnly": agreement_record(
+                {value for value in mutable_cells if scope[value] == "face-only"}
+            ),
+            "byBlock": {
+                str(block): agreement_record(
+                    {
+                        value
+                        for value in mutable_cells
+                        if block_by_cell[value] == block
+                    }
+                )
+                for block in range(len(boundary_records))
+            },
+        },
+        "joinAgreement": {
+            "mappedClusterPatches": len(patch_map),
+            "totalClusterPatches": int(cluster_manifest["statistics"][
+                "selectedMutablePatches"
+            ])
+            + int(cluster_manifest["statistics"]["anchorPatches"]),
+            "mappedMutablePatches": sum(
+                value in patch_map for value in mutable_patch_ids
+            ),
+            "totalMutablePatches": len(mutable_patch_ids),
+            "mappableClusterJoins": len(cluster_join_keys),
+            "fullEligibleJoins": len(full_join_keys),
+            "exactJoins": len(overlap),
+            "clusterOnly": len(cluster_join_keys - full_join_keys),
+            "fullOnly": len(full_join_keys - cluster_join_keys),
+            "joinJaccard": round(
+                len(overlap)
+                / max(len(cluster_join_keys | full_join_keys), 1),
+                7,
+            ),
+        },
+        "componentAgreement": {
+            "clusterComponents": int(
+                cluster_manifest["statistics"]["recomposedComponents"]
+            ),
+            "fullContextComponents": full_component_count,
+            "delta": int(cluster_manifest["statistics"]["recomposedComponents"])
+            - full_component_count,
+            "mappedPatches": len(patch_map),
+            "coComponentPairsCluster": same_cluster,
+            "coComponentPairsFullContext": same_full,
+            "coComponentPairsBoth": same_both,
+            "coComponentPairDisagreements": (
+                same_cluster + same_full - 2 * same_both
+            ),
+            "coComponentPairPrecision": round(
+                same_both / max(same_cluster, 1), 7
+            ),
+            "coComponentPairRecall": round(
+                same_both / max(same_full, 1), 7
+            ),
+            "coComponentPairJaccard": round(
+                same_both / max(same_cluster + same_full - same_both, 1),
+                7,
             ),
         },
     }

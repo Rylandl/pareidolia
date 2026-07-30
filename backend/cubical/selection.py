@@ -126,6 +126,7 @@ def optimize_configurations(
     maximum_sweeps: int = 12,
     initial_configuration_indices: Mapping[Int3, tuple[int, int]] | None = None,
     mutable_cells: Set[Int3] | None = None,
+    active_cells: Set[Int3] | None = None,
 ) -> ConfigurationSelection:
     """Select one local stratigraphy per cell with face-relative likelihoods.
 
@@ -146,7 +147,7 @@ def optimize_configurations(
     resolved_matching = matching_settings or TraceMatchSettings()
     options_by_cell, degenerate_total = configuration_options(grid, tables)
     expected_cells = int(np.prod(grid.shape_cells_xyz))
-    if len(options_by_cell) != expected_cells:
+    if active_cells is None and len(options_by_cell) != expected_cells:
         missing = [
             (ix, iy, iz)
             for iz in range(grid.shape_cells_xyz[2])
@@ -158,7 +159,28 @@ def optimize_configurations(
             f"configuration shards cover {len(options_by_cell)}/{expected_cells} cells; "
             f"first missing cells: {missing[:4]}"
         )
-    pairs = _neighbor_pairs(grid)
+    if active_cells is not None:
+        active = set(active_cells)
+        invalid = {cell for cell in active if not grid.contains_cell(cell)}
+        if invalid:
+            raise ValueError(
+                "active cell set contains cells outside the grid: "
+                f"{sorted(invalid)[:4]}"
+            )
+        if not active:
+            raise ValueError("active cell set cannot be empty")
+        if set(options_by_cell) != active:
+            missing = active - set(options_by_cell)
+            extra = set(options_by_cell) - active
+            raise ValueError(
+                "configuration shards do not exactly cover active cells; "
+                f"missing={sorted(missing)[:4]}, extra={sorted(extra)[:4]}"
+            )
+    pairs = tuple(
+        value
+        for value in _neighbor_pairs(grid)
+        if value[0] in options_by_cell and value[1] in options_by_cell
+    )
     neighbors: dict[Int3, list[tuple[Int3, int, bool]]] = {
         cell: [] for cell in options_by_cell
     }

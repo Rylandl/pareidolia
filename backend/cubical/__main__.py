@@ -11,6 +11,7 @@ import numpy as np
 from .acus_adapter import AcusAdapterSettings, load_acus_flake_window
 from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarchy
 from .boundary_audit import (
+    run_cluster_reference_audit,
     run_independent_boundary_audit,
     run_boundary_reselection_split_audit,
     run_boundary_split_audit,
@@ -21,6 +22,7 @@ from .boundary_reselection import (
     BoundaryReselectionSettings,
     run_boundary_band_reselection,
 )
+from .cluster_reselection import run_boundary_cluster_reselection
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
@@ -30,6 +32,7 @@ from .export import write_block_obj, write_block_projection_png
 from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
 from .mode_bank import run_mode_bank
+from .multiseam import run_multiseam_audit
 from .pipeline import run_raw_acus_pipeline
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
@@ -827,6 +830,23 @@ def _boundary_reselection(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _boundary_cluster_reselection(args: argparse.Namespace) -> None:
+    summary = run_boundary_cluster_reselection(
+        tuple(args.boundary),
+        args.output,
+        settings=BoundaryReselectionSettings(
+            unary_scale=args.unary_scale,
+            pairwise_scale=args.pairwise_scale,
+            interior_unmatched_trace_penalty=(
+                args.interior_unmatched_trace_penalty
+            ),
+            maximum_sweeps=args.maximum_sweeps,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _selected_subblock(args: argparse.Namespace) -> None:
     summary = extract_selected_patch_subblock(
         args.root,
@@ -864,6 +884,30 @@ def _independent_boundary_audit(args: argparse.Namespace) -> None:
         args.selected_merge_root,
         args.reselection_root,
         args.output,
+        height_tolerance_voxels=args.height_tolerance,
+        normal_tolerance_degrees=args.normal_tolerance,
+        fiber_tolerance_degrees=args.fiber_tolerance,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _multiseam_audit(args: argparse.Namespace) -> None:
+    summary = run_multiseam_audit(
+        tuple(args.reselection),
+        args.output,
+        cluster_root=args.cluster_root,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _cluster_reference_audit(args: argparse.Namespace) -> None:
+    summary = run_cluster_reference_audit(
+        args.full_packet_root,
+        args.cluster_root,
+        args.output,
+        full_selected_root=args.full_selected_root,
         height_tolerance_voxels=args.height_tolerance,
         normal_tolerance_degrees=args.normal_tolerance,
         fiber_tolerance_degrees=args.fiber_tolerance,
@@ -1469,6 +1513,29 @@ def main() -> None:
     boundary_reselection.add_argument("--maximum-sweeps", type=int, default=12)
     boundary_reselection.add_argument("--force", action="store_true")
     boundary_reselection.set_defaults(handler=_boundary_reselection)
+    cluster_reselection = subparsers.add_parser(
+        "reselect-boundary-cluster",
+        description=(
+            "Jointly reselect the union of all meeting face bands in one "
+            "rectangular 2x2x2 child cluster while keeping child interiors frozen."
+        ),
+    )
+    cluster_reselection.add_argument(
+        "--boundary",
+        action="append",
+        type=Path,
+        required=True,
+        help="boundary-band root; repeat once for each child block",
+    )
+    cluster_reselection.add_argument("--output", type=Path, required=True)
+    cluster_reselection.add_argument("--unary-scale", type=float, default=1.0)
+    cluster_reselection.add_argument("--pairwise-scale", type=float, default=0.2)
+    cluster_reselection.add_argument(
+        "--interior-unmatched-trace-penalty", type=float, default=0.0
+    )
+    cluster_reselection.add_argument("--maximum-sweeps", type=int, default=12)
+    cluster_reselection.add_argument("--force", action="store_true")
+    cluster_reselection.set_defaults(handler=_boundary_cluster_reselection)
     selected_subblock = subparsers.add_parser(
         "extract-selected-subblock",
         description=(
@@ -1539,6 +1606,52 @@ def main() -> None:
     )
     independent_audit.add_argument("--force", action="store_true")
     independent_audit.set_defaults(handler=_independent_boundary_audit)
+    multiseam_audit = subparsers.add_parser(
+        "audit-multiseam",
+        description=(
+            "Audit configuration and topology agreement where a network of "
+            "pairwise boundary-band solutions overlap at block corners."
+        ),
+    )
+    multiseam_audit.add_argument(
+        "--reselection",
+        action="append",
+        type=Path,
+        required=True,
+        help="pairwise boundary-reselection root; repeat for every seam",
+    )
+    multiseam_audit.add_argument("--output", type=Path, required=True)
+    multiseam_audit.add_argument(
+        "--cluster-root",
+        type=Path,
+        help="optional joint cluster solution to compare with pairwise overlaps",
+    )
+    multiseam_audit.add_argument("--force", action="store_true")
+    multiseam_audit.set_defaults(handler=_multiseam_audit)
+    cluster_reference_audit = subparsers.add_parser(
+        "audit-boundary-cluster-reference",
+        description=(
+            "Compare one independent child-cluster solve with an unsplit "
+            "full-context packet reconstruction over the same cuboid."
+        ),
+    )
+    cluster_reference_audit.add_argument(
+        "--full-packet-root", type=Path, required=True
+    )
+    cluster_reference_audit.add_argument("--full-selected-root", type=Path)
+    cluster_reference_audit.add_argument("--cluster-root", type=Path, required=True)
+    cluster_reference_audit.add_argument("--output", type=Path, required=True)
+    cluster_reference_audit.add_argument(
+        "--height-tolerance", type=float, default=1.0e-3
+    )
+    cluster_reference_audit.add_argument(
+        "--normal-tolerance", type=float, default=0.01
+    )
+    cluster_reference_audit.add_argument(
+        "--fiber-tolerance", type=float, default=0.01
+    )
+    cluster_reference_audit.add_argument("--force", action="store_true")
+    cluster_reference_audit.set_defaults(handler=_cluster_reference_audit)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

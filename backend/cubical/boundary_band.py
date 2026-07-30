@@ -10,7 +10,9 @@ import numpy as np
 
 from .block import BlockBounds, assemble_surface_hierarchy
 from .boundary_topology import (
-    build_frozen_face_states,
+    FrozenFaceState,
+    build_frozen_region_states,
+    write_frozen_region_artifact,
     write_frozen_topology_artifact,
 )
 from .contracts import atomic_json, canonical_json_hash, sha256_file
@@ -636,11 +638,29 @@ def run_boundary_band_export(
         packet_root=packet,
         leaf_shape_cells_xyz=resolved.leaf_shape_cells_xyz,
     )
-    frozen_states = build_frozen_face_states(
+    frozen_regions = build_frozen_region_states(
         patch_values,
         graph.joins,
         shape,
         resolved.depth_cells,
+    )
+    frozen_states = tuple(
+        FrozenFaceState(
+            region.faces[0][0],
+            region.faces[0][1],
+            region.depth_cells,
+            (
+                region.depth_cells
+                if region.faces[0][1] == 0
+                else shape[region.faces[0][0]] - region.depth_cells
+            ),
+            region.frozen_component_count,
+            region.detached_component_count,
+            region.components,
+            region.crossings,
+        )
+        for region in frozen_regions
+        if len(region.faces) == 1
     )
     anchor_patch_ids = {
         patch_id
@@ -670,6 +690,10 @@ def run_boundary_band_export(
     frozen_topology_path = write_frozen_topology_artifact(
         output / "boundary-frozen-topology-v1.npz",
         frozen_states,
+    )
+    frozen_regions_path = write_frozen_region_artifact(
+        output / "boundary-frozen-regions-v1.npz",
+        frozen_regions,
     )
     component_by_patch = graph.component_by_patch
     join_first = np.asarray(
@@ -917,6 +941,7 @@ def run_boundary_band_export(
                     f"{value.axis}:{value.side}": value.detached_component_count
                     for value in frozen_states
                 },
+                "frozenRegionCertificates": len(frozen_regions),
                 "totalGraphComponents": len(set(component_by_patch.values())),
                 "boundaryComponents": len(component_ids),
                 "boundaryComponentOccupiedCells": len(flattened_component_cells),
@@ -957,6 +982,11 @@ def run_boundary_band_export(
                     "path": frozen_topology_path.name,
                     "bytes": frozen_topology_path.stat().st_size,
                     "sha256": sha256_file(frozen_topology_path),
+                },
+                "frozenRegions": {
+                    "path": frozen_regions_path.name,
+                    "bytes": frozen_regions_path.stat().st_size,
+                    "sha256": sha256_file(frozen_regions_path),
                 },
                 "configurations": candidate_manifest,
             },
