@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c/sheet-halo-core-12x12x10-v1/halo-1"
-    / "owned-bp32-c10-u010-collision-cut-pure-deep-v1"
+    / "owned-bp32-c10-u010-collision-cut-curvature-v1"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -163,6 +163,29 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     if summary_path.is_file():
         summary = json.loads(summary_path.read_text())
     best = summary.get("restitch", {}).get("best", {})
+    curvature = summary.get("restitch", {}).get("sheetCurvatureRefinement", {})
+    curvature_by_component = {
+        str(value["componentId"]): value
+        for value in curvature.get("after", {}).get("components", ())
+    }
+    for component in components:
+        record = curvature_by_component.get(component["stableId"])
+        if record is None:
+            continue
+        component["curvature"] = {
+            "flaggedJoins": int(record.get("flaggedJoins", 0)),
+            "maximumPressure": float(record.get("maximumPressure", 0.0)),
+            "directBendP90Degrees": float(
+                record.get("directBendDegrees", {}).get("p90") or 0.0
+            ),
+            "branchContrastP90Degrees": float(
+                record.get("branchContrastDegrees", {}).get("p90") or 0.0
+            ),
+            "normalConeP90DegreesDiagnosticOnly": float(
+                record.get("globalNormalConeDegreesDiagnosticOnly", {}).get("p90")
+                or 0.0
+            ),
+        }
     return {
         "schema": "pareidolia.block-sheet-volume",
         "version": 1,
@@ -189,6 +212,12 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
             ),
             "retainedInteriorTraceFraction": float(
                 best.get("retainedInteriorTraceFraction", 0.0)
+            ),
+            "curvatureFlaggedJoinsBefore": int(
+                curvature.get("before", {}).get("flaggedJoins", 0)
+            ),
+            "curvatureFlaggedJoinsAfter": int(
+                curvature.get("after", {}).get("flaggedJoins", 0)
             ),
         },
         "components": components,

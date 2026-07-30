@@ -168,6 +168,42 @@ only four retained joins before exchange; the higher-objective forward order
 remains the default, while both remain available as an explicit sensitivity
 audit.
 
+### Axial curvature refinement
+
+The retained graph now has an optional post-stitch geometry stage for the abrupt
+fold-backs visible in otherwise large components. It never assigns signs to normal
+vectors. For every retained join it measures:
+
+1. direct axial normal bend across the shared face; and
+2. multiscale axial-mean separation between graph-local half-neighborhoods on the
+   two sides of that face, after subtracting the larger within-side normal
+   dispersion.
+
+The second signal distinguishes a coherent hinge between two locally smooth pieces
+from a sheet whose normal rotates gradually over its span. Whole-component normal
+spread remains diagnostic only because a valid scroll sheet can rotate substantially
+at larger scales. Direct-bend and positive neighborhood-contrast limits are robust
+median-plus-MAD estimates from the current solved block. They are frozen before
+refinement so repeated rounds cannot tighten their own calibration by peeling off
+the tail.
+
+Each detected hinge seeds an undirected minimum cut. Edge capacity combines retained
+correspondence benefit with curvature pressure, preserving strong smooth joins while
+cutting the least-supported boundary. Removing joins is replayed through the exact
+surface constructor; then only data-derived direct-bend-safe alternatives are offered
+to the ordinary topology validator, with the untouched graph fixed. A following round
+can detect neighborhood inconsistency introduced by that refill.
+
+On the 12 x 12 x 10 owned core, the frozen model measured a 26.90-degree direct-bend
+limit and a 15.53-degree positive neighborhood-contrast limit. Two rounds reduced
+389 flagged joins to zero, forbade 468 cut edges, and recovered 110 topology-safe
+alternatives for a final 5,336 joins. The largest fragments are 169, 161, and 137
+cells; their direct-bend p90 values are 13.26, 16.40, and 16.07 degrees. The folded
+138- and 134-cell identities became 116- and 88-cell smooth fragments. This is a
+deliberate geometry/coverage tradeoff and identifies the now-clean open boundaries
+for configuration-level recovery rather than hiding incorrect layer crossings inside
+large component counts.
+
 ## Joint configuration and sheet inference
 
 The joint solver consumes `sheet-evidence-v1`, not only the current selected

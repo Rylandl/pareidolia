@@ -235,7 +235,8 @@ by the existing commands:
 python3 -m backend.cubical restitch-block-sheets \
   --cluster /path/to/cluster-reselection-v2 \
   --materialized /path/to/materialized-block \
-  --output /path/to/restitch-result
+  --output /path/to/restitch-result \
+  --curvature-refinement
 ```
 
 The collision cut runs to physical completion by default; an operational cap
@@ -249,6 +250,19 @@ from 6,590 to 6,424, lowers the local-to-global topology tax from 967 to 932,
 and raises raw correspondence benefit. An explicit two-unit open-endpoint prior
 gives the Pareto variant with 5,709 joins, 6,390 open endpoints, 404 rather than
 418 components, and a 915-join topology tax for a 0.044% raw-benefit trade.
+The optional curvature refinement is a geometry-correction stage, not a fixed
+normal-angle gate. It measures unsigned one-cell bend and the contrast between
+axial mean normals in neighborhoods on opposite sides of every retained join.
+Within-side dispersion is subtracted so gradual macro-curvature remains valid.
+Robust limits are calibrated from the block's own solved graph and then frozen;
+minimum-cost cuts remove abrupt hinges and the exact topology validator rematches
+their newly open traces. On the owned audit core this reduced 389 detected abrupt
+hinges to zero in two rounds, recovered 110 valid joins after cutting, and retained
+5,336 joins total. The three visibly folded 155-, 138-, and 134-cell components
+resolved into smooth fragments, while the two convincing large components remained
+169 and 161 cells. This tradeoff is explicit: retained endpoint utilization falls
+from 63.93% to 59.93% until later configuration-level gap recovery can add genuinely
+supported geometry.
 `audit-sheet-core` writes the complete reusable
 evidence/configuration/topology failure decomposition.
 

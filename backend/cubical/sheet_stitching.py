@@ -26,6 +26,7 @@ from .matching import (
     face_patch_ranks,
     match_face_traces,
 )
+from .sheet_curvature import SheetCurvatureAnalysis, analyze_sheet_curvature
 from .surface_graph import (
     component_statistics,
     join_key,
@@ -102,6 +103,13 @@ class SheetStitchingSettings:
     collision_cut_enabled: bool = True
     collision_cut_limit: int = 0
     collision_cut_order: str = "forward"
+    curvature_refinement_enabled: bool = False
+    curvature_neighborhood_radius: int = 3
+    curvature_minimum_branch_support: int = 3
+    curvature_robust_standard_deviations: float = 3.0
+    curvature_minimum_calibration_joins: int = 32
+    curvature_round_count: int = 3
+    curvature_cut_penalty_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.minimum_join_benefit):
@@ -131,6 +139,26 @@ class SheetStitchingSettings:
                 "collision-cut order must be one of "
                 f"{sorted(COLLISION_CUT_ORDERS)}"
             )
+        if not isinstance(self.curvature_refinement_enabled, bool):
+            raise ValueError("curvature-refinement enabled state must be boolean")
+        if self.curvature_neighborhood_radius < 1:
+            raise ValueError("curvature neighborhood radius must be positive")
+        if self.curvature_minimum_branch_support < 1:
+            raise ValueError("minimum curvature branch support must be positive")
+        if (
+            not math.isfinite(self.curvature_robust_standard_deviations)
+            or self.curvature_robust_standard_deviations <= 0.0
+        ):
+            raise ValueError("curvature deviations must be finite and positive")
+        if self.curvature_minimum_calibration_joins < 1:
+            raise ValueError("minimum curvature calibration joins must be positive")
+        if self.curvature_round_count < 1:
+            raise ValueError("curvature refinement rounds must be positive")
+        if (
+            not math.isfinite(self.curvature_cut_penalty_weight)
+            or self.curvature_cut_penalty_weight < 0.0
+        ):
+            raise ValueError("curvature cut penalty must be finite and nonnegative")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -1022,6 +1050,254 @@ def _exchange_sheet_neighborhoods(
     }
 
 
+def _analyze_selection_curvature(
+    patches: tuple[ClippedPatch, ...],
+    selection: SurfaceJoinSelection,
+    settings: SheetStitchingSettings,
+    *,
+    calibration: SheetCurvatureAnalysis | None = None,
+) -> SheetCurvatureAnalysis:
+    return analyze_sheet_curvature(
+        patches,
+        selection.joins,
+        neighborhood_radius=settings.curvature_neighborhood_radius,
+        minimum_branch_support=settings.curvature_minimum_branch_support,
+        robust_standard_deviations=(
+            settings.curvature_robust_standard_deviations
+        ),
+        minimum_calibration_joins=settings.curvature_minimum_calibration_joins,
+        calibration=calibration,
+    )
+
+
+def _curvature_quality(
+    selection: SurfaceJoinSelection,
+    analysis: SheetCurvatureAnalysis,
+) -> tuple[int, float, int]:
+    flagged = tuple(value for value in analysis.join_curvature if value.flagged)
+    excess = sum(max(value.pressure - 1.0, 0.0) ** 2 for value in flagged)
+    # Geometry is authoritative.  Join cardinality only breaks a tie between
+    # solutions with indistinguishable abrupt-curvature evidence.
+    return len(flagged), round(float(excess), 12), -len(selection.joins)
+
+
+def _curvature_refine_selection(
+    block: SurfaceBlock,
+    eligible: tuple[SheetJoinCandidate, ...],
+    candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
+    initial: SurfaceJoinSelection,
+    settings: SheetStitchingSettings,
+) -> tuple[
+    SurfaceJoinSelection,
+    SheetCurvatureAnalysis,
+    SheetCurvatureAnalysis,
+    dict[str, Any],
+]:
+    """Cut abrupt hinges, then exactly rematch only the opened topology.
+
+    Every normal comparison is axial.  Calibration is frozen from the input
+    graph so repeated rounds cannot tighten their own noise model by peeling
+    off the current tail.  A focal bad join is separated with a minimum cut
+    whose capacities preserve high-benefit, low-curvature joins.  The ordinary
+    exact surface validator remains the sole authority for every refill.
+    """
+
+    calibration = _analyze_selection_curvature(
+        block.patches,
+        initial,
+        settings,
+    )
+    if not calibration.calibration_sufficient:
+        return initial, calibration, calibration, {
+            "enabled": True,
+            "applied": False,
+            "reason": "insufficient robust calibration support",
+            "forbiddenJoinCount": 0,
+            "rounds": [],
+        }
+    retained_join_reward = 2.0 * settings.unmatched_trace_penalty
+    eligible_by_key = {value.key: value for value in eligible}
+    current = initial
+    current_analysis = calibration
+    forbidden: set[JoinKey] = set()
+    round_records: list[dict[str, Any]] = []
+    for round_index in range(settings.curvature_round_count):
+        flagged = tuple(
+            sorted(
+                (value for value in current_analysis.join_curvature if value.flagged),
+                key=lambda value: (-value.pressure, value.key),
+            )
+        )
+        if not flagged:
+            break
+        analysis_by_key = current_analysis.by_key()
+        remaining = {join_key(value): value for value in current.joins}
+        round_forbidden: set[JoinKey] = set()
+        cut_records: list[dict[str, Any]] = []
+        focal_cut_count = 0
+        for focal in flagged:
+            if focal.key not in remaining:
+                continue
+            remaining_joins = tuple(remaining[key] for key in sorted(remaining))
+            component_by_patch, members = _component_partition(
+                block.patches, remaining_joins
+            )
+            source = focal.key[0]
+            target = focal.key[1]
+            source_component = component_by_patch[source]
+            if component_by_patch[target] != source_component:
+                continue
+            member_ids = members[source_component]
+            member_set = set(member_ids)
+            internal = tuple(
+                candidate_by_key[key]
+                for key in sorted(remaining)
+                if remaining[key].first_patch_id in member_set
+                and remaining[key].second_patch_id in member_set
+            )
+            capacities: dict[JoinKey, float] = {}
+            for candidate in internal:
+                pressure = analysis_by_key[candidate.key].pressure
+                curvature_excess = max(pressure - 1.0, 0.0)
+                preservation = max(
+                    candidate.benefit + retained_join_reward,
+                    1.0e-6,
+                )
+                capacities[candidate.key] = preservation / (
+                    1.0
+                    + settings.curvature_cut_penalty_weight
+                    * curvature_excess**2
+                )
+            cut, capacity = _minimum_undirected_join_cut(
+                member_ids,
+                internal,
+                capacities,
+                source,
+                target,
+            )
+            if not cut:
+                raise RuntimeError("abrupt sheet hinge has no separating cut")
+            remaining = {
+                key: value for key, value in remaining.items() if key not in cut
+            }
+            round_forbidden.update(cut)
+            focal_cut_count += 1
+            if len(cut_records) < 16:
+                cut_records.append(
+                    {
+                        "focalJoin": focal.record(),
+                        "componentPatches": len(member_ids),
+                        "removedJoins": len(cut),
+                        "capacity": round(float(capacity), 6),
+                    }
+                )
+        if not round_forbidden:
+            break
+        candidate_forbidden = forbidden | round_forbidden
+        cut_selection = SurfaceJoinSelection(
+            tuple(remaining[key] for key in sorted(remaining)),
+            tuple(),
+        )
+        # Removing joins cannot create a topology violation, but replaying the
+        # graph here makes that invariant executable rather than assumed.
+        surface_block_from_retained_joins(
+            block.grid,
+            block.bounds,
+            block.patches,
+            cut_selection.joins,
+        )
+        safe_keys = frozenset(remaining)
+        universe = dict(remaining)
+        universe.update(
+            {
+                key: value.match
+                for key, value in eligible_by_key.items()
+                if key not in candidate_forbidden
+                and math.degrees(value.match.normal_angle_radians)
+                <= calibration.direct_scale.upper_limit_degrees + 1.0e-9
+            }
+        )
+        direct_limit = calibration.direct_scale.upper_limit_degrees
+        priorities: dict[JoinKey, float] = {}
+        for key in universe:
+            candidate = candidate_by_key[key]
+            direct_degrees = math.degrees(candidate.match.normal_angle_radians)
+            direct_pressure = direct_degrees / max(direct_limit, 1.0e-6)
+            curvature_excess = max(direct_pressure - 1.0, 0.0)
+            priorities[key] = (
+                max(candidate.benefit + retained_join_reward, 1.0e-6)
+                / (
+                    1.0
+                    + settings.curvature_cut_penalty_weight
+                    * curvature_excess**2
+                )
+            )
+        refilled = select_surface_joins(
+            block.patches,
+            tuple(universe.values()),
+            fixed_join_keys=safe_keys,
+            candidate_priorities=priorities,
+        )
+        cut_analysis = _analyze_selection_curvature(
+            block.patches,
+            cut_selection,
+            settings,
+            calibration=calibration,
+        )
+        refilled_analysis = _analyze_selection_curvature(
+            block.patches,
+            refilled,
+            settings,
+            calibration=calibration,
+        )
+        refilled_quality = _curvature_quality(refilled, refilled_analysis)
+        before_quality = _curvature_quality(current, current_analysis)
+        # Intermediate rounds retain every topology-safe smooth alternative so
+        # newly exposed multiscale inconsistencies can be cut on the following
+        # pass.  The final round closes with the clean cut state rather than
+        # knowingly leaving a fresh abrupt hinge behind.
+        if (
+            round_index + 1 < settings.curvature_round_count
+            and refilled_quality < before_quality
+        ):
+            proposal = refilled
+            proposal_analysis = refilled_analysis
+            proposal_kind = "minimum-cut + exact open-trace refill"
+        else:
+            proposal = cut_selection
+            proposal_analysis = cut_analysis
+            proposal_kind = "minimum-cut"
+        after_quality = _curvature_quality(proposal, proposal_analysis)
+        accepted = after_quality < before_quality
+        round_records.append(
+            {
+                "round": round_index,
+                "inputFlaggedJoins": before_quality[0],
+                "inputCurvatureExcess": before_quality[1],
+                "focalCuts": focal_cut_count,
+                "forbiddenJoinsAdded": len(round_forbidden),
+                "cutOnlyJoins": len(cut_selection.joins),
+                "refilledJoins": len(refilled.joins),
+                "proposal": proposal_kind,
+                "outputFlaggedJoins": after_quality[0],
+                "outputCurvatureExcess": after_quality[1],
+                "accepted": accepted,
+                "cuts": cut_records,
+            }
+        )
+        if not accepted:
+            break
+        current = proposal
+        current_analysis = proposal_analysis
+        forbidden = candidate_forbidden
+    return current, calibration, current_analysis, {
+        "enabled": True,
+        "applied": current is not initial,
+        "forbiddenJoinCount": len(forbidden),
+        "rounds": round_records,
+    }
+
+
 def _gap_census(
     block: SurfaceBlock,
     catalog: SheetJoinCatalog,
@@ -1263,11 +1539,52 @@ def restitch_sheet_graph(
             resolved.unmatched_trace_penalty,
         ),
     }
+    if resolved.curvature_refinement_enabled:
+        (
+            refined,
+            curvature_before,
+            curvature_after,
+            curvature_statistics,
+        ) = _curvature_refine_selection(
+            block,
+            eligible,
+            by_key,
+            exchanged,
+            resolved,
+        )
+        final_selection = refined
+        final_record = {
+            "proposalIndex": int(best_record["proposalIndex"]),
+            "proposal": (
+                f"{best_record['proposal']} + sheet-neighborhood-exchange "
+                "+ curvature-aware topology refinement"
+            ),
+            **_selection_record(
+                block.patches,
+                refined,
+                by_key,
+                policy.strict_settings.unmatched_negative_log_likelihood,
+                interior_endpoint_count,
+                resolved.unmatched_trace_penalty,
+            ),
+        }
+        curvature_summary = {
+            **curvature_statistics,
+            "before": curvature_before.record(),
+            "after": curvature_after.record(),
+        }
+    else:
+        final_selection = exchanged
+        final_record = exchanged_record
+        curvature_summary = {
+            "enabled": False,
+            "applied": False,
+        }
     best_block = surface_block_from_retained_joins(
         block.grid,
         block.bounds,
         block.patches,
-        exchanged.joins,
+        final_selection.joins,
     )
     summary = {
         "baseline": {
@@ -1275,16 +1592,18 @@ def restitch_sheet_graph(
             "gapCensus": _gap_census(block, catalog),
         },
         "best": {
-            **exchanged_record,
+            **final_record,
             "gapCensus": _gap_census(best_block, catalog),
         },
         "initialGlobalProposal": best_record,
+        "preCurvatureRefinement": exchanged_record,
         "sheetNeighborhoodExchange": {
             **exchange_statistics,
             "trials": list(exchange_records),
         },
+        "sheetCurvatureRefinement": curvature_summary,
         "delta": {
-            key: round(float(exchanged_record[key]) - float(baseline[key]), 6)
+            key: round(float(final_record[key]) - float(baseline[key]), 6)
             for key in (
                 "retainedJoins",
                 "components",
@@ -1456,6 +1775,7 @@ def run_block_sheet_restitching(
             name: sha256_file(module_root / name)
             for name in (
                 "sheet_stitching.py",
+                "sheet_curvature.py",
                 "block.py",
                 "matching.py",
                 "surface_graph.py",
@@ -1515,7 +1835,8 @@ def run_block_sheet_restitching(
         semantics=(
             "fixed Acus patch geometry with complete face correspondence "
             "catalog, dense collision-cut segmentation, exact topology "
-            "validation, and whole-sheet neighborhood exchanges"
+            "validation, whole-sheet neighborhood exchanges, and optional "
+            "axial curvature-aware hinge refinement"
         ),
         provenance={
             "inputRoot": str(materialized),
@@ -1539,7 +1860,8 @@ def run_block_sheet_restitching(
             "optimization": (
                 "exact per-face alignment, minimum-cost segmentation of dense "
                 "same-cell collision components, whole-block deterministic "
-                "proposals, and non-monotone whole-sheet neighborhood exchanges"
+                "proposals, non-monotone whole-sheet neighborhood exchanges, "
+                "and optional robust curvature cuts with exact open-trace refill"
             ),
             "hardConstraints": [
                 "one join per patch trace",

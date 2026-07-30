@@ -54,16 +54,19 @@ from backend.cubical.contextual_growth import (
     discover_contextual_growth_candidates,
 )
 from backend.cubical.geometry import (
+    ClippedPatch,
     DegeneratePlaneIntersection,
     PlaneEstimate,
     axial_angle_radians,
     clip_plane_to_cell,
 )
 from backend.cubical.matching import (
+    TraceMatch,
     TraceMatchSettings,
     align_face_patches,
     match_face_traces,
 )
+from backend.cubical.sheet_curvature import analyze_sheet_curvature
 from backend.cubical.multiseam import run_multiseam_audit
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
@@ -129,7 +132,7 @@ from backend.cubical.stratigraphic_continuity import (
 )
 from backend.cubical.stratigraphy import ConfigurationTable, LayerModeTable
 from backend.cubical.subblock import extract_selected_patch_subblock
-from backend.cubical.topology import GridSpec, cell_edges, cell_face
+from backend.cubical.topology import GridFace, GridSpec, cell_edges, cell_face
 from backend.cubical.tables import PatchTable, read_patch_shard, write_patch_shard
 from backend.cubical.synthetic import (
     SyntheticStackSettings,
@@ -2629,6 +2632,93 @@ class CubicalGeometryTests(unittest.TestCase):
             result.summary["best"]["totalJoinBenefit"],
             result.summary["baseline"]["totalJoinBenefit"],
         )
+
+    def test_sheet_curvature_separates_gradual_bend_from_abrupt_hinge(self) -> None:
+        def chain(
+            angles_degrees: tuple[float, ...],
+        ) -> tuple[tuple[ClippedPatch, ...], tuple[TraceMatch, ...]]:
+            patches = []
+            for index, angle_degrees in enumerate(angles_degrees):
+                angle = math.radians(angle_degrees)
+                normal = np.asarray((math.sin(angle), 0.0, math.cos(angle)))
+                # Alternating signs exercise the axial representation directly;
+                # they must not manufacture a 180-degree discontinuity.
+                if index % 2:
+                    normal = -normal
+                patches.append(
+                    ClippedPatch(
+                        index + 1,
+                        (index, 0, 0),
+                        PlaneEstimate.isotropic(
+                            normal,
+                            0.0,
+                            math.radians(2.0),
+                            0.02,
+                        ),
+                        tuple(),
+                        tuple(),
+                    )
+                )
+            joins = []
+            for index, (first, second) in enumerate(
+                zip(patches[:-1], patches[1:])
+            ):
+                normal_angle = axial_angle_radians(
+                    first.estimate.normal_xyz,
+                    second.estimate.normal_xyz,
+                )
+                joins.append(
+                    TraceMatch(
+                        first.patch_id,
+                        second.patch_id,
+                        GridFace(0, (index + 1, 0, 0)),
+                        True,
+                        tuple(),
+                        tuple(),
+                        normal_angle,
+                        0.0,
+                        None,
+                        None,
+                        None,
+                        0.0,
+                        0.0,
+                        1.0,
+                    )
+                )
+            return tuple(patches), tuple(joins)
+
+        gradual_patches, gradual_joins = chain(
+            (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0)
+        )
+        gradual = analyze_sheet_curvature(
+            gradual_patches,
+            gradual_joins,
+            neighborhood_radius=2,
+            minimum_branch_support=2,
+            minimum_calibration_joins=1,
+        )
+        self.assertFalse(any(value.flagged for value in gradual.join_curvature))
+        self.assertLess(
+            gradual.component_records[0][
+                "globalNormalConeDegreesDiagnosticOnly"
+            ]["maximum"],
+            20.0,
+        )
+
+        hinge_patches, hinge_joins = chain(
+            (0.0, 0.0, 0.0, 0.0, 60.0, 60.0, 60.0, 60.0)
+        )
+        hinge = analyze_sheet_curvature(
+            hinge_patches,
+            hinge_joins,
+            neighborhood_radius=2,
+            minimum_branch_support=2,
+            minimum_calibration_joins=1,
+        )
+        flagged = tuple(value for value in hinge.join_curvature if value.flagged)
+        self.assertEqual(len(flagged), 1)
+        self.assertAlmostEqual(flagged[0].direct_bend_degrees, 60.0, places=6)
+        self.assertGreater(flagged[0].branch_contrast_degrees or 0.0, 40.0)
 
     def test_sheet_factor_uses_exact_noncrossing_augmenting_alignment(self) -> None:
         benefit, matched, quarter = _ordered_alignment_factor(

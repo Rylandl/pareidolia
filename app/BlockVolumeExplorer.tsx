@@ -30,6 +30,13 @@ type BlockComponent = {
   meanConfidence: number;
   boundsMinimumXYZ: Point3;
   boundsMaximumXYZ: Point3;
+  curvature?: {
+    flaggedJoins: number;
+    maximumPressure: number;
+    directBendP90Degrees: number;
+    branchContrastP90Degrees: number;
+    normalConeP90DegreesDiagnosticOnly: number;
+  };
 };
 
 type BlockSheetResult = {
@@ -50,6 +57,8 @@ type BlockSheetResult = {
     largestComponentPatchCount: number;
     unresolvedInteriorTraceEndpoints: number;
     retainedInteriorTraceFraction: number;
+    curvatureFlaggedJoinsBefore: number;
+    curvatureFlaggedJoinsAfter: number;
   };
   components: BlockComponent[];
   patches: BlockPatch[];
@@ -749,7 +758,7 @@ export function BlockVolumeExplorer() {
         </div>
         <p className="block-volume-summary">
           {result
-            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins`
+            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.curvatureFlaggedJoinsAfter} abrupt hinges`
             : message}
         </p>
       </header>
@@ -905,6 +914,13 @@ export function BlockVolumeExplorer() {
                     .map((value, index) => Math.round(value - selected.boundsMinimumXYZ[index]))
                     .join(" × ")} vox
                 </small>
+                {selected.curvature ? (
+                  <small>
+                    local bend p90 {selected.curvature.directBendP90Degrees.toFixed(1)}° ·
+                    normal spread p90 {selected.curvature.normalConeP90DegreesDiagnosticOnly.toFixed(1)}° ·
+                    {selected.curvature.flaggedJoins} abrupt seams
+                  </small>
+                ) : null}
               </div>
               <button
                 type="button"

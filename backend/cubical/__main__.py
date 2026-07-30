@@ -689,6 +689,19 @@ def _restitch_block_sheets(args: argparse.Namespace) -> None:
             collision_cut_enabled=not args.no_collision_cut,
             collision_cut_limit=args.collision_cut_limit,
             collision_cut_order=args.collision_cut_order,
+            curvature_refinement_enabled=args.curvature_refinement,
+            curvature_neighborhood_radius=args.curvature_neighborhood_radius,
+            curvature_minimum_branch_support=(
+                args.curvature_minimum_branch_support
+            ),
+            curvature_robust_standard_deviations=(
+                args.curvature_robust_standard_deviations
+            ),
+            curvature_minimum_calibration_joins=(
+                args.curvature_minimum_calibration_joins
+            ),
+            curvature_round_count=args.curvature_rounds,
+            curvature_cut_penalty_weight=args.curvature_cut_penalty_weight,
         ),
         force=args.force,
     )
@@ -2071,6 +2084,30 @@ def main() -> None:
         "--collision-cut-order",
         choices=("forward", "reverse", "both"),
         default="forward",
+    )
+    sheet_restitch.add_argument(
+        "--curvature-refinement",
+        action="store_true",
+        help=(
+            "refine abrupt axial-normal hinges with robust multiscale cuts and "
+            "exact open-trace rematching"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--curvature-neighborhood-radius", type=int, default=3
+    )
+    sheet_restitch.add_argument(
+        "--curvature-minimum-branch-support", type=int, default=3
+    )
+    sheet_restitch.add_argument(
+        "--curvature-robust-standard-deviations", type=float, default=3.0
+    )
+    sheet_restitch.add_argument(
+        "--curvature-minimum-calibration-joins", type=int, default=32
+    )
+    sheet_restitch.add_argument("--curvature-rounds", type=int, default=3)
+    sheet_restitch.add_argument(
+        "--curvature-cut-penalty-weight", type=float, default=1.0
     )
     sheet_restitch.add_argument("--force", action="store_true")
     sheet_restitch.set_defaults(handler=_restitch_block_sheets)
