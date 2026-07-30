@@ -25,6 +25,16 @@ from .contracts import (
     plan_shards,
 )
 from .evidence import CellEvidenceTable
+from .flatten import (
+    ChartRaster,
+    ComponentMesh,
+    SurfaceChart,
+    component_mesh,
+    rasterize_chart,
+    run_component_flattening,
+    sample_depth_stack,
+    tangent_atlas_chart,
+)
 from .gaps import GapCensus, GapTraceRecord, analyze_component_gaps
 from .geometry import (
     ClippedPatch,
@@ -68,6 +78,9 @@ __all__ = [
     "GridSpec",
     "GapCensus",
     "GapTraceRecord",
+    "ChartRaster",
+    "ComponentMesh",
+    "SurfaceChart",
     "BlockBounds",
     "AcusCalibration",
     "AcusAdapterSettings",
@@ -84,6 +97,7 @@ __all__ = [
     "LayerModeTable",
     "ConfigurationSelection",
     "configuration_options",
+    "component_mesh",
     "FaceAlignment",
     "TraceMatch",
     "TraceMatchSettings",
@@ -102,10 +116,14 @@ __all__ = [
     "load_acus_flake_window",
     "merge_surface_blocks",
     "optimize_configurations",
+    "rasterize_chart",
     "extraction_tiles_for_shard",
     "plan_extraction_tiles",
     "plan_shards",
     "read_patch_shard",
     "write_patch_shard",
     "run_raw_acus_pipeline",
+    "run_component_flattening",
+    "sample_depth_stack",
+    "tangent_atlas_chart",
 ]

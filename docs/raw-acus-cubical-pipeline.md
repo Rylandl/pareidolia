@@ -228,6 +228,49 @@ unmatched-trace prior defaults to zero. A measured 0.1 global penalty reduced
 unmatched traces partly by deleting 198 selected layers and emptying nine
 cells, so it was rejected as the recovery mechanism.
 
+## Native-CT fragment flattening
+
+Connectivity statistics can improve while a component drifts between physical
+plies. `flatten-components` therefore provides a qualitative stop/go artifact
+before another growth pass:
+
+```bash
+python3 -m backend.cubical flatten-components \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1 \
+  --component-ranks 1 2 3 7 \
+  --depth-min -12 --depth-max 12 --depth-step 1 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-flattened-sanity-v1
+```
+
+The exporter triangulates the exact welded cubical polygons without smoothing
+their positions. It cuts only the UV topology at nonmanifold or contradictory
+edges, redundant cycles, and tangent-chart boundaries whose signed normal
+would exceed the declared 40-degree cone. Stronger accepted joins are retained
+when a redundant cycle needs a chart seam. Each remaining chart is projected
+in physical voxel units and packed into an atlas; the reconstruction itself is
+not modified.
+
+Native CT is sampled from -12 through +12 voxels along the original patch
+normal. One depth offset applies to the complete component—there is no per-cell
+or per-tile best-depth alignment that could conceal layer hopping. Every rank
+writes the raw compressed stack, a center image, a cyan cell-boundary overlay,
+the complete fixed-depth montage, and orthogonal depth crossings. Red pixels
+mark nonadjacent UV overlap and remain a failure diagnostic rather than being
+blended away. The manifest records every seam, triangle flip, projection
+distortion, overlap fraction, scanner-space source bound, and source identity.
+
+The first four-component checkpoint is deliberately mixed rather than a
+success-only gallery. Ranks 1, 2, 3, and 7 contain 201, 194, 188, and 165
+selected patches. Their median linear atlas distortion stays within 2%, and
+their nonadjacent UV-overlap fractions are 0.83%, 1.85%, 0.10%, and 0.88%.
+Ranks 2 and 3 show broad native-fiber continuity across many cells. Rank 7
+shows abrupt cell-scale texture changes consistent with a mixed-ply component.
+Rank 1 exposes nine orientation-cycle conflicts and one nonmanifold edge, so
+its 201-cell graph component is not one clean orientable surface even though
+much of its sampled texture is coherent. These observations make local
+chartability, orientation-parity consistency, and fixed-depth CT continuity
+useful assembly gates before further component growth.
+
 The raw and local-inference stages are already independently sharded. The
 selected-patch assembler is hierarchical. Configuration selection currently
 runs one window at a time; full-slab operation should schedule overlapping

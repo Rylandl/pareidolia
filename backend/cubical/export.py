@@ -20,7 +20,9 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     )
 
 
-def _rgb_png(image: np.ndarray) -> bytes:
+def rgb_png(image: np.ndarray) -> bytes:
+    """Encode one H x W x 3 uint8 RGB image without an imaging dependency."""
+
     pixels = np.asarray(image, dtype=np.uint8)
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise ValueError("RGB PNG encoding requires an H x W x 3 array")
@@ -182,6 +184,6 @@ def write_block_projection_png(
     image[:, panel_size - 1 : panel_size + 1] = (90, 98, 112)
     image[:, 2 * panel_size - 1 : 2 * panel_size + 1] = (90, 98, 112)
     temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_bytes(_rgb_png(image))
+    temporary.write_bytes(rgb_png(image))
     temporary.replace(output)
     return output

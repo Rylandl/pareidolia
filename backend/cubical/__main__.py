@@ -14,6 +14,7 @@ from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
 from .export import write_block_obj, write_block_projection_png
+from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
 from .mode_bank import run_mode_bank
 from .pipeline import run_raw_acus_pipeline
@@ -485,6 +486,48 @@ def _apply_mode_continuations(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _flatten_components(args: argparse.Namespace) -> None:
+    if args.depth_step <= 0.0 or args.depth_max < args.depth_min:
+        raise ValueError("depth step must be positive and depth range increasing")
+    offsets = np.arange(
+        args.depth_min,
+        args.depth_max + 0.5 * args.depth_step,
+        args.depth_step,
+        dtype=np.float64,
+    )
+    if not len(offsets) or offsets[-1] > args.depth_max + 1.0e-8:
+        raise ValueError("depth range and step do not form a valid sequence")
+
+    def progress(
+        index: int,
+        total: int,
+        rank: int,
+        component_id: int,
+        stage: str,
+    ) -> None:
+        print(
+            f"flatten component {index}/{total} · rank {rank} · "
+            f"component {component_id} · {stage}",
+            flush=True,
+        )
+
+    summary = run_component_flattening(
+        args.root,
+        args.output,
+        component_ranks=tuple(args.component_ranks),
+        depth_offsets_voxels=offsets,
+        pixel_step_voxels=args.pixel_step,
+        maximum_pixels=args.maximum_pixels,
+        maximum_chart_normal_deviation_degrees=(
+            args.maximum_chart_normal_deviation
+        ),
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _gap_repair_search(args: argparse.Namespace) -> None:
     root = Path(args.root)
     pipeline_manifest = json.loads((root / "pipeline.json").read_text())
@@ -780,6 +823,31 @@ def main() -> None:
     )
     apply_mode_continuation.add_argument("--force", action="store_true")
     apply_mode_continuation.set_defaults(handler=_apply_mode_continuations)
+    flatten_components = subparsers.add_parser(
+        "flatten-components",
+        description=(
+            "Flatten selected cubical components into a bounded-distortion atlas "
+            "and sample fixed native-CT depth stacks without per-cell alignment."
+        ),
+    )
+    flatten_components.add_argument("--root", type=Path, required=True)
+    flatten_components.add_argument("--output", type=Path, required=True)
+    flatten_components.add_argument(
+        "--component-ranks", nargs="+", type=int, default=(1, 2, 3, 7)
+    )
+    flatten_components.add_argument("--depth-min", type=float, default=-12.0)
+    flatten_components.add_argument("--depth-max", type=float, default=12.0)
+    flatten_components.add_argument("--depth-step", type=float, default=1.0)
+    flatten_components.add_argument("--pixel-step", type=float, default=2.0)
+    flatten_components.add_argument("--maximum-pixels", type=int, default=768)
+    flatten_components.add_argument(
+        "--maximum-chart-normal-deviation", type=float, default=40.0
+    )
+    flatten_components.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    flatten_components.add_argument("--force", action="store_true")
+    flatten_components.set_defaults(handler=_flatten_components)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

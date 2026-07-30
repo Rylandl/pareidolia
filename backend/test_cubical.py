@@ -22,6 +22,13 @@ from backend.cubical.geometry import (
 from backend.cubical.matching import align_face_patches, match_face_traces
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
+from backend.cubical.flatten import (
+    component_mesh,
+    rasterize_chart,
+    sample_depth_stack,
+    tangent_atlas_chart,
+)
+from backend.cubical.contracts import VolumeSource
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
 from backend.cubical.selection import ConfigurationOption
 from backend.cubical.stratigraphy import LayerModeTable
@@ -84,6 +91,66 @@ class CubicalGeometryTests(unittest.TestCase):
             [vertex.variance for vertex in patch.vertices], 0.01
         )
         self.assertEqual({trace.face.axis for trace in patch.traces}, {0, 1})
+
+    def test_tangent_atlas_preserves_a_perforated_planar_component(self) -> None:
+        grid = GridSpec((3, 3, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, y, 0), 0.0, 10 + 3 * y + x)
+            for y in range(3)
+            for x in range(3)
+            if (x, y) != (1, 1)
+        )
+        block = assemble_surface_hierarchy(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+            maximum_leaf_shape_cells_xyz=(2, 2, 1),
+        )
+        component = max(block.components, key=lambda value: len(value.patch_ids))
+        mesh = component_mesh(block, component.component_id)
+        chart = tangent_atlas_chart(mesh)
+        raster = rasterize_chart(
+            mesh, chart, pixel_step_voxels=0.05, maximum_pixels=256
+        )
+        self.assertEqual(len(component.patch_ids), 8)
+        self.assertEqual(mesh.statistics["orientationConflicts"], 0)
+        self.assertGreaterEqual(mesh.statistics["chartCycleSeamEdges"], 1)
+        self.assertEqual(chart.statistics["flippedTriangles"], 0)
+        self.assertEqual(raster.statistics["nonadjacentOverlapPixels"], 0)
+        self.assertEqual(set(np.unique(raster.patch_id[raster.mask])), set(component.patch_ids))
+
+    def test_flattened_depth_stack_uses_one_fixed_native_ct_offset(self) -> None:
+        grid = GridSpec(
+            (1, 1, 1),
+            cell_size_xyz=(8.0, 8.0, 8.0),
+            origin_xyz=(8.0, 8.0, 12.0),
+        )
+        patch = self._horizontal_patch(grid, (0, 0, 0), 0.0, 1)
+        block = assemble_surface_hierarchy(
+            grid,
+            BlockBounds((0, 0, 0), (1, 1, 1)),
+            (patch,),
+            maximum_leaf_shape_cells_xyz=(1, 1, 1),
+        )
+        mesh = component_mesh(block, block.components[0].component_id)
+        chart = tangent_atlas_chart(mesh)
+        raster = rasterize_chart(
+            mesh, chart, pixel_step_voxels=0.5, maximum_pixels=128
+        )
+        volume = np.broadcast_to(
+            (5 * np.arange(32, dtype=np.uint8))[:, None, None],
+            (32, 32, 32),
+        ).copy()
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "volume.npy"
+            np.save(source_path, volume)
+            source = VolumeSource.open(source_path)
+            stack, statistics = sample_depth_stack(source, raster, (-1.0, 0.0, 1.0))
+        medians = sorted(
+            float(np.median(plane[raster.mask])) for plane in stack
+        )
+        np.testing.assert_allclose(medians, (75.0, 80.0, 85.0), atol=0.5)
+        self.assertEqual(statistics["depthOffsetsVoxels"], [-1.0, 0.0, 1.0])
 
     def test_oblique_plane_supports_triangle_and_hexagon_topologies(self) -> None:
         grid = GridSpec((1, 1, 1))

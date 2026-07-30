@@ -87,6 +87,14 @@ deleting a layer. Reproducible `gap-census`, `mode-bank`,
 `mode-continuation-search`, and `apply-mode-continuations` commands and their
 artifact contracts are documented in the same pipeline note.
 
+`flatten-components` is the corresponding visual checkpoint. It unfolds a
+mixed set of reconstructed components into bounded-normal atlases and samples
+the native CT at one component-wide sequence of fixed depth offsets. Cyan marks
+cell boundaries and red marks UV overlap, so neither atlas seams nor local
+layer switching can be hidden by a per-cell best-depth choice. The raw stacks,
+montages, depth crossings, topology diagnostics, and reproducible command are
+documented in the same pipeline note.
+
 The earlier real-data plumbing check remains available as a historical geometry
 comparison. It adapts persisted Acus modes only as plane evidence proxies and
 does **not** call them physical layers:
