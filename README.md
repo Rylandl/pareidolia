@@ -65,14 +65,27 @@ python3 -m backend.cubical full-acus \
 ```
 
 It retains full normal-by-depth-by-unsigned-orientation evidence and native CT
-profiles, constructs top-M physically constrained layer-count alternatives,
-selects configurations using shared-face agreement, and only then performs
-topology-safe hierarchical surface assembly. The first fresh 384-cell GPU
+profiles, persists every fitted mode before top-M compression, constructs
+physically constrained layer-count alternatives, selects configurations using
+shared-face agreement, and only then performs topology-safe hierarchical
+surface assembly. The first fresh 384-cell GPU
 pilot completes in 30.5 seconds, selects 1,247 patches, retains 1,284 joins,
 and has a largest current component of 71 patches. Its complete contract,
 artifacts, exact shard-invariance result, measured storage, and scaling
 boundary are documented in
 [`docs/raw-acus-cubical-pipeline.md`](docs/raw-acus-cubical-pipeline.md).
+
+Gap recovery now works from that full mode bank instead of weakening match or
+topology gates. On the 16 × 16 × 14 full-depth slab, 27 of the leading
+component's 34 apparent mode gaps already had an independently fitted matching
+mode that top-M compression had hidden. The bounded conservative continuation
+search evaluates up to three conditioned stratigraphies per candidate. Its
+combined result uses six safe target cells, verifies eight closed seams, grows
+the leading component from 195 to 201 cells, gains 15 retained joins, removes
+18 unresolved traces, and reduces both collision and topology deferrals without
+deleting a layer. Reproducible `gap-census`, `mode-bank`,
+`mode-continuation-search`, and `apply-mode-continuations` commands and their
+artifact contracts are documented in the same pipeline note.
 
 The earlier real-data plumbing check remains available as a historical geometry
 comparison. It adapts persisted Acus modes only as plane evidence proxies and

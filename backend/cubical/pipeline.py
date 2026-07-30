@@ -44,9 +44,12 @@ from .raw_acus import (
 )
 from .selection import optimize_configurations
 from .stratigraphy import (
-    build_stratigraphies,
+    build_configurations_from_modes,
+    build_layer_modes,
     read_configuration_artifact,
+    read_mode_artifact,
     write_configuration_artifact,
+    write_mode_artifact,
 )
 from .tables import PatchTable, write_patch_shard
 from .topology import GridSpec
@@ -136,7 +139,7 @@ def _artifact_ready(prefix: Path, identity_sha256: str, schema: str) -> bool:
     )
 
 
-def _write_selection_artifact(
+def write_selection_artifact(
     output: Path,
     selection: Any,
     identity_sha256: str,
@@ -178,8 +181,11 @@ def _write_selection_artifact(
             "changedLastSweep": selection.changed_last_sweep,
             "unaryEnergy": selection.unary_energy,
             "pairwiseEnergy": selection.pairwise_energy,
+            "pairwiseReward": selection.pairwise_reward,
+            "continuationEnergy": selection.continuation_energy,
             "totalEnergy": selection.total_energy,
             "pairwiseEvaluationCount": selection.pairwise_evaluation_count,
+            "interiorUnmatchedTraceCount": selection.interior_unmatched_trace_count,
             "degenerateLayerAlternatives": selection.degenerate_layer_count,
         },
         "data": {
@@ -190,6 +196,45 @@ def _write_selection_artifact(
     }
     atomic_json(output / "selection-v1.json", manifest)
     return manifest
+
+
+def patch_table_from_options(
+    grid: GridSpec,
+    configuration_tables: list[Any],
+    selected_options: Iterable[Any],
+) -> PatchTable:
+    configuration_id: dict[int, int] = {}
+    configuration_log_weight: dict[int, float] = {}
+    local_order: dict[int, int] = {}
+    normal_family: dict[int, int] = {}
+    options = tuple(selected_options)
+    patches = tuple(patch for option in options for patch in option.patches)
+    for option in options:
+        table = configuration_tables[option.source_table_index]
+        family = int(table.normal_hypothesis[option.source_configuration_index])
+        for order, patch in enumerate(option.patches):
+            configuration_id[patch.patch_id] = option.option_id
+            configuration_log_weight[patch.patch_id] = option.log_weight
+            local_order[patch.patch_id] = order
+            normal_family[patch.patch_id] = family
+    return PatchTable.from_patches(
+        grid,
+        patches,
+        configuration_id=configuration_id,
+        configuration_log_weight=configuration_log_weight,
+        local_order=local_order,
+        normal_family=normal_family,
+    )
+
+
+def patch_table_from_selection(
+    grid: GridSpec,
+    configuration_tables: list[Any],
+    selection: Any,
+) -> PatchTable:
+    return patch_table_from_options(
+        grid, configuration_tables, selection.selected_options
+    )
 
 
 def _quantiles(values: list[int]) -> dict[str, float | None]:
@@ -214,6 +259,9 @@ def _aggregate_completed_shards(shard_records: dict[str, Any]) -> dict[str, int]
         "validCells": sum(int(value.get("validCellCount", 0)) for value in completed),
         "normalHypotheses": sum(
             int(value.get("normalHypothesisCount", 0)) for value in completed
+        ),
+        "candidateModes": sum(
+            int(value.get("candidateModeCount", 0)) for value in completed
         ),
         "configurations": sum(
             int(value.get("configurationCount", 0)) for value in completed
@@ -522,6 +570,38 @@ def run_raw_acus_pipeline(
             "normalHypothesisCount"
         ]
 
+        mode_prefix = shard_root / "modes-v1"
+        if (
+            not force
+            and _artifact_ready(
+                mode_prefix,
+                identity_sha256,
+                "pareidolia.raw-acus-layer-modes",
+            )
+        ):
+            modes = read_mode_artifact(
+                mode_prefix, identity_sha256=identity_sha256, verify=False
+            )
+            mode_statistics = json.loads(
+                mode_prefix.with_suffix(".json").read_text()
+            )["statistics"]
+        else:
+            shard_state["state"] = "modes"
+            atomic_json(manifest_path, manifest)
+            modes, mode_statistics = build_layer_modes(
+                needles, evidence, resolved_settings
+            )
+            write_mode_artifact(
+                mode_prefix,
+                modes,
+                identity_sha256=identity_sha256,
+                shard=shard,
+                statistics=mode_statistics,
+            )
+        shard_state["candidateModeCount"] = mode_statistics[
+            "candidateModeCount"
+        ]
+
         configuration_prefix = shard_root / "stratigraphies-v1"
         if (
             not force
@@ -542,8 +622,10 @@ def run_raw_acus_pipeline(
         else:
             shard_state["state"] = "stratigraphy"
             atomic_json(manifest_path, manifest)
-            configurations, configuration_statistics = build_stratigraphies(
-                source, shard, needles, evidence, resolved_settings
+            configurations, configuration_statistics = (
+                build_configurations_from_modes(
+                    source, modes, evidence, resolved_settings
+                )
             )
             write_configuration_artifact(
                 configuration_prefix,
@@ -574,6 +656,7 @@ def run_raw_acus_pipeline(
         print(
             f"raw Acus shard {shard_number}/{len(target_shards)} {shard.shard_id} · "
             f"{needles.count} needles · {evidence_statistics['validCellCount']} valid cells · "
+            f"{mode_statistics['candidateModeCount']} modes · "
             f"{configuration_statistics['layerAlternativeCount']} layer alternatives",
             flush=True,
         )
@@ -598,7 +681,7 @@ def run_raw_acus_pipeline(
             "state": manifest["state"],
             "contract": {
                 "input": "native uint8 CT voxels",
-                "output": "independently resumable needle, evidence, and top-M stratigraphy shards",
+                "output": "independently resumable needle, evidence, mode-bank, and top-M stratigraphy shards",
                 "globalSelectionPerformed": False,
             },
             "shards": {
@@ -645,29 +728,12 @@ def run_raw_acus_pipeline(
     selection_started = time.monotonic()
     selection = optimize_configurations(grid, configuration_tables)
     selection_seconds = time.monotonic() - selection_started
-    selection_manifest = _write_selection_artifact(
+    selection_manifest = write_selection_artifact(
         output, selection, identity_sha256
     )
 
-    configuration_id: dict[int, int] = {}
-    configuration_log_weight: dict[int, float] = {}
-    local_order: dict[int, int] = {}
-    normal_family: dict[int, int] = {}
-    for option in selection.selected_options:
-        table = configuration_tables[option.source_table_index]
-        family = int(table.normal_hypothesis[option.source_configuration_index])
-        for order, patch in enumerate(option.patches):
-            configuration_id[patch.patch_id] = option.option_id
-            configuration_log_weight[patch.patch_id] = option.log_weight
-            local_order[patch.patch_id] = order
-            normal_family[patch.patch_id] = family
-    selected_table = PatchTable.from_patches(
-        grid,
-        selection.patches,
-        configuration_id=configuration_id,
-        configuration_log_weight=configuration_log_weight,
-        local_order=local_order,
-        normal_family=normal_family,
+    selected_table = patch_table_from_selection(
+        grid, configuration_tables, selection
     )
     patch_manifest = write_patch_shard(
         output / "selected-patches-v1",
@@ -720,7 +786,7 @@ def run_raw_acus_pipeline(
             ],
             "ownership": "disjoint cubical cells with overlapping raw evidence halos",
             "directions": "all normals and fibers are axial/unsigned",
-            "localInference": "top-M physical stratigraphies from full depth-orientation evidence",
+            "localInference": "persistent fitted mode bank, then top-M physical stratigraphies",
             "globalInference": "configuration-aware shared-face selection, then topology-safe hierarchical assembly",
         },
         "grid": patch_manifest["grid"],

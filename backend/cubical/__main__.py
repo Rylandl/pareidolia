@@ -11,10 +11,19 @@ import numpy as np
 from .acus_adapter import AcusAdapterSettings, load_acus_flake_window
 from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarchy
 from .contracts import RawAcusSettings, ReconstructionWindow
+from .continuation_search import run_continuation_search
+from .continuation_variant import run_continuation_variant
 from .export import write_block_obj, write_block_projection_png
+from .gaps import analyze_component_gaps, write_gap_census
+from .mode_bank import run_mode_bank
 from .pipeline import run_raw_acus_pipeline
+from .reselection import SelectionVariantSettings, run_selection_variant
+from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
+from .repair_variant import run_gap_repair_variant
+from .selection import configuration_options
+from .stratigraphy import read_configuration_artifact
 from .synthetic import SyntheticStackSettings, generate_synthetic_stack
-from .tables import PatchTable, write_patch_shard
+from .tables import PatchTable, read_patch_shard, write_patch_shard
 from .topology import GridSpec
 
 
@@ -318,6 +327,257 @@ def _full_acus(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _gap_census(args: argparse.Namespace) -> None:
+    root = Path(args.root)
+    pipeline_manifest = json.loads((root / "pipeline.json").read_text())
+    if pipeline_manifest.get("state") != "complete":
+        raise ValueError("gap census requires a completed raw Acus reconstruction")
+    identity_sha256 = str(
+        pipeline_manifest["identity"]["identitySha256"]
+    )
+    tables = [
+        read_configuration_artifact(
+            root / "shards" / shard_id / "stratigraphies-v1",
+            identity_sha256=identity_sha256,
+        )
+        for shard_id in pipeline_manifest["shards"]
+    ]
+    selected_table = read_patch_shard(root / "selected-patches-v1")
+    patches = selected_table.to_patches()
+    block = assemble_surface_hierarchy(
+        selected_table.grid,
+        BlockBounds((0, 0, 0), selected_table.grid.shape_cells_xyz),
+        patches,
+        maximum_leaf_shape_cells_xyz=tuple(args.leaf_shape),
+    )
+    options_by_cell, _ = configuration_options(selected_table.grid, tables)
+    with np.load(root / "selection-v1.npz") as values:
+        selected_option_ids = {
+            tuple(int(item) for item in cell): int(option_id)
+            for cell, option_id in zip(values["cellXYZ"], values["optionId"])
+        }
+    census = analyze_component_gaps(
+        block,
+        options_by_cell,
+        selected_option_ids,
+        component_id=args.component_id,
+    )
+    output = args.output or (root / "gap-census-v1.json")
+    payload = write_gap_census(
+        output,
+        census,
+        identity_sha256=identity_sha256,
+        provenance={
+            "inputRoot": str(root.resolve()),
+            "selectedPatches": "selected-patches-v1.npz",
+            "configurationSource": "shards/*/stratigraphies-v1.npz",
+            "directions": "axial/unsigned",
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "schema": payload["schema"],
+                "version": payload["version"],
+                "identitySha256": identity_sha256,
+                "component": payload["component"],
+                "statistics": payload["statistics"],
+                "artifact": str(Path(output).resolve()),
+            },
+            indent=2,
+        )
+    )
+
+
+def _selection_variant(args: argparse.Namespace) -> None:
+    settings = SelectionVariantSettings(
+        interior_unmatched_trace_penalty=args.interior_unmatched_trace_penalty,
+        unary_scale=args.unary_scale,
+        pairwise_scale=args.pairwise_scale,
+        maximum_sweeps=args.maximum_sweeps,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        maximum_preview_components=args.maximum_preview_components,
+    )
+    summary = run_selection_variant(
+        args.root,
+        args.output,
+        settings,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _mode_bank(args: argparse.Namespace) -> None:
+    def progress(index: int, total: int, shard_id: str, mode_count: int) -> None:
+        print(
+            f"mode bank shard {index}/{total} {shard_id} · {mode_count} modes",
+            flush=True,
+        )
+
+    summary = run_mode_bank(
+        args.root,
+        args.output,
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _mode_continuation_search(args: argparse.Namespace) -> None:
+    def progress(
+        index: int, total: int, candidate_id: int, configuration_rank: int
+    ) -> None:
+        print(
+            f"continuation trial {index}/{total} · candidate {candidate_id} · "
+            f"configuration {configuration_rank}",
+            flush=True,
+        )
+
+    payload, _ = run_continuation_search(
+        args.root,
+        args.mode_bank,
+        args.output,
+        component_id=args.component_id,
+        reuse_search_path=args.reuse_search,
+        maximum_modes_per_gap=args.maximum_modes_per_gap,
+        maximum_configurations_per_candidate=(
+            args.maximum_configurations_per_candidate
+        ),
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        progress=progress,
+    )
+    print(
+        json.dumps(
+            {
+                "schema": payload["schema"],
+                "identitySha256": payload["identitySha256"],
+                "discovery": {
+                    key: payload["discovery"][key]
+                    for key in (
+                        "componentId",
+                        "modeGapCount",
+                        "matchedGapCount",
+                        "candidateCount",
+                    )
+                },
+                "statistics": payload["statistics"],
+                "recommended": [
+                    value
+                    for value in payload["trials"]
+                    if value["recommended"]
+                ],
+                "artifact": str(args.output.resolve()),
+            },
+            indent=2,
+        )
+    )
+
+
+def _apply_mode_continuations(args: argparse.Namespace) -> None:
+    summary = run_continuation_variant(
+        args.root,
+        args.mode_bank,
+        args.search,
+        args.output,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _gap_repair_search(args: argparse.Namespace) -> None:
+    root = Path(args.root)
+    pipeline_manifest = json.loads((root / "pipeline.json").read_text())
+    if pipeline_manifest.get("state") != "complete":
+        raise ValueError("gap repair requires a completed raw Acus reconstruction")
+    identity_sha256 = str(
+        pipeline_manifest["identity"]["identitySha256"]
+    )
+    tables = [
+        read_configuration_artifact(
+            root / "shards" / shard_id / "stratigraphies-v1",
+            identity_sha256=identity_sha256,
+        )
+        for shard_id in pipeline_manifest["shards"]
+    ]
+    selected_table = read_patch_shard(root / "selected-patches-v1")
+    block = assemble_surface_hierarchy(
+        selected_table.grid,
+        BlockBounds((0, 0, 0), selected_table.grid.shape_cells_xyz),
+        selected_table.to_patches(),
+        maximum_leaf_shape_cells_xyz=tuple(args.leaf_shape),
+    )
+    options_by_cell, _ = configuration_options(selected_table.grid, tables)
+    with np.load(root / "selection-v1.npz") as values:
+        selected_option_ids = {
+            tuple(int(item) for item in cell): int(option_id)
+            for cell, option_id in zip(values["cellXYZ"], values["optionId"])
+        }
+    census = analyze_component_gaps(
+        block,
+        options_by_cell,
+        selected_option_ids,
+        component_id=args.component_id,
+    )
+
+    def progress(
+        index: int, total: int, cell: tuple[int, int, int], option_id: int
+    ) -> None:
+        print(
+            f"gap repair trial {index}/{total} · cell {cell} · option {option_id}",
+            flush=True,
+        )
+
+    search = evaluate_single_cell_gap_repairs(
+        block,
+        options_by_cell,
+        selected_option_ids,
+        census,
+        maximum_leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        progress=progress,
+    )
+    output = args.output or (root / "gap-repair-search-v1.json")
+    payload = write_gap_repair_search(
+        output,
+        search,
+        identity_sha256=identity_sha256,
+        provenance={
+            "inputRoot": str(root.resolve()),
+            "selection": "selection-v1.npz",
+            "gapCensus": "computed from immutable selected geometry",
+            "acceptance": "full topology-safe hierarchical reassembly per trial",
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "schema": payload["schema"],
+                "version": payload["version"],
+                "componentId": payload["componentId"],
+                "statistics": payload["statistics"],
+                "recommended": [
+                    value
+                    for value in payload["trials"]
+                    if value["recommended"]
+                ],
+                "artifact": str(Path(output).resolve()),
+            },
+            indent=2,
+        )
+    )
+
+
+def _apply_gap_repairs(args: argparse.Namespace) -> None:
+    summary = run_gap_repair_variant(
+        args.root,
+        args.search,
+        args.output,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Dataset-independent cubical surface reconstruction tools."
@@ -432,6 +692,123 @@ def main() -> None:
         help="rebake this pipeline's own matching artifacts from native CT",
     )
     full_acus.set_defaults(handler=_full_acus)
+    gap_census = subparsers.add_parser(
+        "gap-census",
+        description=(
+            "Classify unresolved cubical traces as ordering decisions, topology "
+            "vetoes, recoverable configuration gaps, or missing local modes."
+        ),
+    )
+    gap_census.add_argument("--root", type=Path, required=True)
+    gap_census.add_argument("--component-id", type=int)
+    gap_census.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    gap_census.add_argument("--output", type=Path)
+    gap_census.set_defaults(handler=_gap_census)
+    selection_variant = subparsers.add_parser(
+        "selection-variant",
+        description=(
+            "Reselect a completed raw-Acus stratigraphy bake under an explicit "
+            "continuation prior without rerunning Acus or mutating the input."
+        ),
+    )
+    selection_variant.add_argument("--root", type=Path, required=True)
+    selection_variant.add_argument("--output", type=Path, required=True)
+    selection_variant.add_argument(
+        "--interior-unmatched-trace-penalty", type=float, default=0.0
+    )
+    selection_variant.add_argument("--unary-scale", type=float, default=1.0)
+    selection_variant.add_argument("--pairwise-scale", type=float, default=0.35)
+    selection_variant.add_argument("--maximum-sweeps", type=int, default=12)
+    selection_variant.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    selection_variant.add_argument(
+        "--maximum-preview-components", type=int, default=128
+    )
+    selection_variant.add_argument("--force", action="store_true")
+    selection_variant.set_defaults(handler=_selection_variant)
+    mode_bank = subparsers.add_parser(
+        "mode-bank",
+        description=(
+            "Persist every fitted local Acus mode from an existing completed "
+            "evidence bake, before top-M stratigraphy pruning."
+        ),
+    )
+    mode_bank.add_argument("--root", type=Path, required=True)
+    mode_bank.add_argument("--output", type=Path, required=True)
+    mode_bank.add_argument("--force", action="store_true")
+    mode_bank.set_defaults(handler=_mode_bank)
+    mode_continuation = subparsers.add_parser(
+        "mode-continuation-search",
+        description=(
+            "Recover pruned local modes at explicit component gaps and validate "
+            "conditioned physical stratigraphies by complete reassembly."
+        ),
+    )
+    mode_continuation.add_argument("--root", type=Path, required=True)
+    mode_continuation.add_argument("--mode-bank", type=Path, required=True)
+    mode_continuation.add_argument("--output", type=Path, required=True)
+    mode_continuation.add_argument("--component-id", type=int)
+    mode_continuation.add_argument(
+        "--reuse-search",
+        type=Path,
+        help="reuse already evaluated candidate/configuration trials",
+    )
+    mode_continuation.add_argument("--maximum-modes-per-gap", type=int, default=3)
+    mode_continuation.add_argument(
+        "--maximum-configurations-per-candidate", type=int, default=3
+    )
+    mode_continuation.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    mode_continuation.set_defaults(handler=_mode_continuation_search)
+    apply_mode_continuation = subparsers.add_parser(
+        "apply-mode-continuations",
+        description=(
+            "Combine independently safe full-mode continuation trials and "
+            "write an auditable reconstructed variant with previews."
+        ),
+    )
+    apply_mode_continuation.add_argument("--root", type=Path, required=True)
+    apply_mode_continuation.add_argument("--mode-bank", type=Path, required=True)
+    apply_mode_continuation.add_argument("--search", type=Path, required=True)
+    apply_mode_continuation.add_argument("--output", type=Path, required=True)
+    apply_mode_continuation.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    apply_mode_continuation.add_argument("--force", action="store_true")
+    apply_mode_continuation.set_defaults(handler=_apply_mode_continuations)
+    gap_repair = subparsers.add_parser(
+        "gap-repair-search",
+        description=(
+            "Try retained single-cell stratigraphy substitutions at recoverable "
+            "gaps, validating every trial by full topology-safe reassembly."
+        ),
+    )
+    gap_repair.add_argument("--root", type=Path, required=True)
+    gap_repair.add_argument("--component-id", type=int)
+    gap_repair.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    gap_repair.add_argument("--output", type=Path)
+    gap_repair.set_defaults(handler=_gap_repair_search)
+    apply_repairs = subparsers.add_parser(
+        "apply-gap-repairs",
+        description=(
+            "Apply the best nonconflicting conservative trials from a gap-repair "
+            "search and write a separately auditable reconstruction variant."
+        ),
+    )
+    apply_repairs.add_argument("--root", type=Path, required=True)
+    apply_repairs.add_argument("--search", type=Path, required=True)
+    apply_repairs.add_argument("--output", type=Path, required=True)
+    apply_repairs.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    apply_repairs.add_argument("--force", action="store_true")
+    apply_repairs.set_defaults(handler=_apply_gap_repairs)
     args = parser.parse_args()
     args.handler(args)
 

@@ -68,16 +68,21 @@ configuration arrays at both 8 × 8 × 3 and 4 × 4 × 3 partitioning.
    absolute density scale, depth support, and independent native-CT material
    profile. The default depth axis has 65 one-voxel samples and the orientation
    axis has 36 five-degree bins over `[0, 180)`.
-4. `shards/*/stratigraphies-v1.npz` stores up to eight competing layer-count
+4. `shards/*/modes-v1.npz` stores every independently fitted local Acus mode
+   before configuration pruning. A mode keeps its source depth/orientation,
+   fitted plane covariance, unsigned fiber axis, material probability, and
+   effective support. This is the reusable evidence bank for contextual
+   inference; top-M compression is no longer the only surviving copy.
+5. `shards/*/stratigraphies-v1.npz` stores up to eight competing layer-count
    configurations per cell. Each layer mode is refitted as a sloped plane from
    its own needles, with a covariance over two normal tilts and height plus an
    unsigned fiber axis and angular uncertainty.
-5. `selection-v1.npz` chooses one configuration per cell by combining its
+6. `selection-v1.npz` chooses one configuration per cell by combining its
    local log posterior with the ordered shared-face trace likelihoods of its
    six neighbors. The face term is measured relative to leaving all traces
    unmatched, so a supported continuation is rewarded while a real open edge
    is not automatically penalized.
-6. `selected-patches-v1.npz` is the structure-of-arrays cubical geometry.
+7. `selected-patches-v1.npz` is the structure-of-arrays cubical geometry.
    Hierarchical block assembly then performs global same-cell collision and
    crossing-topology vetoes, writes `surface.obj`, and produces
    `projections.png` plus a readable `largest-component.png` check-in view.
@@ -154,6 +159,75 @@ stratigraphy, shard-gather, and canonical-catalog artifacts gives roughly
 11 GB for a full 241 × 241 × 14 local bake before previews and meshes. Store
 full-volume bakes under `/mnt/t5`, not the repository work tree.
 
+## Gap diagnosis and full-mode continuation
+
+An unresolved trace is not automatically missing papyrus evidence. The
+diagnostic path separates five cases without weakening the assembler:
+
+```bash
+python3 -m backend.cubical gap-census \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-v1
+```
+
+The 16 × 16 × 14 full-depth slab's original 195-cell leading component had 248
+unresolved interior traces: 103 were same-component cell-collision vetoes, 17
+were crossing-topology vetoes, 84 were ordered face-assignment decisions, ten
+could be recovered by an already retained configuration, and only 34 lacked a
+compatible trace in every retained top-M configuration.
+
+Older completed bakes can recover the new first-class mode artifact from their
+own immutable needle and evidence shards; this does not rerun Hessian
+extraction or read a legacy cache:
+
+```bash
+python3 -m backend.cubical mode-bank \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-v1 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-mode-bank-v2
+```
+
+That slab contains 88,084 fitted modes across 3,584 cells (24.58 per cell) and
+the 20-shard backfill takes 42.3 seconds. The full bank contains an accepted
+shared-face continuation for 27 of the 34 apparent mode gaps, grouped into 21
+distinct target-cell modes. The dominant failure was therefore top-M
+stratigraphy pruning, not absent raw Acus signal.
+
+Continuation search constructs a complete same-normal, non-crossing physical
+stratigraphy containing the required mode. It replaces the target cell as a
+unit, then performs full global assembly for every trial. A candidate is
+recommended only if it closes a recorded gap without deleting layers,
+shrinking the source component, losing retained joins, increasing unresolved
+traces, or adding collision/topology debt:
+
+```bash
+python3 -m backend.cubical mode-continuation-search \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-v1 \
+  --mode-bank /mnt/t5/pareidolia/raw-acus-16x16x14-mode-bank-v2 \
+  --maximum-modes-per-gap 1 \
+  --maximum-configurations-per-candidate 3 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-v1/mode-continuation-search-config3-final-v1.json
+
+python3 -m backend.cubical apply-mode-continuations \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-v1 \
+  --mode-bank /mnt/t5/pareidolia/raw-acus-16x16x14-mode-bank-v2 \
+  --search /mnt/t5/pareidolia/raw-acus-16x16x14-v1/mode-continuation-search-config3-final-v1.json \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1
+```
+
+The bounded three-configuration search evaluates 55 full-slab assemblies. It
+closes at least one seam in 42 trials, with 13 passing every conservative gate.
+Choosing the best independently safe configuration in each of six distinct
+target cells verifies all eight intended joins together, adds three supported
+patches, raises retained joins from 12,380 to 12,395, reduces unresolved
+interior traces from 19,546 to 19,528, and grows the leading component from 195
+to 201 cells. Collision deferrals fall by five and crossing-topology deferrals
+by two. This is contextual recovery from independently fitted local evidence,
+not extrapolated geometry.
+
+`selection-variant` remains available for explicit prior sweeps, but the
+unmatched-trace prior defaults to zero. A measured 0.1 global penalty reduced
+unmatched traces partly by deleting 198 selected layers and emptying nine
+cells, so it was rejected as the recovery mechanism.
+
 The raw and local-inference stages are already independently sharded. The
 selected-patch assembler is hierarchical. Configuration selection currently
 runs one window at a time; full-slab operation should schedule overlapping
@@ -173,5 +247,6 @@ python3 -m unittest \
 
 The tests cover disjoint shard ownership, source-anchored extraction tiling,
 raw source identities, content hash checks, unsigned normal recovery, physical
-two-ply/empty alternatives, configuration-aware face selection, cubical
-clipping, trace alignment, topology vetoes, and hierarchical assembly.
+two-ply/empty alternatives, exact mode-bank persistence, gap classification,
+configuration-aware face selection, cubical clipping, trace alignment,
+topology vetoes, and hierarchical assembly.

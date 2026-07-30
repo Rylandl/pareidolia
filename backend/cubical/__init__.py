@@ -25,6 +25,7 @@ from .contracts import (
     plan_shards,
 )
 from .evidence import CellEvidenceTable
+from .gaps import GapCensus, GapTraceRecord, analyze_component_gaps
 from .geometry import (
     ClippedPatch,
     DegeneratePlaneIntersection,
@@ -44,8 +45,12 @@ from .matching import (
 )
 from .pipeline import run_raw_acus_pipeline
 from .raw_acus import AcusCalibration, NeedleTable
-from .selection import ConfigurationSelection, optimize_configurations
-from .stratigraphy import ConfigurationTable
+from .selection import (
+    ConfigurationSelection,
+    configuration_options,
+    optimize_configurations,
+)
+from .stratigraphy import ConfigurationTable, LayerModeTable
 from .topology import GridEdge, GridFace, GridSpec
 from .synthetic import SyntheticScene, SyntheticStackSettings, generate_synthetic_stack
 from .tables import PatchTable, read_patch_shard, write_patch_shard
@@ -61,6 +66,8 @@ __all__ = [
     "GridEdge",
     "GridFace",
     "GridSpec",
+    "GapCensus",
+    "GapTraceRecord",
     "BlockBounds",
     "AcusCalibration",
     "AcusAdapterSettings",
@@ -74,7 +81,9 @@ __all__ = [
     "NeedleTable",
     "CellEvidenceTable",
     "ConfigurationTable",
+    "LayerModeTable",
     "ConfigurationSelection",
+    "configuration_options",
     "FaceAlignment",
     "TraceMatch",
     "TraceMatchSettings",
@@ -83,6 +92,7 @@ __all__ = [
     "SyntheticStackSettings",
     "PatchTable",
     "align_face_patches",
+    "analyze_component_gaps",
     "assemble_surface_block",
     "assemble_surface_hierarchy",
     "axial_angle_radians",

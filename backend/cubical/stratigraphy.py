@@ -20,6 +20,8 @@ from .raw_acus import NeedleTable, select_cell_needle_indices
 
 CONFIGURATION_ARTIFACT_SCHEMA = "pareidolia.raw-acus-stratigraphies"
 CONFIGURATION_ARTIFACT_VERSION = 1
+MODE_ARTIFACT_SCHEMA = "pareidolia.raw-acus-layer-modes"
+MODE_ARTIFACT_VERSION = 1
 
 
 def _pack_covariance(covariance: np.ndarray) -> np.ndarray:
@@ -53,6 +55,124 @@ class LayerMode:
     evidence_score: float
     material_probability: float
     effective_support: float
+
+
+@dataclass(slots=True)
+class LayerModeTable:
+    """All independently fitted local Acus modes before configuration pruning."""
+
+    cell_xyz: np.ndarray
+    mode_offset: np.ndarray
+    normal_hypothesis: np.ndarray
+    normal_xyz: np.ndarray
+    height: np.ndarray
+    covariance: np.ndarray
+    fiber_xyz: np.ndarray
+    fiber_angular_std_radians: np.ndarray
+    confidence: np.ndarray
+    source_depth_voxels: np.ndarray
+    source_orientation_degrees: np.ndarray
+    evidence_score: np.ndarray
+    material_probability: np.ndarray
+    effective_support: np.ndarray
+
+    @property
+    def cell_count(self) -> int:
+        return int(len(self.cell_xyz))
+
+    @property
+    def mode_count(self) -> int:
+        return int(len(self.height))
+
+    def validate(self) -> None:
+        cells = self.cell_count
+        modes = self.mode_count
+        expected = {
+            "cell_xyz": (cells, 3),
+            "mode_offset": (cells + 1,),
+            "normal_hypothesis": (modes,),
+            "normal_xyz": (modes, 3),
+            "height": (modes,),
+            "covariance": (modes, 6),
+            "fiber_xyz": (modes, 3),
+            "fiber_angular_std_radians": (modes,),
+            "confidence": (modes,),
+            "source_depth_voxels": (modes,),
+            "source_orientation_degrees": (modes,),
+            "evidence_score": (modes,),
+            "material_probability": (modes,),
+            "effective_support": (modes,),
+        }
+        for name, shape in expected.items():
+            value = getattr(self, name)
+            if value.shape != shape:
+                raise ValueError(f"{name} has shape {value.shape}, expected {shape}")
+            if np.issubdtype(value.dtype, np.floating) and np.any(~np.isfinite(value)):
+                raise ValueError(f"{name} contains non-finite values")
+        if (
+            int(self.mode_offset[0]) != 0
+            or int(self.mode_offset[-1]) != modes
+            or np.any(np.diff(self.mode_offset) < 0)
+        ):
+            raise ValueError("mode offsets do not span the mode table")
+        if modes:
+            if np.any(np.abs(np.linalg.norm(self.normal_xyz, axis=1) - 1.0) > 2.0e-4):
+                raise ValueError("mode normals must be unit axes")
+            if np.any(np.abs(np.linalg.norm(self.fiber_xyz, axis=1) - 1.0) > 2.0e-4):
+                raise ValueError("mode fibers must be unit axes")
+            if np.any((self.confidence < 0.0) | (self.confidence > 1.0)):
+                raise ValueError("mode confidence lies outside [0, 1]")
+            if np.any((self.material_probability < 0.0) | (self.material_probability > 1.0)):
+                raise ValueError("mode material probability lies outside [0, 1]")
+
+    def mode_indices_for_cell(self, cell_index: int) -> range:
+        return range(
+            int(self.mode_offset[cell_index]),
+            int(self.mode_offset[cell_index + 1]),
+        )
+
+    def mode(self, mode_index: int) -> LayerMode:
+        return LayerMode(
+            int(self.normal_hypothesis[mode_index]),
+            PlaneEstimate(
+                tuple(float(value) for value in self.normal_xyz[mode_index]),
+                float(self.height[mode_index]),
+                tuple(
+                    tuple(float(value) for value in row)
+                    for row in _unpack_covariance(self.covariance[mode_index])
+                ),
+                tuple(float(value) for value in self.fiber_xyz[mode_index]),
+                float(self.fiber_angular_std_radians[mode_index]),
+                float(self.confidence[mode_index]),
+            ),
+            float(self.source_depth_voxels[mode_index]),
+            float(self.source_orientation_degrees[mode_index]),
+            float(self.evidence_score[mode_index]),
+            float(self.material_probability[mode_index]),
+            float(self.effective_support[mode_index]),
+        )
+
+    def modes_for_cell(self, cell_index: int) -> tuple[LayerMode, ...]:
+        return tuple(self.mode(index) for index in self.mode_indices_for_cell(cell_index))
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        self.validate()
+        return {
+            "cellXYZ": self.cell_xyz.astype(np.int32, copy=False),
+            "modeOffset": self.mode_offset.astype(np.uint64, copy=False),
+            "normalHypothesis": self.normal_hypothesis.astype(np.int8, copy=False),
+            "normalXYZ": self.normal_xyz.astype(np.float32, copy=False),
+            "height": self.height.astype(np.float32, copy=False),
+            "covariance": self.covariance.astype(np.float32, copy=False),
+            "fiberXYZ": self.fiber_xyz.astype(np.float32, copy=False),
+            "fiberAngularStdRadians": self.fiber_angular_std_radians.astype(np.float32, copy=False),
+            "confidence": self.confidence.astype(np.float32, copy=False),
+            "sourceDepthVoxels": self.source_depth_voxels.astype(np.float32, copy=False),
+            "sourceOrientationDegrees": self.source_orientation_degrees.astype(np.float32, copy=False),
+            "evidenceScore": self.evidence_score.astype(np.float32, copy=False),
+            "materialProbability": self.material_probability.astype(np.float32, copy=False),
+            "effectiveSupport": self.effective_support.astype(np.float32, copy=False),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,12 +576,14 @@ def _transition_reward(
     return 0.9 * thickness_affinity * orthogonal_affinity
 
 
-def _top_stratigraphies(
+def enumerate_stratigraphies(
     modes: list[LayerMode],
     source: VolumeSource,
     settings: RawAcusSettings,
     normal_hypothesis: int,
     normal_confidence: float,
+    *,
+    required_mode: LayerMode | None = None,
 ) -> list[CellStratigraphy]:
     values = sorted(modes, key=lambda value: value.estimate.height_from_cell_center)
     beams: list[tuple[float, tuple[LayerMode, ...]]] = [(0.0, ())]
@@ -478,12 +600,31 @@ def _top_stratigraphies(
                 transition = resolved
             expanded.append((score + reward + transition, layers + (mode,)))
         expanded.sort(key=lambda value: (value[0], len(value[1])), reverse=True)
-        unique: dict[tuple[int, ...], tuple[float, tuple[LayerMode, ...]]] = {}
+        unique: dict[
+            tuple[bool, tuple[int, ...]], tuple[float, tuple[LayerMode, ...]]
+        ] = {}
+        retained_by_requirement = {False: 0, True: 0}
         for score, layers in expanded:
-            key = tuple(round(layer.estimate.height_from_cell_center * 2.0) for layer in layers)
+            contains_required = required_mode is not None and any(
+                value is required_mode for value in layers
+            )
+            key = (
+                contains_required,
+                tuple(
+                    round(layer.estimate.height_from_cell_center * 2.0)
+                    for layer in layers
+                ),
+            )
+            if retained_by_requirement[contains_required] >= beam_limit:
+                continue
             if key not in unique:
                 unique[key] = (score, layers)
-            if len(unique) >= beam_limit:
+                retained_by_requirement[contains_required] += 1
+            if required_mode is None and len(unique) >= beam_limit:
+                break
+            if required_mode is not None and all(
+                value >= beam_limit for value in retained_by_requirement.values()
+            ):
                 break
         beams = list(unique.values())
     normal_term = math.log(max(normal_confidence, 0.03))
@@ -496,22 +637,21 @@ def _top_stratigraphies(
     return result
 
 
-def build_stratigraphies(
-    source: VolumeSource,
-    shard: ShardSpec,
+def build_layer_modes(
     needles: NeedleTable,
     evidence: CellEvidenceTable,
     settings: RawAcusSettings,
-) -> tuple[ConfigurationTable, dict[str, Any]]:
+) -> tuple[LayerModeTable, dict[str, Any]]:
+    """Fit every accepted local depth-orientation peak exactly once."""
+
     started = time.monotonic()
-    all_configurations: list[list[CellStratigraphy]] = []
     half_cube = settings.analysis_cube_voxels * 0.5
-    mode_count = 0
+    modes_by_cell: list[list[LayerMode]] = []
     for cell_index, cell_center in enumerate(evidence.cell_center_source_xyz):
         records = select_cell_needle_indices(
             needles, cell_center, half_cube, settings
         )
-        candidates: list[CellStratigraphy] = []
+        cell_modes: list[LayerMode] = []
         for hypothesis in range(evidence.hypothesis_count):
             if not evidence.normal_valid[cell_index, hypothesis]:
                 continue
@@ -532,7 +672,6 @@ def build_stratigraphies(
                 settings.cell_stride_voxels,
                 settings,
             )
-            modes: list[LayerMode] = []
             for depth_index, orientation_index, peak_value in peaks:
                 mode = _fit_layer_mode(
                     needles,
@@ -549,11 +688,96 @@ def build_stratigraphies(
                     settings,
                 )
                 if mode is not None:
-                    modes.append(mode)
-            mode_count += len(modes)
+                    cell_modes.append(mode)
+        modes_by_cell.append(cell_modes)
+
+    mode_offset = np.zeros(evidence.cell_count + 1, dtype=np.uint64)
+    for index, values in enumerate(modes_by_cell):
+        mode_offset[index + 1] = mode_offset[index] + len(values)
+    flattened = [value for values in modes_by_cell for value in values]
+    table = LayerModeTable(
+        evidence.cell_xyz.copy(),
+        mode_offset,
+        np.asarray(
+            [value.normal_hypothesis for value in flattened], dtype=np.int8
+        ),
+        np.asarray(
+            [value.estimate.normal_xyz for value in flattened], dtype=np.float32
+        ).reshape(-1, 3),
+        np.asarray(
+            [value.estimate.height_from_cell_center for value in flattened],
+            dtype=np.float32,
+        ),
+        np.asarray(
+            [_pack_covariance(value.estimate.covariance_matrix) for value in flattened],
+            dtype=np.float32,
+        ).reshape(-1, 6),
+        np.asarray(
+            [value.estimate.fiber_xyz for value in flattened], dtype=np.float32
+        ).reshape(-1, 3),
+        np.asarray(
+            [value.estimate.fiber_angular_std_radians for value in flattened],
+            dtype=np.float32,
+        ),
+        np.asarray(
+            [value.estimate.confidence for value in flattened], dtype=np.float32
+        ),
+        np.asarray(
+            [value.source_depth_voxels for value in flattened], dtype=np.float32
+        ),
+        np.asarray(
+            [value.source_orientation_degrees for value in flattened],
+            dtype=np.float32,
+        ),
+        np.asarray(
+            [value.evidence_score for value in flattened], dtype=np.float32
+        ),
+        np.asarray(
+            [value.material_probability for value in flattened], dtype=np.float32
+        ),
+        np.asarray(
+            [value.effective_support for value in flattened], dtype=np.float32
+        ),
+    )
+    table.validate()
+    counts = np.diff(table.mode_offset.astype(np.int64))
+    return table, {
+        "cellCount": table.cell_count,
+        "candidateModeCount": table.mode_count,
+        "cellsWithModes": int(np.count_nonzero(counts)),
+        "maximumModesPerCell": int(np.max(counts, initial=0)),
+        "elapsedSeconds": round(time.monotonic() - started, 6),
+    }
+
+
+def build_configurations_from_modes(
+    source: VolumeSource,
+    modes: LayerModeTable,
+    evidence: CellEvidenceTable,
+    settings: RawAcusSettings,
+) -> tuple[ConfigurationTable, dict[str, Any]]:
+    """Compress a persistent mode bank into top-M physical stratigraphies."""
+
+    started = time.monotonic()
+    modes.validate()
+    evidence.validate()
+    if not np.array_equal(modes.cell_xyz, evidence.cell_xyz):
+        raise ValueError("mode and evidence tables must contain the same ordered cells")
+    all_configurations: list[list[CellStratigraphy]] = []
+    for cell_index in range(evidence.cell_count):
+        candidates: list[CellStratigraphy] = []
+        cell_modes = modes.modes_for_cell(cell_index)
+        for hypothesis in range(evidence.hypothesis_count):
+            hypothesis_modes = [
+                value
+                for value in cell_modes
+                if value.normal_hypothesis == hypothesis
+            ]
+            if not hypothesis_modes:
+                continue
             candidates.extend(
-                _top_stratigraphies(
-                    modes,
+                enumerate_stratigraphies(
+                    hypothesis_modes,
                     source,
                     settings,
                     hypothesis,
@@ -613,13 +837,112 @@ def build_stratigraphies(
     layer_counts = np.diff(table.layer_offset.astype(np.int64))
     return table, {
         "cellCount": table.cell_count,
-        "candidateModeCount": mode_count,
+        "candidateModeCount": modes.mode_count,
         "configurationCount": table.configuration_count,
         "layerAlternativeCount": table.layer_count,
         "nonemptyConfigurationCount": int(np.count_nonzero(layer_counts)),
         "maximumLayersInConfiguration": int(np.max(layer_counts, initial=0)),
         "elapsedSeconds": round(time.monotonic() - started, 6),
     }
+
+
+def build_stratigraphies(
+    source: VolumeSource,
+    shard: ShardSpec,
+    needles: NeedleTable,
+    evidence: CellEvidenceTable,
+    settings: RawAcusSettings,
+) -> tuple[ConfigurationTable, dict[str, Any]]:
+    """Compatibility wrapper for callers that do not persist the mode bank."""
+
+    del shard
+    started = time.monotonic()
+    modes, _ = build_layer_modes(needles, evidence, settings)
+    table, statistics = build_configurations_from_modes(
+        source, modes, evidence, settings
+    )
+    statistics["elapsedSeconds"] = round(time.monotonic() - started, 6)
+    return table, statistics
+
+
+# Kept for downstream experiments written against the initial private helper.
+_top_stratigraphies = enumerate_stratigraphies
+
+
+def write_mode_artifact(
+    prefix: str | Path,
+    table: LayerModeTable,
+    *,
+    identity_sha256: str,
+    shard: ShardSpec,
+    statistics: Mapping[str, Any],
+) -> dict[str, Any]:
+    base = Path(prefix)
+    data_path = base.with_suffix(".npz")
+    manifest_path = base.with_suffix(".json")
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = data_path.with_suffix(data_path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **table.arrays())
+    temporary.replace(data_path)
+    payload = {
+        "schema": MODE_ARTIFACT_SCHEMA,
+        "version": MODE_ARTIFACT_VERSION,
+        "identitySha256": identity_sha256,
+        "shard": shard.record(),
+        "statistics": dict(statistics),
+        "model": {
+            "scope": "all fitted local Acus peaks before configuration pruning",
+            "directions": "normal and fiber are axial/unsigned",
+            "ownership": "modes belong to disjoint cubical cells",
+            "purpose": "persistent evidence bank for stratigraphy and contextual continuation",
+        },
+        "data": {
+            "path": data_path.name,
+            "bytes": data_path.stat().st_size,
+            "sha256": sha256_file(data_path),
+        },
+    }
+    atomic_json(manifest_path, payload)
+    return payload
+
+
+def read_mode_artifact(
+    prefix: str | Path,
+    *,
+    identity_sha256: str,
+    verify: bool = True,
+) -> LayerModeTable:
+    base = Path(prefix)
+    manifest = json.loads(base.with_suffix(".json").read_text())
+    data_path = base.with_suffix(".npz")
+    if (
+        manifest.get("schema") != MODE_ARTIFACT_SCHEMA
+        or int(manifest.get("version", -1)) != MODE_ARTIFACT_VERSION
+        or manifest.get("identitySha256") != identity_sha256
+    ):
+        raise ValueError("layer-mode artifact does not match this inference identity")
+    if verify and sha256_file(data_path) != manifest["data"]["sha256"]:
+        raise ValueError("layer-mode artifact content hash mismatch")
+    with np.load(data_path) as values:
+        table = LayerModeTable(
+            np.asarray(values["cellXYZ"], dtype=np.int32),
+            np.asarray(values["modeOffset"], dtype=np.uint64),
+            np.asarray(values["normalHypothesis"], dtype=np.int8),
+            np.asarray(values["normalXYZ"], dtype=np.float32),
+            np.asarray(values["height"], dtype=np.float32),
+            np.asarray(values["covariance"], dtype=np.float32),
+            np.asarray(values["fiberXYZ"], dtype=np.float32),
+            np.asarray(values["fiberAngularStdRadians"], dtype=np.float32),
+            np.asarray(values["confidence"], dtype=np.float32),
+            np.asarray(values["sourceDepthVoxels"], dtype=np.float32),
+            np.asarray(values["sourceOrientationDegrees"], dtype=np.float32),
+            np.asarray(values["evidenceScore"], dtype=np.float32),
+            np.asarray(values["materialProbability"], dtype=np.float32),
+            np.asarray(values["effectiveSupport"], dtype=np.float32),
+        )
+    table.validate()
+    return table
 
 
 def write_configuration_artifact(

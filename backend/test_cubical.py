@@ -20,6 +20,11 @@ from backend.cubical.geometry import (
     clip_plane_to_cell,
 )
 from backend.cubical.matching import align_face_patches, match_face_traces
+from backend.cubical.continuation import discover_mode_continuations
+from backend.cubical.gaps import analyze_component_gaps
+from backend.cubical.repair import evaluate_single_cell_gap_repairs
+from backend.cubical.selection import ConfigurationOption
+from backend.cubical.stratigraphy import LayerModeTable
 from backend.cubical.topology import GridSpec, cell_edges, cell_face
 from backend.cubical.tables import PatchTable, read_patch_shard, write_patch_shard
 from backend.cubical.synthetic import (
@@ -359,6 +364,83 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertFalse(block.joins)
         self.assertEqual(len(block.components), 2)
         self.assertEqual(len(block.unresolved_interior_traces), 2)
+
+    def test_gap_census_and_mode_bank_recover_an_explicit_missing_neighbor(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        first = self._horizontal_patch(grid, (0, 0, 0), 0.1, 1)
+        second = self._horizontal_patch(grid, (1, 0, 0), 0.1, 2)
+        block = assemble_surface_block(
+            grid, BlockBounds((0, 0, 0), (2, 1, 1)), (first,)
+        )
+        options = {
+            (0, 0, 0): (
+                ConfigurationOption(0, (0, 0, 0), 0, 0, 0, -0.1, (first,), 0),
+            ),
+            (1, 0, 0): (
+                ConfigurationOption(1, (1, 0, 0), 1, 0, 0, -0.1, (), 0),
+                ConfigurationOption(2, (1, 0, 0), 1, 1, 1, -0.2, (second,), 0),
+            ),
+        }
+        selected = {(0, 0, 0): 0, (1, 0, 0): 1}
+        census = analyze_component_gaps(block, options, selected)
+        self.assertEqual(len(census.traces), 1)
+        self.assertEqual(
+            census.traces[0].classification, "recoverable-configuration-gap"
+        )
+        repair = evaluate_single_cell_gap_repairs(
+            block,
+            options,
+            selected,
+            census,
+            maximum_leaf_shape_cells_xyz=(1, 1, 1),
+        )
+        self.assertEqual(len(repair.trials), 1)
+        self.assertTrue(repair.trials[0].recommended)
+        self.assertEqual(repair.trials[0].closed_gap_count, 1)
+
+        estimate = second.estimate
+        covariance = estimate.covariance_matrix
+        mode_table = LayerModeTable(
+            np.asarray([[1, 0, 0]], dtype=np.int32),
+            np.asarray([0, 1], dtype=np.uint64),
+            np.asarray([0], dtype=np.int8),
+            np.asarray([estimate.normal_xyz], dtype=np.float32),
+            np.asarray([estimate.height_from_cell_center], dtype=np.float32),
+            np.asarray(
+                [[
+                    covariance[0, 0],
+                    covariance[0, 1],
+                    covariance[0, 2],
+                    covariance[1, 1],
+                    covariance[1, 2],
+                    covariance[2, 2],
+                ]],
+                dtype=np.float32,
+            ),
+            np.asarray([estimate.fiber_xyz], dtype=np.float32),
+            np.asarray([estimate.fiber_angular_std_radians], dtype=np.float32),
+            np.asarray([estimate.confidence], dtype=np.float32),
+            np.asarray([0.1], dtype=np.float32),
+            np.asarray([2.5], dtype=np.float32),
+            np.asarray([0.8], dtype=np.float32),
+            np.asarray([0.9], dtype=np.float32),
+            np.asarray([8.0], dtype=np.float32),
+        )
+        mode_census = analyze_component_gaps(
+            block,
+            {
+                (0, 0, 0): options[(0, 0, 0)],
+                (1, 0, 0): (options[(1, 0, 0)][0],),
+            },
+            selected,
+        )
+        self.assertEqual(mode_census.traces[0].classification, "mode-gap")
+        discovery = discover_mode_continuations(
+            block, mode_census, {"test": mode_table}
+        )
+        self.assertEqual(discovery.mode_gap_count, 1)
+        self.assertEqual(discovery.matched_gap_count, 1)
+        self.assertEqual(len(discovery.candidates), 1)
 
     def test_hierarchical_block_merge_matches_direct_assembly(self) -> None:
         grid = GridSpec((4, 2, 1))

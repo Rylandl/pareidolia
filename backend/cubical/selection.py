@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -33,12 +32,15 @@ class ConfigurationSelection:
     changed_last_sweep: int
     unary_energy: float
     pairwise_energy: float
+    pairwise_reward: float
+    continuation_energy: float
     total_energy: float
     pairwise_evaluation_count: int
+    interior_unmatched_trace_count: int
     degenerate_layer_count: int
 
 
-def _configuration_options(
+def configuration_options(
     grid: GridSpec,
     tables: Iterable[ConfigurationTable],
 ) -> tuple[dict[Int3, tuple[ConfigurationOption, ...]], int]:
@@ -118,19 +120,27 @@ def optimize_configurations(
     matching_settings: TraceMatchSettings | None = None,
     unary_scale: float = 1.0,
     pairwise_scale: float = 0.35,
+    interior_unmatched_trace_penalty: float = 0.0,
     maximum_sweeps: int = 12,
 ) -> ConfigurationSelection:
     """Select one local stratigraphy per cell with face-relative likelihoods.
 
-    The pairwise term is the face alignment likelihood relative to leaving all
-    traces unmatched. It therefore rewards supported continuations without
-    charging a boundary merely because one cell contains a layer.
+    The pairwise reward is the face alignment likelihood relative to leaving
+    all traces unmatched. ``interior_unmatched_trace_penalty`` optionally adds
+    a soft birth/death cost when both neighboring configurations contain
+    layers but some shared-face traces remain unmatched. Empty neighbors stay
+    neutral, preserving a representation for air and real page boundaries.
     """
 
     if unary_scale <= 0.0 or pairwise_scale <= 0.0 or maximum_sweeps <= 0:
         raise ValueError("selection scales and maximum sweeps must be positive")
+    if (
+        not math.isfinite(interior_unmatched_trace_penalty)
+        or interior_unmatched_trace_penalty < 0.0
+    ):
+        raise ValueError("interior unmatched-trace penalty must be finite and nonnegative")
     resolved_matching = matching_settings or TraceMatchSettings()
-    options_by_cell, degenerate_total = _configuration_options(grid, tables)
+    options_by_cell, degenerate_total = configuration_options(grid, tables)
     expected_cells = int(np.prod(grid.shape_cells_xyz))
     if len(options_by_cell) != expected_cells:
         missing = [
@@ -153,6 +163,9 @@ def optimize_configurations(
         neighbors[second].append((first, axis, False))
 
     pair_cache: dict[tuple[int, int, int, bool], float] = {}
+    pair_details: dict[
+        tuple[int, int, int, bool], tuple[float, float, int]
+    ] = {}
 
     def pair_energy(
         first: ConfigurationOption,
@@ -173,6 +186,7 @@ def optimize_configurations(
         )
         if not lower_traces and not upper_traces:
             relative = 0.0
+            unmatched = 0
         else:
             try:
                 alignment = align_face_patches(
@@ -183,12 +197,24 @@ def optimize_configurations(
                     grid=grid,
                 )
                 relative = alignment.negative_log_likelihood - baseline
+                unmatched = len(alignment.unmatched_first_patch_ids) + len(
+                    alignment.unmatched_second_patch_ids
+                )
             except ValueError:
                 relative = 0.0
-        value = pairwise_scale * min(float(relative), 0.0)
+                unmatched = lower_traces + upper_traces
+        reward = pairwise_scale * min(float(relative), 0.0)
+        continuation = (
+            interior_unmatched_trace_penalty * unmatched
+            if lower.patches and upper.patches
+            else 0.0
+        )
+        value = reward + continuation
         pair_cache[key] = value
+        pair_details[key] = (reward, continuation, unmatched)
         reverse_key = (second.option_id, first.option_id, axis, not first_is_lower)
         pair_cache[reverse_key] = value
+        pair_details[reverse_key] = (reward, continuation, unmatched)
         return value
 
     selected: dict[Int3, ConfigurationOption] = {
@@ -241,8 +267,18 @@ def optimize_configurations(
         for option in selected_options
     )
     pairwise_energy = 0.0
+    pairwise_reward = 0.0
+    continuation_energy = 0.0
+    interior_unmatched_trace_count = 0
     for first, second, axis in pairs:
-        pairwise_energy += pair_energy(selected[first], selected[second], axis, True)
+        first_option = selected[first]
+        second_option = selected[second]
+        pairwise_energy += pair_energy(first_option, second_option, axis, True)
+        detail = pair_details[(first_option.option_id, second_option.option_id, axis, True)]
+        pairwise_reward += detail[0]
+        continuation_energy += detail[1]
+        if first_option.patches and second_option.patches:
+            interior_unmatched_trace_count += detail[2]
     return ConfigurationSelection(
         selected_options,
         selected_patches,
@@ -250,7 +286,10 @@ def optimize_configurations(
         changed,
         float(unary_energy),
         float(pairwise_energy),
+        float(pairwise_reward),
+        float(continuation_energy),
         float(unary_energy + pairwise_energy),
         len(pair_cache) // 2,
+        interior_unmatched_trace_count,
         degenerate_total,
     )

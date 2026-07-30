@@ -31,7 +31,11 @@ from backend.cubical.stratigraphy import (
     ConfigurationTable,
     LayerMode,
     _transition_reward,
+    build_configurations_from_modes,
+    build_layer_modes,
     build_stratigraphies,
+    read_mode_artifact,
+    write_mode_artifact,
 )
 from backend.cubical.topology import GridSpec
 
@@ -284,6 +288,38 @@ class RawAcusInferenceTests(unittest.TestCase):
             80.0,
         )
 
+    def test_persisted_mode_bank_reproduces_direct_stratigraphy(self) -> None:
+        source, shard, needles, evidence, settings = self._two_layer_scene()
+        direct, _ = build_stratigraphies(
+            source, shard, needles, evidence, settings
+        )
+        modes, statistics = build_layer_modes(needles, evidence, settings)
+        split, _ = build_configurations_from_modes(
+            source, modes, evidence, settings
+        )
+        self.assertGreaterEqual(modes.mode_count, 2)
+        for name, expected in direct.arrays().items():
+            np.testing.assert_array_equal(split.arrays()[name], expected)
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "modes-v1"
+            write_mode_artifact(
+                prefix,
+                modes,
+                identity_sha256="mode-test",
+                shard=shard,
+                statistics=statistics,
+            )
+            restored = read_mode_artifact(
+                prefix, identity_sha256="mode-test"
+            )
+        for name, expected in modes.arrays().items():
+            np.testing.assert_array_equal(restored.arrays()[name], expected)
+        resumed, _ = build_configurations_from_modes(
+            source, restored, evidence, settings
+        )
+        for name, expected in split.arrays().items():
+            np.testing.assert_array_equal(resumed.arrays()[name], expected)
+
     def test_physical_transition_allows_parallel_layers_but_rejects_crossing_planes(self) -> None:
         source = VolumeSource(
             Path("/unused/native.npy"), None, (128, 128, 128), (0, 0, 0), 9.362, {}
@@ -379,7 +415,20 @@ class RawAcusInferenceTests(unittest.TestCase):
         self.assertEqual(len(selection.patches), 2)
         self.assertTrue(all(value.patches for value in selection.selected_options))
         self.assertLess(selection.pairwise_energy, 0.0)
+        self.assertAlmostEqual(selection.pairwise_reward, selection.pairwise_energy)
+        self.assertEqual(selection.continuation_energy, 0.0)
+        self.assertEqual(selection.interior_unmatched_trace_count, 0)
         self.assertEqual(selection.changed_last_sweep, 0)
+
+        with self.assertRaises(ValueError):
+            optimize_configurations(
+                grid,
+                [
+                    self._single_plane_options((0, 0, 0)),
+                    self._single_plane_options((1, 0, 0)),
+                ],
+                interior_unmatched_trace_penalty=-0.1,
+            )
 
 
 if __name__ == "__main__":
