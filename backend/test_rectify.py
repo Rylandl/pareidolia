@@ -16,6 +16,7 @@ from backend.acus import (
     fit_acus_field,
     fit_acus_padding_audit,
 )
+from backend.block_sheet_volume import load_block_sheet_payload, load_block_volume
 from backend.rectify import VolumeData, fit_local_chart, grayscale_png, synthetic_scroll
 from backend.region import fit_acus_region
 from backend.slab_flake_audit import slab_flake_audit
@@ -162,6 +163,60 @@ from backend.slab_analysis import (
 
 
 class RectifierTests(unittest.TestCase):
+    def test_block_sheet_volume_preserves_local_geometry_and_voxel_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sheets"
+            root.mkdir()
+            (root / "selected-patches-v1.json").write_text(
+                json.dumps(
+                    {
+                        "grid": {
+                            "shapeCellsXYZ": [1, 1, 1],
+                            "cellSizeXYZ": [2.0, 2.0, 2.0],
+                            "originXYZ": [2.0, 2.0, 2.0],
+                            "coordinateUnit": "source-voxel",
+                        }
+                    }
+                )
+            )
+            np.savez_compressed(
+                root / "selected-patches-v1.npz",
+                patchId=np.asarray([7], dtype=np.uint64),
+                cellXYZ=np.asarray([[0, 0, 0]], dtype=np.int32),
+                confidence=np.asarray([0.8], dtype=np.float32),
+                normalXYZ=np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+                vertexOffset=np.asarray([0, 4], dtype=np.uint64),
+                vertexEdgeAxis=np.asarray([0, 0, 0, 0], dtype=np.uint8),
+                vertexEdgeAnchor=np.asarray(
+                    [[0, 0, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1]], dtype=np.int32
+                ),
+                vertexT=np.asarray([0.5, 0.5, 0.5, 0.5], dtype=np.float32),
+            )
+            np.savez_compressed(
+                root / "surface-graph-v1.npz",
+                firstPatchId=np.asarray([], dtype=np.uint64),
+                secondPatchId=np.asarray([], dtype=np.uint64),
+                patchId=np.asarray([7], dtype=np.uint64),
+                componentId=np.asarray([7], dtype=np.uint64),
+            )
+            payload = load_block_sheet_payload(root)
+            self.assertEqual(payload["grid"]["extentXYZ"], [2.0, 2.0, 2.0])
+            self.assertEqual(payload["stats"]["componentCount"], 1)
+            self.assertEqual(payload["patches"][0]["vertices"][2], [1.0, 2.0, 2.0])
+
+            volume_path = Path(directory) / "volume.npy"
+            volume = np.arange(6**3, dtype=np.uint8).reshape(6, 6, 6)
+            np.save(volume_path, volume)
+            volume_path.with_suffix(".json").write_text(json.dumps({"originXYZ": [0, 0, 0]}))
+            body, metadata = load_block_volume(
+                sheet_root=root,
+                volume_path=volume_path,
+                stride=1,
+            )
+            expected = volume[2:4, 2:4, 2:4]
+            self.assertEqual(metadata["shapeXYZ"], [2, 2, 2])
+            self.assertEqual(body, expected.tobytes(order="C"))
+
     def test_dense_termination_comparison_separates_new_and_stored_modes(
         self,
     ) -> None:

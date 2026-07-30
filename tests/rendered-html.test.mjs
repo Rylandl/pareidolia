@@ -54,11 +54,23 @@ test("server-renders the dedicated cross-scroll explorer", async () => {
   assert.match(html, /Running rematched independence controls/);
 });
 
+test("server-renders the solved block volume explorer", async () => {
+  const response = await render("/block-volume");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Block volume \+ solved sheets/);
+  assert.match(html, /Volume threshold/);
+  assert.match(html, /Minimum sheet size/);
+  assert.match(html, /Cutaway axis/);
+  assert.match(html, /Loading the solved block and source voxels/);
+});
+
 test("keeps the API contract and coordinate mapping explicit", async () => {
-  const [workbench, volumeScene, explorer, page, layout, css] = await Promise.all([
+  const [workbench, volumeScene, explorer, blockExplorer, page, layout, css] = await Promise.all([
     readFile(new URL("../app/RectifierWorkbench.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/VolumeScene.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/CrossScrollExplorer.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/BlockVolumeExplorer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -122,6 +134,13 @@ test("keeps the API contract and coordinate mapping explicit", async () => {
   assert.match(explorer, /Held-out replication/);
   assert.match(explorer, /3D sheetlet graph/);
   assert.match(explorer, /Vector \/ flake scale/);
+  assert.match(explorer, /\/block-volume/);
+  assert.match(blockExplorer, /\/api\/block\/sheets/);
+  assert.match(blockExplorer, /\/api\/block\/volume\?stride=2/);
+  assert.match(blockExplorer, /sampler3D/);
+  assert.match(blockExplorer, /minimumComponentSize/);
+  assert.match(blockExplorer, /clipPolygon/);
+  assert.match(blockExplorer, /addEventListener\("wheel", handleWheel, \{ passive: false \}\)/);
   assert.match(volumeScene, /Fiber flakes/);
   assert.match(volumeScene, /Linked tracks/);
   assert.match(volumeScene, /3D sheetlets/);

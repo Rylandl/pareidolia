@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
         fit_acus_padding_audit,
     )
     from backend.acus_compute import compute_status
+    from backend.block_sheet_volume import load_block_sheet_payload, load_block_volume
     from backend.region import fit_acus_region
     from backend.slab_flake_audit import slab_flake_audit
     from backend.slab_flake_holdout import slab_flake_holdout
@@ -29,6 +30,7 @@ else:
     from .rectify import VolumeData, fit_local_chart, grayscale_png
     from .acus import fit_acus, fit_acus_audit, fit_acus_field, fit_acus_padding_audit
     from .acus_compute import compute_status
+    from .block_sheet_volume import load_block_sheet_payload, load_block_volume
     from .region import fit_acus_region
     from .slab_flake_audit import slab_flake_audit
     from .slab_flake_holdout import slab_flake_holdout
@@ -46,6 +48,11 @@ class RectifierHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "X-Volume-Shape-XYZ, X-Volume-Origin-XYZ, X-Volume-Extent-XYZ, "
+            "X-Volume-Stride, X-Volume-Percentiles",
+        )
         self.send_header("Cache-Control", "no-store")
 
     def _json(self, payload: object, status: int = HTTPStatus.OK) -> None:
@@ -53,6 +60,22 @@ class RectifierHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _binary(
+        self,
+        body: bytes,
+        content_type: str,
+        headers: dict[str, str] | None = None,
+        status: int = HTTPStatus.OK,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self._cors()
         self.end_headers()
         self.wfile.write(body)
@@ -149,6 +172,39 @@ class RectifierHandler(BaseHTTPRequestHandler):
                 spacing = int(query.get("spacing", ["64"])[0])
                 cell_step = max(2, min(4, round(spacing / 32)))
                 self._json(slab_sheetlet_slice(self.slab_root, z_index, cell_step, 4))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._error(str(exc), HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if parsed.path == "/api/block/sheets":
+            try:
+                self._json(load_block_sheet_payload())
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._error(str(exc), HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if parsed.path == "/api/block/volume":
+            try:
+                query = parse_qs(parsed.query)
+                stride = int(query.get("stride", ["2"])[0])
+                body, metadata = load_block_volume(stride=stride)
+                self._binary(
+                    body,
+                    "application/octet-stream",
+                    {
+                        "X-Volume-Shape-XYZ": ",".join(
+                            str(value) for value in metadata["shapeXYZ"]
+                        ),
+                        "X-Volume-Origin-XYZ": ",".join(
+                            str(value) for value in metadata["originXYZ"]
+                        ),
+                        "X-Volume-Extent-XYZ": ",".join(
+                            str(value) for value in metadata["extentXYZ"]
+                        ),
+                        "X-Volume-Stride": str(metadata["stride"]),
+                        "X-Volume-Percentiles": ",".join(
+                            str(value) for value in metadata["percentiles"]
+                        ),
+                    },
+                )
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 self._error(str(exc), HTTPStatus.SERVICE_UNAVAILABLE)
             return

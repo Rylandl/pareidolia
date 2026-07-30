@@ -875,6 +875,20 @@ npm run dev
 
 Open `http://127.0.0.1:3000/`.
 
+The solved owned-core block is available at `/block-volume`. It registers the
+exact clipped polygons from the current pure-likelihood retained graph against
+a stride-2 texture of the corresponding 384 × 384 × 320 native CT block. The
+viewer can orbit and trackpad-zoom the combined scene, select or isolate a
+sheet component, filter by component size, and cut the volume and polygons with
+the same X, Y, or Z plane. The default artifacts can be overridden without
+changing the webpage:
+
+```bash
+PAREIDOLIA_BLOCK_SHEET_ROOT=/path/to/retained-graph \
+PAREIDOLIA_BLOCK_VOLUME=/path/to/source-slab.npy \
+python3 backend/server.py --host 127.0.0.1 --port 8000
+```
+
 To use a local volume:
 
 ```bash

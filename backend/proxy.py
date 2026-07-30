@@ -50,7 +50,9 @@ class LoopbackProxyHandler(BaseHTTPRequestHandler):
             headers["Origin"] = f"http://{self.upstream_host}:{self.upstream_port}"
             headers["Referer"] = f"http://{self.upstream_host}:{self.upstream_port}/"
             headers["Sec-Fetch-Site"] = "same-origin"
-        timeout = 300 if self.path.startswith(("/api/region", "/api/slab/overview")) else 30
+        timeout = 300 if self.path.startswith(
+            ("/api/region", "/api/slab/overview", "/api/block/volume")
+        ) else 30
         connection = http.client.HTTPConnection(target_host, target_port, timeout=timeout)
         try:
             connection.request(self.command, self.path, body=body, headers=headers)

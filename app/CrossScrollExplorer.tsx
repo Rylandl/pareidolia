@@ -301,9 +301,14 @@ export function CrossScrollExplorer() {
   return (
     <main className="cross-scroll-page">
       <header className="cross-scroll-header">
-        <Link href="/" className="cross-scroll-back">
-          ← Local workbench
-        </Link>
+        <nav className="cross-scroll-nav" aria-label="Experiment pages">
+          <Link href="/" className="cross-scroll-back">
+            ← Local workbench
+          </Link>
+          <Link href="/block-volume" className="cross-scroll-back">
+            Solved block volume →
+          </Link>
+        </nav>
         <div>
           <p className="eyebrow">Acus · native transverse slab</p>
           <h1>Cross-scroll slice explorer</h1>
