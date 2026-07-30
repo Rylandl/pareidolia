@@ -93,6 +93,11 @@ from backend.cubical.sheet_evidence import (
 )
 from backend.cubical.sheet_correspondence import enumerate_mode_correspondences
 from backend.cubical.sheet_factors import _ordered_alignment_factor
+from backend.cubical.sheet_ownership import (
+    crop_surface_graph_to_owned_block,
+    extract_sheet_evidence_subblock,
+    finalize_sheet_halo_experiment,
+)
 from backend.cubical.sheet_stitching import (
     SheetMatchingPolicy,
     SheetStitchingSettings,
@@ -104,7 +109,7 @@ from backend.cubical.sheet_topology_refinement import (
     choose_improving_topology_evaluation,
     frozen_exterior_join_keys,
 )
-from backend.cubical.surface_graph import read_surface_graph
+from backend.cubical.surface_graph import read_surface_graph, write_surface_graph
 from backend.cubical.selection import (
     ConfigurationOption,
     optimize_configurations,
@@ -2070,6 +2075,119 @@ class CubicalGeometryTests(unittest.TestCase):
                 atol=1.0e-6,
             )
 
+    def test_owned_sheet_crop_rebases_geometry_and_clips_connectivity(self) -> None:
+        grid = GridSpec(
+            (4, 2, 1),
+            cell_size_xyz=(2.0, 3.0, 5.0),
+            origin_xyz=(10.0, 20.0, 30.0),
+            coordinate_unit="voxel",
+        )
+        patches = tuple(
+            self._horizontal_patch(grid, (x, y, 0), 0.0, 1 + x + 4 * y)
+            for y in range(2)
+            for x in range(4)
+        )
+        source_by_id = {value.patch_id: value for value in patches}
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            owned = Path(directory) / "owned"
+            write_patch_shard(
+                source / "selected-patches-v1",
+                PatchTable.from_patches(grid, patches),
+            )
+            write_surface_graph(
+                source,
+                block,
+                semantics="synthetic ownership crop source",
+            )
+            selected_cells = np.asarray(
+                [(x, y, 0) for y in range(2) for x in range(4)],
+                dtype=np.int32,
+            )
+            np.savez_compressed(
+                source / "selected-configurations-v1.npz",
+                cellXYZ=selected_cells,
+                configurationIndex=np.arange(8, dtype=np.uint32),
+                configurationId=np.arange(100, 108, dtype=np.uint64),
+                inputIndex=np.zeros(8, dtype=np.uint16),
+                sourceConfigurationIndex=np.arange(8, dtype=np.uint32),
+            )
+            summary = crop_surface_graph_to_owned_block(
+                source,
+                owned,
+                start_cell_xyz=(1, 0, 0),
+                stop_cell_xyz_exclusive=(3, 2, 1),
+            )
+            restored = read_surface_graph(owned)
+            with np.load(owned / "owned-configurations-v1.npz") as values:
+                owned_cells = np.asarray(values["cellXYZ"])
+                owned_configuration_ids = np.asarray(values["configurationId"])
+
+        self.assertEqual(restored.grid.shape_cells_xyz, (2, 2, 1))
+        self.assertEqual(restored.grid.origin_xyz, (12.0, 20.0, 30.0))
+        self.assertEqual(len(restored.patches), 4)
+        self.assertEqual(len(restored.joins), 4)
+        self.assertEqual(len(restored.components), 1)
+        self.assertFalse(restored.unresolved_interior_traces)
+        self.assertEqual(summary["summary"]["componentDisposition"]["clipped"], 1)
+        self.assertEqual(
+            summary["summary"]["componentDisposition"]["splitAfterCrop"], 0
+        )
+        np.testing.assert_array_equal(
+            owned_cells,
+            ((0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)),
+        )
+        np.testing.assert_array_equal(
+            owned_configuration_ids,
+            (101, 102, 105, 106),
+        )
+        for patch in restored.patches:
+            source_patch = source_by_id[patch.patch_id]
+            np.testing.assert_allclose(
+                sorted(value.point_xyz for value in patch.vertices),
+                sorted(value.point_xyz for value in source_patch.vertices),
+                atol=1.0e-6,
+            )
+
+    def test_cached_sheet_halo_final_audit_is_attached_to_experiment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = root / "sheet-halo-experiment-v1.json"
+            audit_path = root / "sheet-halo-final-audit-v1.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "state": "complete",
+                        "identity": {"identitySha256": "synthetic-halo"},
+                    }
+                )
+            )
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "experimentIdentitySha256": "synthetic-halo",
+                        "configurationContext": {"referenceHaloCells": 2},
+                    }
+                )
+            )
+
+            restored = finalize_sheet_halo_experiment(root)
+            manifest = json.loads(manifest_path.read_text())
+            audit_sha256 = sha256_file(audit_path)
+
+        self.assertEqual(
+            restored["experimentIdentitySha256"], "synthetic-halo"
+        )
+        self.assertEqual(manifest["finalAudit"]["referenceHaloCells"], 2)
+        self.assertEqual(
+            manifest["finalAudit"]["sha256"], audit_sha256
+        )
+
     def test_selected_subblock_partitions_and_rebases_physical_candidates(
         self,
     ) -> None:
@@ -2710,6 +2828,17 @@ class CubicalGeometryTests(unittest.TestCase):
                 output,
             )
             restored = read_block_sheet_evidence(output)
+            source_modes = {
+                value.patch_id: value for value in restored.mode_patches.to_patches()
+            }
+            subset_root = root / "sheet-evidence-subblock"
+            subset_summary = extract_sheet_evidence_subblock(
+                output,
+                subset_root,
+                start_cell_xyz=(1, 0, 0),
+                stop_cell_xyz_exclusive=(2, 1, 1),
+            )
+            subset = read_block_sheet_evidence(subset_root)
 
         self.assertEqual(summary["statistics"]["ownedCells"], 2)
         self.assertEqual(summary["statistics"]["uniqueAcusModes"], 3)
@@ -2717,6 +2846,27 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(restored.mode_count, 3)
         self.assertEqual(restored.configuration_count, 4)
         self.assertEqual(restored.mode_patches.patch_count, 3)
+        self.assertEqual(subset_summary["statistics"]["ownedCells"], 1)
+        self.assertEqual(subset.grid.shape_cells_xyz, (1, 1, 1))
+        self.assertEqual(subset.grid.origin_xyz, (11.0, 20.0, 30.0))
+        self.assertEqual(subset.mode_count, 2)
+        self.assertEqual(subset.configuration_count, 2)
+        self.assertEqual(
+            set(int(value) for value in subset.arrays["modeId"]),
+            {
+                patch_id
+                for patch_id, patch in source_modes.items()
+                if patch.cell_xyz == (1, 0, 0)
+            },
+        )
+        for patch in subset.mode_patches.to_patches():
+            np.testing.assert_allclose(
+                sorted(value.point_xyz for value in patch.vertices),
+                sorted(
+                    value.point_xyz for value in source_modes[patch.patch_id].vertices
+                ),
+                atol=1.0e-6,
+            )
         np.testing.assert_array_equal(
             np.diff(restored.arrays["configurationModeOffset"]),
             (1, 0, 1, 1),

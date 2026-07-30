@@ -224,6 +224,55 @@ multi-restart replayer therefore cannot regress the accepted likelihood merely
 because a fresh deterministic proposal is weaker, though a higher-likelihood
 sheet exchange may trade several low-benefit joins for fewer stronger ones.
 
+## Sheet-inference halo and ownership
+
+There are two distinct halos. The raw Acus **measurement halo** is measured in
+voxels, is at least the fitted needle length, and exists so every owned fit has
+directionally unbiased CT support. The downstream **sheet-inference halo** is
+measured in cubical cells and provides neighboring stack context around a
+disjoint owned core. It does not rerun Acus or change the immutable evidence.
+
+An expanded solve cannot simply be clipped and published. Global topology in
+the halo may consume a trace or force an edge choice inside the future core.
+Removing the exterior then frees those constraints without reconsidering the
+remaining graph, leaving artificial fragments. The block procedure is:
+
+1. extract an exact evidence subblock for the owned core plus its inference
+   halo, preserving stable global mode and configuration IDs;
+2. optimize physical stack configurations and replay topology in that expanded
+   context;
+3. crop patches and the selected configuration ledger to the owned core while
+   retaining parent-component lineage; and
+4. re-stitch topology inside the crop with those halo-selected configurations
+   fixed, producing the graph that the block actually owns.
+
+The controlled 12 × 12 × 10-core audit can be reproduced with:
+
+```bash
+python3 -m backend.cubical audit-sheet-halos \
+  --evidence /data/block-sheet-evidence-v1 \
+  --cluster /data/matching-policy-root \
+  --core-start 2 2 2 --core-stop 14 14 12 \
+  --halos 0 1 2 \
+  --output /data/sheet-halo-audit-v1
+```
+
+One and two halo cells converged: only 7/1,440 owned configurations differed,
+all on the outermost cell shell. After mandatory owned-core re-stitching, their
+patch Jaccard was 99.60% and retained-join Jaccard was 99.61%. The zero-halo
+selection appeared 81.95 objective units better when scored only inside its
+artificial cut, but lost 205.57 units on the omitted cross-boundary factors and
+was 123.63 units worse in the common two-cell context. One cell was only 6.80
+units below the two-cell reference.
+
+This does not establish that a halo makes the isolated core less fragmented;
+the local component counts were slightly worse. It establishes that the
+zero-halo solution overfits the block cut and that one cell captures nearly all
+of the missing configuration context. One sheet-inference cell is therefore
+the provisional default. Owned topology is rebuilt after cropping, parent
+lineage is retained for later reconciliation, and topology on the outer cell
+band remains provisional until adjacent blocks are merged.
+
 ## Block scaling and merge
 
 Cells have disjoint ownership. Raw evidence contexts overlap by the configured

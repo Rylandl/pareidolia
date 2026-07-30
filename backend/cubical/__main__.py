@@ -64,6 +64,12 @@ from .sheet_configuration_solver import (
     run_sheet_configuration_initialization,
 )
 from .sheet_graph_solver import replay_joint_sheet_graph
+from .sheet_ownership import (
+    crop_surface_graph_to_owned_block,
+    extract_sheet_evidence_subblock,
+    finalize_sheet_halo_experiment,
+    run_sheet_halo_experiment,
+)
 from .sheet_topology_refinement import (
     SheetTopologyRefinementSettings,
     run_sheet_topology_refinement,
@@ -790,6 +796,74 @@ def _replay_joint_sheet_graph(args: argparse.Namespace) -> None:
             exchange_round_count=args.exchange_rounds,
             exchange_trials_per_round=args.exchange_trials_per_round,
         ),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _extract_sheet_evidence_subblock(args: argparse.Namespace) -> None:
+    summary = extract_sheet_evidence_subblock(
+        args.evidence,
+        args.output,
+        start_cell_xyz=tuple(args.start),
+        stop_cell_xyz_exclusive=tuple(args.stop),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _crop_owned_sheet_graph(args: argparse.Namespace) -> None:
+    summary = crop_surface_graph_to_owned_block(
+        args.graph,
+        args.output,
+        start_cell_xyz=tuple(args.start),
+        stop_cell_xyz_exclusive=tuple(args.stop),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _sheet_halo_experiment(args: argparse.Namespace) -> None:
+    def progress(message: str) -> None:
+        print(message, flush=True)
+
+    summary = run_sheet_halo_experiment(
+        args.evidence,
+        args.cluster,
+        args.output,
+        core_start_cell_xyz=tuple(args.core_start),
+        core_stop_cell_xyz_exclusive=tuple(args.core_stop),
+        halo_cells=tuple(args.halos),
+        configuration_settings=SheetConfigurationSolverSettings(
+            unary_scale=args.unary_scale,
+            pairwise_scale=args.pairwise_scale,
+            coverage_reward_scale=args.coverage_reward_scale,
+            unmatched_trace_penalty=args.unmatched_trace_penalty,
+            pairwise_normalization=args.pairwise_normalization,
+            maximum_sweeps=args.maximum_sweeps,
+        ),
+        stitching_settings=SheetStitchingSettings(
+            minimum_join_benefit=args.minimum_join_benefit,
+            quarter_turn_penalty=args.quarter_turn_penalty,
+            restart_count=args.restarts,
+            priority_jitter_fraction=args.priority_jitter_fraction,
+            exchange_round_count=args.exchange_rounds,
+            exchange_trials_per_round=args.exchange_trials_per_round,
+        ),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _finalize_sheet_halo_experiment(args: argparse.Namespace) -> None:
+    def progress(message: str) -> None:
+        print(message, flush=True)
+
+    summary = finalize_sheet_halo_experiment(
+        args.experiment,
+        cluster_root=args.cluster,
         force=args.force,
         progress=progress,
     )
@@ -2055,6 +2129,101 @@ def main() -> None:
     )
     joint_sheet_graph.add_argument("--force", action="store_true")
     joint_sheet_graph.set_defaults(handler=_replay_joint_sheet_graph)
+    sheet_evidence_subblock = subparsers.add_parser(
+        "extract-sheet-evidence-subblock",
+        description=(
+            "Extract and rebase an exact rectangular subset of an immutable "
+            "block Acus evidence contract while preserving stable mode and "
+            "physical-configuration IDs."
+        ),
+    )
+    sheet_evidence_subblock.add_argument(
+        "--evidence", type=Path, required=True
+    )
+    sheet_evidence_subblock.add_argument(
+        "--start", nargs=3, type=int, required=True
+    )
+    sheet_evidence_subblock.add_argument(
+        "--stop", nargs=3, type=int, required=True
+    )
+    sheet_evidence_subblock.add_argument("--output", type=Path, required=True)
+    sheet_evidence_subblock.add_argument("--force", action="store_true")
+    sheet_evidence_subblock.set_defaults(
+        handler=_extract_sheet_evidence_subblock
+    )
+    owned_sheet_graph = subparsers.add_parser(
+        "crop-owned-sheet-graph",
+        description=(
+            "Crop a completed expanded sheet solve to its owned core, prune "
+            "outside components, and recompute clipped connectivity and boundary traces."
+        ),
+    )
+    owned_sheet_graph.add_argument("--graph", type=Path, required=True)
+    owned_sheet_graph.add_argument("--start", nargs=3, type=int, required=True)
+    owned_sheet_graph.add_argument("--stop", nargs=3, type=int, required=True)
+    owned_sheet_graph.add_argument("--output", type=Path, required=True)
+    owned_sheet_graph.add_argument("--force", action="store_true")
+    owned_sheet_graph.set_defaults(handler=_crop_owned_sheet_graph)
+    sheet_halo = subparsers.add_parser(
+        "audit-sheet-halos",
+        description=(
+            "Solve one fixed owned core independently with several cell halos, "
+            "crop each result, re-stitch topology inside the owned core, and "
+            "compare configuration and graph stability."
+        ),
+    )
+    sheet_halo.add_argument("--evidence", type=Path, required=True)
+    sheet_halo.add_argument("--cluster", type=Path, required=True)
+    sheet_halo.add_argument(
+        "--core-start", nargs=3, type=int, required=True
+    )
+    sheet_halo.add_argument(
+        "--core-stop", nargs=3, type=int, required=True
+    )
+    sheet_halo.add_argument(
+        "--halos", nargs="+", type=int, default=(0, 1, 2)
+    )
+    sheet_halo.add_argument("--output", type=Path, required=True)
+    sheet_halo.add_argument("--unary-scale", type=float, default=1.0)
+    sheet_halo.add_argument("--pairwise-scale", type=float, default=0.2)
+    sheet_halo.add_argument("--coverage-reward-scale", type=float, default=0.0)
+    sheet_halo.add_argument("--unmatched-trace-penalty", type=float, default=0.0)
+    sheet_halo.add_argument(
+        "--pairwise-normalization",
+        choices=("none", "trace-mean"),
+        default="none",
+    )
+    sheet_halo.add_argument("--maximum-sweeps", type=int, default=12)
+    sheet_halo.add_argument("--minimum-join-benefit", type=float, default=0.0)
+    sheet_halo.add_argument("--quarter-turn-penalty", type=float, default=0.75)
+    sheet_halo.add_argument("--restarts", type=int, default=4)
+    sheet_halo.add_argument(
+        "--priority-jitter-fraction", type=float, default=0.35
+    )
+    sheet_halo.add_argument("--exchange-rounds", type=int, default=2)
+    sheet_halo.add_argument(
+        "--exchange-trials-per-round", type=int, default=24
+    )
+    sheet_halo.add_argument("--force", action="store_true")
+    sheet_halo.set_defaults(handler=_sheet_halo_experiment)
+    finalize_sheet_halo = subparsers.add_parser(
+        "finalize-sheet-halo-audit",
+        description=(
+            "Re-stitch every cropped owned core with its halo-selected cell "
+            "configurations, then compare final topology and score each core "
+            "selection in the largest available halo context."
+        ),
+    )
+    finalize_sheet_halo.add_argument(
+        "--experiment", type=Path, required=True
+    )
+    finalize_sheet_halo.add_argument(
+        "--cluster",
+        type=Path,
+        help="optional relocated cluster root; defaults to the experiment identity",
+    )
+    finalize_sheet_halo.add_argument("--force", action="store_true")
+    finalize_sheet_halo.set_defaults(handler=_finalize_sheet_halo_experiment)
     sheet_topology_refinement = subparsers.add_parser(
         "refine-sheet-topology",
         description=(
