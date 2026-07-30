@@ -10,9 +10,17 @@ import numpy as np
 
 from .acus_adapter import AcusAdapterSettings, load_acus_flake_window
 from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarchy
-from .boundary_audit import run_boundary_split_audit
+from .boundary_audit import (
+    run_independent_boundary_audit,
+    run_boundary_reselection_split_audit,
+    run_boundary_split_audit,
+)
 from .boundary_band import BoundaryBandSettings, run_boundary_band_export
 from .boundary_merge import run_boundary_band_merge
+from .boundary_reselection import (
+    BoundaryReselectionSettings,
+    run_boundary_band_reselection,
+)
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
@@ -338,6 +346,7 @@ def _full_acus(args: argparse.Namespace) -> None:
         args.output,
         ReconstructionWindow(tuple(args.voxel_origin), tuple(args.shape)),
         metadata_path=args.metadata,
+        calibration_path=args.calibration,
         settings=settings,
         shard_shape_cells_xyz=tuple(args.shard_shape),
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
@@ -800,6 +809,24 @@ def _boundary_merge(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _boundary_reselection(args: argparse.Namespace) -> None:
+    summary = run_boundary_band_reselection(
+        args.first,
+        args.second,
+        args.output,
+        settings=BoundaryReselectionSettings(
+            unary_scale=args.unary_scale,
+            pairwise_scale=args.pairwise_scale,
+            interior_unmatched_trace_penalty=(
+                args.interior_unmatched_trace_penalty
+            ),
+            maximum_sweeps=args.maximum_sweeps,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _selected_subblock(args: argparse.Namespace) -> None:
     summary = extract_selected_patch_subblock(
         args.root,
@@ -816,6 +843,30 @@ def _boundary_split_audit(args: argparse.Namespace) -> None:
         args.full_packet_root,
         args.merge_root,
         args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _boundary_reselection_audit(args: argparse.Namespace) -> None:
+    summary = run_boundary_reselection_split_audit(
+        args.full_packet_root,
+        args.reselection_root,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _independent_boundary_audit(args: argparse.Namespace) -> None:
+    summary = run_independent_boundary_audit(
+        args.full_packet_root,
+        args.selected_merge_root,
+        args.reselection_root,
+        args.output,
+        height_tolerance_voxels=args.height_tolerance,
+        normal_tolerance_degrees=args.normal_tolerance,
+        fiber_tolerance_degrees=args.fiber_tolerance,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -973,6 +1024,14 @@ def main() -> None:
         ),
     )
     full_acus.add_argument("--metadata", type=Path)
+    full_acus.add_argument(
+        "--calibration",
+        type=Path,
+        help=(
+            "optional source-level calibration-v1.json to reuse across "
+            "independently inferred adjacent blocks"
+        ),
+    )
     full_acus.add_argument(
         "--voxel-origin",
         nargs=3,
@@ -1392,6 +1451,24 @@ def main() -> None:
     boundary_merge.add_argument("--output", type=Path, required=True)
     boundary_merge.add_argument("--force", action="store_true")
     boundary_merge.set_defaults(handler=_boundary_merge)
+    boundary_reselection = subparsers.add_parser(
+        "reselect-boundary-bands",
+        description=(
+            "Jointly reselect physical configurations and strict/packet topology "
+            "inside two meeting boundary bands while keeping both interiors frozen."
+        ),
+    )
+    boundary_reselection.add_argument("--first", type=Path, required=True)
+    boundary_reselection.add_argument("--second", type=Path, required=True)
+    boundary_reselection.add_argument("--output", type=Path, required=True)
+    boundary_reselection.add_argument("--unary-scale", type=float, default=1.0)
+    boundary_reselection.add_argument("--pairwise-scale", type=float, default=0.2)
+    boundary_reselection.add_argument(
+        "--interior-unmatched-trace-penalty", type=float, default=0.0
+    )
+    boundary_reselection.add_argument("--maximum-sweeps", type=int, default=12)
+    boundary_reselection.add_argument("--force", action="store_true")
+    boundary_reselection.set_defaults(handler=_boundary_reselection)
     selected_subblock = subparsers.add_parser(
         "extract-selected-subblock",
         description=(
@@ -1417,6 +1494,51 @@ def main() -> None:
     split_audit.add_argument("--output", type=Path, required=True)
     split_audit.add_argument("--force", action="store_true")
     split_audit.set_defaults(handler=_boundary_split_audit)
+    reselection_audit = subparsers.add_parser(
+        "audit-boundary-reselection",
+        description=(
+            "Compare deterministic narrow-band reselection with the complete "
+            "unsplit packet graph, including exact retained-join identity."
+        ),
+    )
+    reselection_audit.add_argument(
+        "--full-packet-root", type=Path, required=True
+    )
+    reselection_audit.add_argument(
+        "--reselection-root", type=Path, required=True
+    )
+    reselection_audit.add_argument("--output", type=Path, required=True)
+    reselection_audit.add_argument("--force", action="store_true")
+    reselection_audit.set_defaults(handler=_boundary_reselection_audit)
+    independent_audit = subparsers.add_parser(
+        "audit-independent-boundary",
+        description=(
+            "Compare selected-only and joint narrow-band composition of two "
+            "independently inferred CT blocks with one full-context consistency "
+            "reference."
+        ),
+    )
+    independent_audit.add_argument(
+        "--full-packet-root", type=Path, required=True
+    )
+    independent_audit.add_argument(
+        "--selected-merge-root", type=Path, required=True
+    )
+    independent_audit.add_argument(
+        "--reselection-root", type=Path, required=True
+    )
+    independent_audit.add_argument("--output", type=Path, required=True)
+    independent_audit.add_argument(
+        "--height-tolerance", type=float, default=1.0e-3
+    )
+    independent_audit.add_argument(
+        "--normal-tolerance", type=float, default=0.01
+    )
+    independent_audit.add_argument(
+        "--fiber-tolerance", type=float, default=0.01
+    )
+    independent_audit.add_argument("--force", action="store_true")
+    independent_audit.set_defaults(handler=_independent_boundary_audit)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

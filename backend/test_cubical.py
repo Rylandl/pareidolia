@@ -26,6 +26,12 @@ from backend.cubical.boundary_merge import (
     _ordered_packet_alignment,
     run_boundary_band_merge,
 )
+from backend.cubical.boundary_reselection import run_boundary_band_reselection
+from backend.cubical.boundary_topology import (
+    build_frozen_face_states,
+    read_frozen_face_state,
+    write_frozen_topology_artifact,
+)
 from backend.cubical.continuity import score_join_continuity
 from backend.cubical.contextual_growth import (
     ContextualGrowthSettings,
@@ -58,8 +64,11 @@ from backend.cubical.saturation_reselection import (
     configuration_evidence_log_score,
     enumerate_cell_saturation_configurations,
 )
-from backend.cubical.saturation_selection import reweight_saturation_candidates
-from backend.cubical.selection import ConfigurationOption
+from backend.cubical.saturation_selection import (
+    load_saturation_candidates,
+    reweight_saturation_candidates,
+)
+from backend.cubical.selection import ConfigurationOption, optimize_configurations
 from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
     StratigraphicContinuitySettings,
@@ -1458,6 +1467,142 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         self.assertEqual(int(np.sum(selected_bridges)), 4)
 
+    def test_boundary_reselection_uses_candidates_and_frozen_anchor_topology(
+        self,
+    ) -> None:
+        grids = (
+            GridSpec((4, 4, 4), origin_xyz=(0.0, 0.0, 0.0)),
+            GridSpec((4, 4, 4), origin_xyz=(4.0, 0.0, 0.0)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            boundary_roots: list[Path] = []
+            for side, grid in enumerate(grids):
+                cells = np.asarray(
+                    [
+                        (x, y, z)
+                        for z in range(4)
+                        for y in range(4)
+                        for x in range(4)
+                    ],
+                    dtype=np.int32,
+                )
+                count = len(cells)
+                patch_start = 1 + side * count
+                patches = tuple(
+                    self._horizontal_patch(
+                        grid,
+                        tuple(int(value) for value in cell),
+                        0.0,
+                        patch_start + index,
+                    )
+                    for index, cell in enumerate(cells)
+                )
+                selected = Path(directory) / f"selected-{side}"
+                boundary = Path(directory) / f"boundary-{side}"
+                write_patch_shard(
+                    selected / "selected-patches-v1",
+                    PatchTable.from_patches(grid, patches),
+                )
+                candidates = ConfigurationTable(
+                    cells,
+                    np.arange(count + 1, dtype=np.uint64),
+                    np.zeros(count, dtype=np.uint16),
+                    np.zeros(count, dtype=np.float32),
+                    np.zeros(count, dtype=np.int8),
+                    np.arange(count + 1, dtype=np.uint64),
+                    np.tile((0.0, 0.0, 1.0), (count, 1)).astype(np.float32),
+                    np.zeros(count, dtype=np.float32),
+                    np.tile(
+                        (0.001, 0.0, 0.0, 0.001, 0.0, 0.001),
+                        (count, 1),
+                    ).astype(np.float32),
+                    np.tile((1.0, 0.0, 0.0), (count, 1)).astype(np.float32),
+                    np.full(count, math.radians(2.0), dtype=np.float32),
+                    np.ones(count, dtype=np.float32),
+                    np.ones(count, dtype=np.float32),
+                    np.ones(count, dtype=np.float32),
+                    np.ones(count, dtype=np.float32),
+                )
+                candidate_path = selected / "saturation-configurations-v1.npz"
+                metadata = {
+                    name: np.ones(count, dtype=np.float32)
+                    for name in (
+                        "evidenceLogScore",
+                        "physicalLogScore",
+                        "totalLogScore",
+                        "coveredEvidenceMass",
+                        "totalEvidenceMass",
+                    )
+                }
+                metadata["isCurrent"] = np.ones(count, dtype=np.uint8)
+                with candidate_path.open("wb") as handle:
+                    np.savez_compressed(handle, **candidates.arrays(), **metadata)
+                candidate_sha = sha256_file(candidate_path)
+                (selected / "saturation-configurations-v1.json").write_text(
+                    json.dumps(
+                        {
+                            "schema": "pareidolia.cubical-saturation-configurations",
+                            "version": 1,
+                            "identitySha256": f"analytic-{side}",
+                            "data": {
+                                "path": candidate_path.name,
+                                "bytes": candidate_path.stat().st_size,
+                                "sha256": candidate_sha,
+                            },
+                        }
+                    )
+                )
+                selection_path = selected / "selection-v1.npz"
+                with selection_path.open("wb") as handle:
+                    np.savez_compressed(
+                        handle,
+                        cellXYZ=cells,
+                        optionId=np.arange(count, dtype=np.uint64),
+                        sourceTableIndex=np.zeros(count, dtype=np.uint32),
+                        sourceConfigurationIndex=np.arange(count, dtype=np.uint32),
+                        localConfigurationId=np.zeros(count, dtype=np.uint16),
+                        configurationLogWeight=np.zeros(count, dtype=np.float32),
+                        selectedLayerCount=np.ones(count, dtype=np.uint16),
+                    )
+                selection_sha = sha256_file(selection_path)
+                (selected / "selection-v1.json").write_text(
+                    json.dumps(
+                        {
+                            "schema": "pareidolia.raw-acus-configuration-selection",
+                            "version": 1,
+                            "data": {
+                                "path": selection_path.name,
+                                "bytes": selection_path.stat().st_size,
+                                "sha256": selection_sha,
+                            },
+                        }
+                    )
+                )
+                (selected / "variant.json").write_text(
+                    json.dumps(
+                        {"identity": {"candidateDataSha256": candidate_sha}}
+                    )
+                )
+                run_boundary_band_export(
+                    selected,
+                    boundary,
+                    candidate_root=selected,
+                    settings=BoundaryBandSettings(depth_cells=1),
+                )
+                boundary_roots.append(boundary)
+            output = Path(directory) / "reselection"
+            summary = run_boundary_band_reselection(
+                boundary_roots[0], boundary_roots[1], output
+            )
+
+        statistics = summary["statistics"]
+        self.assertEqual(statistics["mutableCells"], 32)
+        self.assertEqual(statistics["changedConfigurations"], 0)
+        self.assertEqual(statistics["strictCandidateJoins"], 72)
+        self.assertEqual(statistics["retainedBandJoins"], 72)
+        self.assertEqual(statistics["quarterTurnCandidateJoins"], 0)
+        self.assertEqual(statistics["recomposedComponents"], 4)
+
     def test_boundary_packet_policy_caps_only_quarter_turn_additions(self) -> None:
         grid = GridSpec((2, 1, 1))
         face = cell_face((0, 0, 0), 0, 1)
@@ -1588,6 +1733,213 @@ class CubicalGeometryTests(unittest.TestCase):
                 sorted(value.point_xyz for value in source_patch.vertices),
                 atol=1.0e-6,
             )
+
+    def test_selected_subblock_partitions_and_rebases_physical_candidates(
+        self,
+    ) -> None:
+        grid = GridSpec((4, 1, 1), origin_xyz=(12.0, 20.0, 30.0))
+        cells = np.asarray(
+            [(x, 0, 0) for x in range(4)],
+            dtype=np.int32,
+        )
+        configurations = ConfigurationTable(
+            cells,
+            np.asarray((0, 2, 4, 6, 8), dtype=np.uint64),
+            np.tile((0, 1), 4).astype(np.uint16),
+            np.tile((-1.0, 0.0), 4).astype(np.float32),
+            np.zeros(8, dtype=np.int8),
+            np.asarray((0, 0, 1, 1, 2, 2, 3, 3, 4), dtype=np.uint64),
+            np.tile((0.0, 0.0, 1.0), (4, 1)).astype(np.float32),
+            np.zeros(4, dtype=np.float32),
+            np.tile(
+                (0.001, 0.0, 0.0, 0.001, 0.0, 0.001),
+                (4, 1),
+            ).astype(np.float32),
+            np.tile((1.0, 0.0, 0.0), (4, 1)).astype(np.float32),
+            np.full(4, math.radians(2.0), dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "selected"
+            output = Path(directory) / "subblock"
+            patches = tuple(
+                self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+                for x in range(4)
+            )
+            write_patch_shard(
+                source / "selected-patches-v1",
+                PatchTable.from_patches(grid, patches),
+            )
+            candidate_path = source / "saturation-configurations-v1.npz"
+            metadata = {
+                name: np.ones(8, dtype=np.float32)
+                for name in (
+                    "evidenceLogScore",
+                    "physicalLogScore",
+                    "totalLogScore",
+                    "coveredEvidenceMass",
+                    "totalEvidenceMass",
+                )
+            }
+            metadata["isCurrent"] = np.tile((0, 1), 4).astype(np.uint8)
+            with candidate_path.open("wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    **configurations.arrays(),
+                    **metadata,
+                )
+            candidate_sha256 = sha256_file(candidate_path)
+            (source / "saturation-configurations-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.cubical-saturation-configurations",
+                        "version": 1,
+                        "identitySha256": "analytic-candidates",
+                        "data": {
+                            "path": candidate_path.name,
+                            "bytes": candidate_path.stat().st_size,
+                            "sha256": candidate_sha256,
+                        },
+                    }
+                )
+            )
+            selection_path = source / "selection-v1.npz"
+            with selection_path.open("wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    cellXYZ=cells,
+                    optionId=np.arange(4, dtype=np.uint64),
+                    sourceTableIndex=np.zeros(4, dtype=np.uint32),
+                    sourceConfigurationIndex=np.asarray(
+                        (1, 3, 5, 7), dtype=np.uint32
+                    ),
+                    localConfigurationId=np.ones(4, dtype=np.uint16),
+                    configurationLogWeight=np.zeros(4, dtype=np.float32),
+                    selectedLayerCount=np.ones(4, dtype=np.uint16),
+                )
+            selection_sha256 = sha256_file(selection_path)
+            (source / "selection-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.raw-acus-configuration-selection",
+                        "version": 1,
+                        "data": {
+                            "path": selection_path.name,
+                            "bytes": selection_path.stat().st_size,
+                            "sha256": selection_sha256,
+                        },
+                    }
+                )
+            )
+            (source / "variant.json").write_text(
+                json.dumps(
+                    {"identity": {"candidateDataSha256": candidate_sha256}}
+                )
+            )
+            summary = extract_selected_patch_subblock(
+                source,
+                output,
+                start_cell_xyz=(2, 0, 0),
+                stop_cell_xyz_exclusive=(4, 1, 1),
+            )
+            subset, _, candidate_manifest = load_saturation_candidates(output)
+            with np.load(output / "selection-v1.npz") as values:
+                selected_source = np.asarray(values["sourceConfigurationIndex"])
+
+        self.assertEqual(summary["configurations"]["cells"], 2)
+        self.assertEqual(subset.cell_count, 2)
+        self.assertEqual(subset.configuration_count, 4)
+        self.assertEqual(subset.layer_count, 2)
+        np.testing.assert_array_equal(subset.cell_xyz, ((0, 0, 0), (1, 0, 0)))
+        np.testing.assert_array_equal(subset.configuration_offset, (0, 2, 4))
+        np.testing.assert_array_equal(selected_source, (1, 3))
+        self.assertEqual(
+            summary["configurations"]["candidateDataSha256"],
+            candidate_manifest["data"]["sha256"],
+        )
+
+    def test_configuration_selection_keeps_frozen_warm_start(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        table = ConfigurationTable(
+            np.asarray(((0, 0, 0), (1, 0, 0)), dtype=np.int32),
+            np.asarray((0, 2, 4), dtype=np.uint64),
+            np.asarray((0, 1, 0, 1), dtype=np.uint16),
+            np.asarray((0.0, -10.0, 0.0, -10.0), dtype=np.float32),
+            np.zeros(4, dtype=np.int8),
+            np.arange(5, dtype=np.uint64),
+            np.tile((0.0, 0.0, 1.0), (4, 1)).astype(np.float32),
+            np.asarray((-0.2, 0.2, -0.2, 0.2), dtype=np.float32),
+            np.tile(
+                (0.001, 0.0, 0.0, 0.001, 0.0, 0.001),
+                (4, 1),
+            ).astype(np.float32),
+            np.tile((1.0, 0.0, 0.0), (4, 1)).astype(np.float32),
+            np.full(4, math.radians(2.0), dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+        )
+        selection = optimize_configurations(
+            grid,
+            (table,),
+            initial_configuration_indices={
+                (0, 0, 0): (0, 1),
+                (1, 0, 0): (0, 2),
+            },
+            mutable_cells={(1, 0, 0)},
+        )
+        selected = {
+            value.cell_xyz: value.source_configuration_index
+            for value in selection.selected_options
+        }
+        self.assertEqual(selected[(0, 0, 0)], 1)
+        self.assertEqual(selected[(1, 0, 0)], 2)
+
+    def test_frozen_face_topology_round_trip_preserves_anchor_certificates(
+        self,
+    ) -> None:
+        grid = GridSpec((4, 4, 4))
+        patches = tuple(
+            self._horizontal_patch(
+                grid,
+                (x, y, z),
+                0.0,
+                1 + x + 4 * y + 16 * z,
+            )
+            for z in range(4)
+            for y in range(4)
+            for x in range(4)
+        )
+        block = assemble_surface_hierarchy(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+            maximum_leaf_shape_cells_xyz=(2, 2, 2),
+        )
+        states = build_frozen_face_states(
+            patches,
+            block.joins,
+            grid.shape_cells_xyz,
+            1,
+        )
+        expected = next(
+            value for value in states if value.axis == 0 and value.side == 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frozen.npz"
+            write_frozen_topology_artifact(path, states)
+            restored = read_frozen_face_state(path, 0, 1)
+
+        self.assertEqual(restored, expected)
+        self.assertEqual(restored.frozen_component_count, 4)
+        self.assertEqual(restored.detached_component_count, 0)
+        self.assertEqual(len(restored.anchor_patch_ids), 16)
+        self.assertTrue(restored.crossings)
+        self.assertTrue(all(value.owners for value in restored.crossings))
 
     def test_noisy_synthetic_stack_remains_pure_and_connected(self) -> None:
         grid = GridSpec((8, 8, 5))

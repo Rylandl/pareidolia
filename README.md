@@ -111,14 +111,17 @@ contracts are in
 Block handoff is now concrete rather than a full-volume reload. A default
 two-cell `export-boundary-band` shell carries selected polygons, retained
 physical alternatives, packet ownership, occupied-cell collision certificates,
-and welded edge/vertex identities. `merge-boundary-bands` rebases two
-world-adjacent local grids and establishes a topology-safe component forest
-without changing either interior. On a deterministic X=8 split of the current
-16 × 16 × 14 result, it recovers all 195 full-graph seam joins among its
-supported alternatives and finishes with 985 components versus 977 unsplit.
-All 98 child/full internal-join differences lie inside the serialized two-cell
-band, with none deeper; this isolates joint narrow-band reselection as the next
-merge step rather than asking global context to repair local inference.
+welded edge/vertex identities, and one immutable inner anchor layer.
+`reselect-boundary-bands` jointly optimizes only the two meeting shells, then
+rebuilds their strict and dual-axis topology against serialized frozen-interior
+certificates. On a deterministic X=8 split of the current 16 × 16 × 14 result,
+it exactly recovers all 13,287 retained full-block joins and all 977 components.
+On two halves independently rerun from native CT, it changes 37 of 896 mutable
+cells, improves layer-count agreement with the full-context reference from 866
+to 884, and reduces the selected-only composition from 987 components to 978,
+one above the 977-component reference. The full block is a consistency
+reference rather than ground truth; importantly, all 15 changes that reach an
+exact reference configuration move toward it and none move away.
 
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.

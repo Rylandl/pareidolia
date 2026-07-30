@@ -27,6 +27,13 @@ source stat, metadata hash, settings, shard geometry, artifact schema, and
 implementation hashes are folded into one pipeline identity. A root with a
 different identity is rejected rather than silently mixing results.
 
+Adjacent blocks from the same native source may explicitly share one
+source-level calibration with `--calibration /path/to/calibration-v1.json`.
+Only the calibrated scalar values and sampled source bounds are reused; the
+reference path and content hash become part of the new block identity, and a
+new identity-bound local calibration artifact is written. Needle extraction,
+evidence, configurations, and patch selection are still rerun independently.
+
 ## Cell and shard ownership
 
 At the default settings, one cubical cell owns a disjoint 32³-voxel region.
@@ -53,9 +60,11 @@ configuration arrays at both 8 × 8 × 3 and 4 × 4 × 3 partitioning.
 
 ## Stages and artifacts
 
-1. `calibration-v1.json` samples the native CT window to determine intensity,
-   air-threshold, and Hessian-strength scales. It does not import the scale from
-   an older Acus run.
+1. `calibration-v1.json` records the intensity, air-threshold, and
+   Hessian-strength scales. By default they are sampled from the native CT
+   window. An explicitly supplied source-level calibration can instead keep
+   adjacent independent blocks on one scale without reusing inferred Acus
+   evidence.
 2. `extraction-tiles/*/needles-v1.npz` contains the canonical, source-anchored
    refined finite-support axial ridge primitives. The GPU path keeps the
    Hessian field, candidates, and needle refinement resident on CUDA and
@@ -549,25 +558,48 @@ python3 -m backend.cubical merge-boundary-bands \
   --first /path/to/first-boundary-band \
   --second /path/to/second-boundary-band \
   --output /path/to/boundary-merge
+
+python3 -m backend.cubical reselect-boundary-bands \
+  --first /path/to/first-boundary-band \
+  --second /path/to/second-boundary-band \
+  --output /path/to/boundary-reselection
 ```
 
 The exporter does not copy the block interior. It writes the shell's selected
 patches, every shell-cell physical alternative, exterior traces in world
 coordinates, packet ownership, full occupied-cell certificates for components
-that reach the shell, and existing welded edge/vertex identities. The merger
-therefore handles independently local patch IDs, validates exact world-grid
-adjacency, and enforces same-cell collision, crossing-feature, ordered-trace,
-unsigned-direction, and orientability invariants without loading native CT.
+that reach the inner cut, orientation parity among immutable anchor patches,
+and existing welded edge/vertex identities including their deep owners. Both
+composition paths handle independently local patch IDs, validate exact
+world-grid adjacency, and enforce same-cell collision, crossing-feature,
+ordered-trace, unsigned-direction, and orientability invariants without loading
+native CT.
+
+`merge-boundary-bands` leaves both child selections unchanged and emits a
+conservative component forest. `reselect-boundary-bands` instead builds a
+`2d + 2`-cell-thick slab: `d` mutable layers from each child and one immutable
+anchor layer at each outer edge. Warm-started conditional ICM reconsiders only
+the mutable cells. The topology solve admits ordinary strict joins first, then
+fixes that graph while considering separately gated quarter-turn packet joins.
+The private interiors are represented only by compact occupancy, crossing, and
+orientation certificates.
 
 On the full 16 x 16 x 14 result, the two-cell shell contains 2,144 of 3,584
 cells, 7,006 selected patches, 24,131 physical configurations with 52,556
-layers, 11,252 component-cell certificates, and 4,434 crossing groups. The
-complete compressed handoff is 2.4 MB; 1,440 interior cells remain frozen.
-The shell fraction is high only because this pilot is small. For an `N^3`
-block at fixed depth it becomes `O(N^2)` rather than `O(N^3)`.
+layers, 2,945 cut-anchor patches, 11,252 component-cell certificates, and 4,434
+crossing groups. The complete compressed handoff is 2.8 MB, including a 124 KB
+frozen-topology certificate; 1,440 interior cells remain private. The shell
+fraction is high only because this pilot is small. For an `N^3` block at fixed
+depth, clipped geometry and physical candidates become `O(N^2)`. Complete
+component-occupancy certificates can still be `O(N^3)` in the worst case;
+they are compact integer state rather than CT or patch geometry, but bitmap or
+run-length compression is a remaining volume-scale optimization.
 
-The rebase and comparison utilities make the merge contract reproducible on
-one known block without presenting that as independent raw-CT evidence:
+The rebase and comparison utilities make the complete contract reproducible on
+one known block without presenting that as independent raw-CT evidence. When
+the source contains a saturation candidate bank and selection artifact,
+`extract-selected-subblock` partitions and rebases those physical candidates
+as well as its selected polygons:
 
 ```bash
 python3 -m backend.cubical extract-selected-subblock \
@@ -575,29 +607,43 @@ python3 -m backend.cubical extract-selected-subblock \
   --output /tmp/left-selected
 
 # Repeat for X=8..16, rebuild dual-axis-packets and export-boundary-band for
-# both children, then merge them as above.
+# both children, then jointly reselect them as above.
 
-python3 -m backend.cubical audit-boundary-split \
+python3 -m backend.cubical audit-boundary-reselection \
   --full-packet-root /path/to/full-dual-axis-packets \
-  --merge-root /tmp/recomposed-boundary \
-  --output /tmp/boundary-split-audit.json
+  --reselection-root /tmp/recomposed-boundary \
+  --output /tmp/boundary-reselection-audit.json
 ```
 
-At the X=8 split, child packet rebuilding takes about 20 seconds per half,
-each connectivity-only boundary artifact is about 0.5 MB, and seam composition
-takes 4.1 seconds. The recomposed evidence contains every one of the full
-graph's 195 retained seam joins, plus 44 admissible alternatives. The
-conservative topology forest retains 74 component bridges; 70 are exact
-full-graph joins. It leaves 985 components versus the full graph's 977.
+At the X=8 split, the joint solve reads 896 mutable cells, 665 immutable anchor
+patches, and no private interior geometry. It finishes in 26.5 seconds and
+exactly recovers all 13,287 retained joins and all 977 components of the
+unsplit packet graph. This closes the conservative selected-only merge's
+eight-component difference and is now the deterministic regression target.
 
-That eight-component difference has a sharply bounded cause. Relative to the
-unsplit graph, the child graphs contain 72 alternate internal joins and omit
-26; 90 of those 98 differences are in the seam-adjacent cell layer, eight are
-in the second layer, and none lie outside the serialized two-cell band. Thus
-the current handoff captures all state that must be reconsidered. The next
-merge refinement is joint topology/configuration reselection inside that band;
-the present merger intentionally does not mutate child selections to make the
-audit look exact.
+The stronger test performs two genuinely independent `full-acus` runs over
+the adjacent 8 x 16 x 14 CT halves. They share only an explicitly hashed
+source-level calibration; both rerun all 60 GPU extraction tiles, ten evidence
+shards, mode fitting, physical saturation selection, and packet assembly. The
+selected-only merger gives 987 components. Joint boundary reselection changes
+37 of 896 mutable cells and gives 978 components, one above the 977-component
+full-context consistency reference. Its changes improve exact full-context
+configuration agreement from 293 to 308 cells and layer-count agreement from
+866 to 884. Of the 37 changed cells, 15 move to the exact reference
+configuration and none move away. This reference is not asserted to be
+physical truth; the result demonstrates that the bounded solve repairs real
+independent-boundary effects in a direction consistent with extra context.
+
+That comparison is reproducible as an artifact rather than an ad hoc notebook
+calculation:
+
+```bash
+python3 -m backend.cubical audit-independent-boundary \
+  --full-packet-root /path/to/full-context-packets \
+  --selected-merge-root /path/to/selected-only-merge \
+  --reselection-root /path/to/joint-boundary-reselection \
+  --output /path/to/independent-boundary-audit.json
+```
 
 ## Tests
 
@@ -609,7 +655,8 @@ python3 -m unittest \
 ```
 
 The tests cover disjoint shard ownership, source-anchored extraction tiling,
-raw source identities, content hash checks, unsigned normal recovery, physical
-two-ply/empty alternatives, exact mode-bank persistence, gap classification,
-configuration-aware face selection, cubical clipping, trace alignment,
-topology vetoes, and hierarchical assembly.
+raw source and shared-calibration identities, content hash checks, unsigned
+normal recovery, physical two-ply/empty alternatives, exact mode-bank
+persistence, gap classification, configuration-aware face selection, cubical
+clipping, trace alignment, frozen topology round trips, conditional boundary
+reselection, topology vetoes, and hierarchical assembly.

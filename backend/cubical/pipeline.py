@@ -38,6 +38,7 @@ from .raw_acus import (
     extract_tile_needles,
     gather_needle_tables,
     read_calibration,
+    read_calibration_reference,
     read_needle_artifact,
     write_calibration,
     write_needle_artifact,
@@ -83,6 +84,7 @@ def _resolved_identity(
     settings: RawAcusSettings,
     shard_shape_cells_xyz: Iterable[int],
     compute: str,
+    calibration_reference: Path | None = None,
 ) -> dict[str, Any]:
     identity = pipeline_identity(source, window, settings, shard_shape_cells_xyz)
     identity.pop("identitySha256", None)
@@ -91,6 +93,11 @@ def _resolved_identity(
         "statusAtStart": compute_status(),
     }
     identity["implementationSha256"] = _implementation_record()
+    if calibration_reference is not None:
+        identity["calibrationReference"] = {
+            "path": str(calibration_reference.resolve()),
+            "sha256": sha256_file(calibration_reference),
+        }
     identity["identitySha256"] = canonical_json_hash(identity)
     return identity
 
@@ -306,6 +313,7 @@ def run_raw_acus_pipeline(
     window: ReconstructionWindow,
     *,
     metadata_path: str | Path | None = None,
+    calibration_path: str | Path | None = None,
     settings: RawAcusSettings | None = None,
     shard_shape_cells_xyz: Iterable[int] = (4, 4, 4),
     leaf_shape_cells_xyz: Iterable[int] = (4, 4, 4),
@@ -326,6 +334,9 @@ def run_raw_acus_pipeline(
         raise ValueError("limit_shards must be positive")
     os.environ["ACUS_COMPUTE"] = compute
     resolved_settings = settings or RawAcusSettings()
+    calibration_reference = (
+        None if calibration_path is None else Path(calibration_path).resolve()
+    )
     source = VolumeSource.open(source_path, metadata_path)
     window.validate(source, resolved_settings)
     shards = plan_shards(window, resolved_settings, shard_shape_cells_xyz)
@@ -335,7 +346,12 @@ def run_raw_acus_pipeline(
         resolved_settings,
     )
     identity = _resolved_identity(
-        source, window, resolved_settings, shard_shape_cells_xyz, compute
+        source,
+        window,
+        resolved_settings,
+        shard_shape_cells_xyz,
+        compute,
+        calibration_reference,
     )
     identity_sha256 = str(identity["identitySha256"])
     output = Path(output_root)
@@ -392,10 +408,17 @@ def run_raw_acus_pipeline(
     if limit_shards is not None:
         target_shards = target_shards[:limit_shards]
 
-    calibration_path = output / "calibration-v1.json"
-    if calibration_path.is_file() and not force:
+    local_calibration_path = output / "calibration-v1.json"
+    if local_calibration_path.is_file() and not force:
         calibration = read_calibration(
-            calibration_path, identity_sha256=identity_sha256
+            local_calibration_path, identity_sha256=identity_sha256
+        )
+    elif calibration_reference is not None:
+        calibration = read_calibration_reference(calibration_reference)
+        write_calibration(
+            local_calibration_path,
+            calibration,
+            identity_sha256=identity_sha256,
         )
     else:
         manifest["state"] = "calibrating"
@@ -404,7 +427,7 @@ def run_raw_acus_pipeline(
             source, _processing_bounds(shards), resolved_settings
         )
         write_calibration(
-            calibration_path,
+            local_calibration_path,
             calibration,
             identity_sha256=identity_sha256,
         )

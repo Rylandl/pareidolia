@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -123,6 +124,8 @@ def optimize_configurations(
     pairwise_scale: float = 0.35,
     interior_unmatched_trace_penalty: float = 0.0,
     maximum_sweeps: int = 12,
+    initial_configuration_indices: Mapping[Int3, tuple[int, int]] | None = None,
+    mutable_cells: Set[Int3] | None = None,
 ) -> ConfigurationSelection:
     """Select one local stratigraphy per cell with face-relative likelihoods.
 
@@ -232,13 +235,47 @@ def optimize_configurations(
         )
         for cell, options in options_by_cell.items()
     }
+    if initial_configuration_indices is not None:
+        unknown = set(initial_configuration_indices) - set(options_by_cell)
+        if unknown:
+            raise ValueError(
+                "initial configuration map contains cells outside the grid: "
+                f"{sorted(unknown)[:4]}"
+            )
+        for cell, source in initial_configuration_indices.items():
+            matching = [
+                option
+                for option in options_by_cell[cell]
+                if (
+                    option.source_table_index,
+                    option.source_configuration_index,
+                )
+                == tuple(source)
+            ]
+            if len(matching) != 1:
+                raise ValueError(
+                    f"cell {cell} does not contain initial configuration {source}"
+                )
+            selected[cell] = matching[0]
+    mutable = set(options_by_cell) if mutable_cells is None else set(mutable_cells)
+    unknown_mutable = mutable - set(options_by_cell)
+    if unknown_mutable:
+        raise ValueError(
+            "mutable cell set contains cells outside the grid: "
+            f"{sorted(unknown_mutable)[:4]}"
+        )
     ordered_cells = sorted(options_by_cell, key=lambda cell: (cell[2], cell[1], cell[0]))
+    mutable_ordered_cells = [cell for cell in ordered_cells if cell in mutable]
     changed = 0
     completed_sweeps = 0
     for sweep in range(maximum_sweeps):
         completed_sweeps = sweep + 1
         changed = 0
-        traversal = ordered_cells if sweep % 2 == 0 else list(reversed(ordered_cells))
+        traversal = (
+            mutable_ordered_cells
+            if sweep % 2 == 0
+            else list(reversed(mutable_ordered_cells))
+        )
         for cell in traversal:
             best_option = selected[cell]
             best_energy = math.inf

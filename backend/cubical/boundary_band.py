@@ -9,6 +9,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from .block import BlockBounds, assemble_surface_hierarchy
+from .boundary_topology import (
+    build_frozen_face_states,
+    write_frozen_topology_artifact,
+)
 from .contracts import atomic_json, canonical_json_hash, sha256_file
 from .geometry import ClippedPatch
 from .matching import TraceMatch, TraceMatchSettings, match_face_traces
@@ -436,6 +440,7 @@ def _identity(
             name: sha256_file(module_root / name)
             for name in (
                 "boundary_band.py",
+                "boundary_topology.py",
                 "sheet_packets.py",
                 "block.py",
                 "matching.py",
@@ -630,6 +635,41 @@ def run_boundary_band_export(
         patch_values,
         packet_root=packet,
         leaf_shape_cells_xyz=resolved.leaf_shape_cells_xyz,
+    )
+    frozen_states = build_frozen_face_states(
+        patch_values,
+        graph.joins,
+        shape,
+        resolved.depth_cells,
+    )
+    anchor_patch_ids = {
+        patch_id
+        for state in frozen_states
+        for patch_id in state.anchor_patch_ids
+    }
+    anchor_rows = np.asarray(
+        [
+            row
+            for row, patch_id in enumerate(patches.patch_id)
+            if int(patch_id) in anchor_patch_ids
+        ],
+        dtype=np.int64,
+    )
+    anchor_table = _boundary_patch_table(patches, anchor_rows, patch_by_id)
+    anchor_manifest = write_patch_shard(
+        output / "boundary-anchor-patches-v1",
+        anchor_table,
+        settings=resolved.record(),
+        provenance={
+            "boundaryIdentitySha256": identity_sha256,
+            "selectedRoot": str(selected),
+            "purpose": "immutable inner-cut topology anchors",
+        },
+        compressed=True,
+    )
+    frozen_topology_path = write_frozen_topology_artifact(
+        output / "boundary-frozen-topology-v1.npz",
+        frozen_states,
     )
     component_by_patch = graph.component_by_patch
     join_first = np.asarray(
@@ -868,6 +908,15 @@ def run_boundary_band_export(
                 "boundaryBandCells": len(band_cells),
                 "boundaryCellsWithPatches": len(boundary_cells),
                 "boundaryPatches": boundary_table.patch_count,
+                "frozenAnchorPatches": anchor_table.patch_count,
+                "frozenFaceComponents": {
+                    f"{value.axis}:{value.side}": value.frozen_component_count
+                    for value in frozen_states
+                },
+                "frozenFaceDetachedComponents": {
+                    f"{value.axis}:{value.side}": value.detached_component_count
+                    for value in frozen_states
+                },
                 "totalGraphComponents": len(set(component_by_patch.values())),
                 "boundaryComponents": len(component_ids),
                 "boundaryComponentOccupiedCells": len(flattened_component_cells),
@@ -898,6 +947,16 @@ def run_boundary_band_export(
                     "path": interface_path.name,
                     "bytes": interface_path.stat().st_size,
                     "sha256": sha256_file(interface_path),
+                },
+                "anchors": {
+                    "manifest": "boundary-anchor-patches-v1.json",
+                    "data": "boundary-anchor-patches-v1.npz",
+                    "sha256": anchor_manifest["data"]["sha256"],
+                },
+                "frozenTopology": {
+                    "path": frozen_topology_path.name,
+                    "bytes": frozen_topology_path.stat().st_size,
+                    "sha256": sha256_file(frozen_topology_path),
                 },
                 "configurations": candidate_manifest,
             },

@@ -85,10 +85,9 @@ ancestor block summaries.
 5. Regular blocks cache internal components and exterior trace graphs.
 6. A completed block serializes a narrow outer band, immutable interior
    component occupancy, crossing-feature certificates, exterior traces, and
-   retained physical alternatives. World-adjacent blocks can then establish a
-   topology-safe component forest from their shared face without reopening the
-   interior. Joint reselection inside that serialized band is the next merge
-   refinement; it is not yet implied by the conservative bridge artifact.
+   retained physical alternatives. World-adjacent blocks can either establish
+   a conservative shared-face component forest or jointly reselect their
+   meeting bands without reopening either private interior.
 7. Papyrus-specific sheet packets add thickness, paired-ply, fiber, and air-gap
    factors without changing the geometric representation.
 
@@ -104,14 +103,18 @@ remain later packet refinements rather than implicit properties of this graph.
 `export-boundary-band` is the block-local handoff. The default two-cell shell
 contains selected clipped patches, packet-component ownership, joins incident
 to the shell, exact exterior trace endpoints, and the physical configuration
-bank for every shell cell. It also stores two compact certificates derived
-from the immutable interior:
+bank for every shell cell. It also stores one layer of clipped anchor patches
+at each inner cut and compact face-specific certificates derived from the
+immutable interior:
 
 - every boundary-touching component's complete occupied-cell set, so a
   transitive merge cannot silently put two layers from one cell into one
-  component; and
-- the existing welded edge-or-vertex class of every exterior trace endpoint,
-  so a seam cannot introduce an impossible crossing cycle.
+  component;
+- the orientation parity between its cut-anchor patches, so axial local normals
+  cannot close an inconsistent global polygon loop; and
+- the existing welded edge-or-vertex class and deep patch owner of every
+  cut-anchor endpoint, so a seam cannot introduce an impossible crossing
+  cycle after the private geometry has been discarded.
 
 Component and patch IDs are namespaced by input during composition. Blocks are
 located by their world-space grid origins, not by assuming their local integer
@@ -127,23 +130,39 @@ The forest is automatically orientable; redundant matches remain evidence
 rather than being promoted to unconstrained topology cycles. Neither input's
 interior geometry or configuration selection is changed.
 
+`reselect-boundary-bands` is the refinement path. It forms a slab containing
+the `d` mutable shell layers from each input plus one immutable anchor layer on
+each outside edge. A warm-started conditional configuration solve can change
+only the `2d` shell layers. Topology is then reconstructed in two stages: all
+ordinary parallel-fiber joins are selected first, and that strict graph is
+fixed while separately gated quarter-turn packet joins are considered. The
+frozen occupancy, crossing, and orientation certificates participate in every
+veto, so the result has the same global invariants as direct assembly without
+reading native CT or either block's private interior.
+
 For a rectangular `X x Y x Z` block and shell depth `d`, selected shell state
 scales with
 `XYZ - (X - 2d)(Y - 2d)(Z - 2d)`, or `O(dN^2)` for an `N^3` block. Component
 occupancy certificates may reference deeper cells, but they contain integer
 cell identities rather than voxels or patch geometry.
 
-The deterministic real-block split audit provides a regression target for the
-contract. Splitting the current 16 x 16 x 14 selected result at X=8,
-independently rebuilding the two child packet graphs, and recomposing their
-two-cell bands recovers all 195 retained full-block seam joins among 239
-supported seam alternatives. The conservative forest retains 74 bridges, 70
-of which are exact full-graph joins, and yields 985 components versus 977 in
-the unsplit graph. All 98 child/full internal-join disagreements are confined
-to the serialized band: 90 lie in the seam-adjacent layer, eight in the next
-layer, and zero deeper. This both justifies the current two-cell default and
-isolates the remaining eight-component difference as narrow-band reselection,
-not missing global context.
+The deterministic real-block split audit provides an exact regression target
+for the contract. Splitting the current 16 x 16 x 14 selected result at X=8,
+partitioning its complete physical candidate bank, and jointly reselecting the
+two-cell bands recovers every one of the full graph's 13,287 retained joins and
+all 977 components. The solve reads 896 mutable shell cells, 665 immutable
+anchor patches, and compact frozen topology certificates; it does not read the
+private child interiors.
+
+A separate test reruns each 8 x 16 x 14 half independently from native CT,
+sharing only an explicitly hashed source calibration. Selected-only seam
+bridging gives 987 components. Joint band reselection changes 37 of 896 cells
+and gives 978 components, versus 977 in the full-context consistency reference.
+Layer-count agreement rises from 866 to 884 cells. Fifteen changed cells become
+exactly consistent with the full-context configuration and none become less
+consistent. This does not prove the reference is physically correct, but it
+shows that bounded neighbor context resolves real independent-boundary effects
+in the expected direction rather than merely replaying a deterministic split.
 
 The geometry stages are validated independently on analytic surfaces. The
 native-CT implementation and its measured pilot are documented in

@@ -22,8 +22,12 @@ from backend.cubical.contracts import (
 from backend.cubical.evidence import CellEvidenceTable, _normal_hypotheses
 from backend.cubical.geometry import PlaneEstimate
 from backend.cubical.raw_acus import (
+    AcusCalibration,
     NeedleTable,
+    read_calibration,
+    read_calibration_reference,
     read_needle_artifact,
+    write_calibration,
     write_needle_artifact,
 )
 from backend.cubical.selection import optimize_configurations
@@ -41,6 +45,25 @@ from backend.cubical.topology import GridSpec
 
 
 class RawAcusContractTests(unittest.TestCase):
+    def test_calibration_reference_reuses_values_without_pipeline_identity(self) -> None:
+        calibration = AcusCalibration(
+            10.0,
+            120.0,
+            18.0,
+            0.25,
+            "cupy",
+            "cuda:0",
+            (VoxelBounds((0, 1, 2), (16, 17, 18)),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration-v1.json"
+            write_calibration(path, calibration, identity_sha256="first-block")
+            with self.assertRaises(ValueError):
+                read_calibration(path, identity_sha256="adjacent-block")
+            referenced = read_calibration_reference(path)
+
+        self.assertEqual(referenced, calibration)
+
     def test_regular_shards_have_disjoint_ownership_and_overlapping_support(self) -> None:
         settings = RawAcusSettings(calibration_samples=1)
         window = ReconstructionWindow((64, 64, 64), (5, 4, 3))

@@ -247,7 +247,10 @@ def read_calibration(
         or payload.get("identitySha256") != identity_sha256
     ):
         raise ValueError("raw Acus calibration does not match this pipeline identity")
-    record = payload["calibration"]
+    return _calibration_from_record(payload["calibration"])
+
+
+def _calibration_from_record(record: Mapping[str, Any]) -> AcusCalibration:
     return AcusCalibration(
         float(record["low"]),
         float(record["high"]),
@@ -260,6 +263,19 @@ def read_calibration(
             for value in record["sampleBounds"]
         ),
     )
+
+
+def read_calibration_reference(path: str | Path) -> AcusCalibration:
+    """Load a source-level calibration without adopting its pipeline identity."""
+
+    payload = json.loads(Path(path).read_text())
+    if (
+        payload.get("schema") != CALIBRATION_SCHEMA
+        or int(payload.get("version", -1)) != CALIBRATION_VERSION
+        or not isinstance(payload.get("calibration"), Mapping)
+    ):
+        raise ValueError("raw Acus calibration reference is invalid")
+    return _calibration_from_record(payload["calibration"])
 
 
 def _cpu_block_candidates(

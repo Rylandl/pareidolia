@@ -176,7 +176,7 @@ class _ParityDisjointSet:
         self.size[first_root] += self.size.pop(second_root)
 
 
-def _join_orientation_xor(
+def join_orientation_xor(
     patch_by_id: dict[int, ClippedPatch], match: TraceMatch
 ) -> bool:
     """Return whether one polygon loop must flip across a matched face trace."""
@@ -324,7 +324,7 @@ def _select_consistent_joins(
         if not crossings_remain_feasible(match):
             deferred.append(DeferredJoin(match, "crossing-topology-cycle"))
             continue
-        required_orientation_xor = _join_orientation_xor(patch_by_id, match)
+        required_orientation_xor = join_orientation_xor(patch_by_id, match)
         if not orientation_set.compatible(
             match.first_patch_id,
             match.second_patch_id,
