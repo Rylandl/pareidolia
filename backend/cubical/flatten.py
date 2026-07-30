@@ -19,6 +19,7 @@ from .contracts import (
     canonical_json_hash,
     sha256_file,
 )
+from .continuity import apply_join_continuity_refinement
 from .export import rgb_png
 from .tables import read_patch_shard
 
@@ -182,12 +183,28 @@ def component_mesh(
         dtype=np.float64,
     )
 
-    edge_records: dict[tuple[int, int], list[tuple[int, bool]]] = defaultdict(list)
+    raw_edge_records: dict[
+        tuple[int, int], list[tuple[int, bool]]
+    ] = defaultdict(list)
     for polygon_index, polygon in enumerate(polygons):
         for index, first in enumerate(polygon):
             second = polygon[(index + 1) % len(polygon)]
             edge = (min(first, second), max(first, second))
-            edge_records[edge].append((polygon_index, first == edge[0]))
+            raw_edge_records[edge].append((polygon_index, first == edge[0]))
+    zero_length_edges = {
+        edge
+        for edge in raw_edge_records
+        if float(np.linalg.norm(vertex_xyz[edge[0]] - vertex_xyz[edge[1]]))
+        <= 1.0e-8
+    }
+    # Corner welding can leave two distinct crossing identities at exactly one
+    # cube vertex. Their connecting segment has no physical extent and cannot
+    # be a manifold edge; retain it as a degeneracy diagnostic, not topology.
+    edge_records = {
+        edge: records
+        for edge, records in raw_edge_records.items()
+        if edge not in zero_length_edges
+    }
 
     adjacency: dict[int, list[tuple[int, bool, tuple[int, int]]]] = defaultdict(list)
     for edge, records in edge_records.items():
@@ -451,6 +468,10 @@ def component_mesh(
         )
 
     topology = _boundary_statistics(edge_records, len(ordered_global), len(oriented))
+    topology["coincidentZeroLengthEdges"] = len(zero_length_edges)
+    topology["coincidentZeroLengthEdgeIncidences"] = sum(
+        len(raw_edge_records[edge]) for edge in zero_length_edges
+    )
     topology["orientationConflicts"] = len(conflicting_edges)
     topology["chartConflictSeamEdges"] = len(conflicting_edges) + sum(
         len(records) > 2 for records in edge_records.values()
@@ -1356,6 +1377,7 @@ def _identity(
     pixel_step_voxels: float,
     maximum_pixels: int,
     maximum_chart_normal_deviation_degrees: float,
+    join_refinement_root: Path | None,
 ) -> dict[str, Any]:
     implementation_root = Path(__file__).resolve().parent
     payload: dict[str, Any] = {
@@ -1375,16 +1397,25 @@ def _identity(
             ),
             "surface": "exact piecewise-planar cubical patches",
             "depthAlignment": "one fixed offset shared by the complete component",
+            "joinRefinementRoot": (
+                str(join_refinement_root) if join_refinement_root is not None else None
+            ),
         },
         "implementationSha256": {
             "flatten.py": sha256_file(implementation_root / "flatten.py"),
             "block.py": sha256_file(implementation_root / "block.py"),
+            "continuity.py": sha256_file(implementation_root / "continuity.py"),
             "geometry.py": sha256_file(implementation_root / "geometry.py"),
             "tables.py": sha256_file(implementation_root / "tables.py"),
             "export.py": sha256_file(implementation_root / "export.py"),
             "rectify.py": sha256_file(implementation_root.parent / "rectify.py"),
         },
     }
+    if join_refinement_root is not None:
+        payload["joinRefinementSha256"] = {
+            "manifest": sha256_file(join_refinement_root / "refinement.json"),
+            "table": sha256_file(join_refinement_root / "join-continuity-v1.npz"),
+        }
     payload["identitySha256"] = canonical_json_hash(payload)
     return payload
 
@@ -1399,6 +1430,7 @@ def run_component_flattening(
     maximum_pixels: int = 768,
     maximum_chart_normal_deviation_degrees: float = 40.0,
     leaf_shape_cells_xyz: tuple[int, int, int] = (4, 4, 3),
+    join_refinement_root: str | Path | None = None,
     force: bool = False,
     progress: Any | None = None,
 ) -> dict[str, Any]:
@@ -1416,6 +1448,11 @@ def run_component_flattening(
     if offsets.ndim != 1 or not len(offsets) or np.any(np.diff(offsets) <= 0.0):
         raise ValueError("depth offsets must be a strictly increasing sequence")
     _, pipeline, source = _resolve_source(root)
+    refinement_root = (
+        Path(join_refinement_root).resolve()
+        if join_refinement_root is not None
+        else None
+    )
     identity = _identity(
         root,
         source,
@@ -1424,6 +1461,7 @@ def run_component_flattening(
         pixel_step_voxels,
         maximum_pixels,
         maximum_chart_normal_deviation_degrees,
+        refinement_root,
     )
     identity_sha256 = str(identity["identitySha256"])
     manifest_path = output / "flattening.json"
@@ -1455,6 +1493,8 @@ def run_component_flattening(
         table.to_patches(),
         maximum_leaf_shape_cells_xyz=leaf_shape_cells_xyz,
     )
+    if refinement_root is not None:
+        block = apply_join_continuity_refinement(block, refinement_root)
     ordered_components = sorted(
         block.components, key=lambda value: (-len(value.patch_ids), value.component_id)
     )
@@ -1539,6 +1579,9 @@ def run_component_flattening(
         "version": 1,
         "identitySha256": identity_sha256,
         "inputRoot": str(root),
+        "joinRefinementRoot": (
+            str(refinement_root) if refinement_root is not None else None
+        ),
         "directions": "all surface normals remain axial; depth montage sign is a chart gauge",
         "surfaceSampling": "exact piecewise-planar patches with one fixed component-wide depth offset",
         "components": records,

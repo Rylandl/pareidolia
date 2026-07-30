@@ -13,6 +13,7 @@ from .block import BlockBounds, assemble_surface_block, assemble_surface_hierarc
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
+from .continuity import JoinContinuitySettings, run_join_continuity_refinement
 from .export import write_block_obj, write_block_projection_png
 from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
@@ -522,6 +523,43 @@ def _flatten_components(args: argparse.Namespace) -> None:
             args.maximum_chart_normal_deviation
         ),
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        join_refinement_root=args.join_refinement,
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _refine_join_continuity(args: argparse.Namespace) -> None:
+    settings = JoinContinuitySettings(
+        trace_samples=args.trace_samples,
+        trace_endpoint_margin=args.trace_endpoint_margin,
+        depth_radius_voxels=args.depth_radius,
+        depth_step_voxels=args.depth_step,
+        maximum_profile_shift_voxels=args.maximum_profile_shift,
+        near_inset_voxels=args.near_inset,
+        comparison_span_voxels=args.comparison_span,
+        tile_shape_cells_xyz=tuple(args.tile_shape),
+        outlier_standard_deviations=args.outlier_standard_deviations,
+        minimum_mismatch_ratio=args.minimum_mismatch_ratio,
+    )
+    last_report = -1
+
+    def progress(completed: int, total: int) -> None:
+        nonlocal last_report
+        bucket = completed // 500
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(
+                f"join continuity {completed:,}/{total:,}",
+                flush=True,
+            )
+
+    summary = run_join_continuity_refinement(
+        args.root,
+        args.output,
+        settings=settings,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
         force=args.force,
         progress=progress,
     )
@@ -846,8 +884,43 @@ def main() -> None:
     flatten_components.add_argument(
         "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
     )
+    flatten_components.add_argument("--join-refinement", type=Path)
     flatten_components.add_argument("--force", action="store_true")
     flatten_components.set_defaults(handler=_flatten_components)
+    refine_continuity = subparsers.add_parser(
+        "refine-join-continuity",
+        description=(
+            "Score every accepted join against fixed-depth native CT and split "
+            "only robust discontinuity outliers relative to within-patch controls."
+        ),
+    )
+    refine_continuity.add_argument("--root", type=Path, required=True)
+    refine_continuity.add_argument("--output", type=Path, required=True)
+    refine_continuity.add_argument("--trace-samples", type=int, default=7)
+    refine_continuity.add_argument(
+        "--trace-endpoint-margin", type=float, default=0.15
+    )
+    refine_continuity.add_argument("--depth-radius", type=float, default=8.0)
+    refine_continuity.add_argument("--depth-step", type=float, default=2.0)
+    refine_continuity.add_argument(
+        "--maximum-profile-shift", type=float, default=6.0
+    )
+    refine_continuity.add_argument("--near-inset", type=float, default=1.5)
+    refine_continuity.add_argument("--comparison-span", type=float, default=3.0)
+    refine_continuity.add_argument(
+        "--tile-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    refine_continuity.add_argument(
+        "--outlier-standard-deviations", type=float, default=4.0
+    )
+    refine_continuity.add_argument(
+        "--minimum-mismatch-ratio", type=float, default=1.5
+    )
+    refine_continuity.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    refine_continuity.add_argument("--force", action="store_true")
+    refine_continuity.set_defaults(handler=_refine_join_continuity)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

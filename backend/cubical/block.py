@@ -135,6 +135,68 @@ class _DisjointSet:
             self.parent[first_root] = second_root
 
 
+class _ParityDisjointSet:
+    """Disjoint set carrying one binary orientation relation per member."""
+
+    def __init__(self, values: Iterable[int]) -> None:
+        self.parent = {value: value for value in values}
+        self.parity = {value: 0 for value in values}
+        self.size = {value: 1 for value in values}
+
+    def find(self, value: int) -> tuple[int, int]:
+        parent = self.parent[value]
+        if parent != value:
+            root, relative = self.find(parent)
+            self.parity[value] ^= relative
+            self.parent[value] = root
+        return self.parent[value], self.parity[value]
+
+    def compatible(self, first: int, second: int, required_xor: bool) -> bool:
+        first_root, first_parity = self.find(first)
+        second_root, second_parity = self.find(second)
+        return first_root != second_root or (
+            (first_parity ^ second_parity) == int(required_xor)
+        )
+
+    def union(self, first: int, second: int, required_xor: bool) -> None:
+        first_root, first_parity = self.find(first)
+        second_root, second_parity = self.find(second)
+        if first_root == second_root:
+            if (first_parity ^ second_parity) != int(required_xor):
+                raise ValueError("orientation union contradicts retained parity")
+            return
+        if self.size[first_root] < self.size[second_root]:
+            first_root, second_root = second_root, first_root
+            first_parity, second_parity = second_parity, first_parity
+        self.parent[second_root] = first_root
+        self.parity[second_root] = (
+            first_parity ^ second_parity ^ int(required_xor)
+        )
+        self.size[first_root] += self.size.pop(second_root)
+
+
+def _join_orientation_xor(
+    patch_by_id: dict[int, ClippedPatch], match: TraceMatch
+) -> bool:
+    """Return whether one polygon loop must flip across a matched face trace."""
+
+    first_trace = patch_by_id[match.first_patch_id].trace_on(match.face)
+    second_trace = patch_by_id[match.second_patch_id].trace_on(match.face)
+    if first_trace is None or second_trace is None:
+        raise ValueError("join orientation requires both matched face traces")
+    mapping = {
+        agreement.first_edge: agreement.second_edge
+        for agreement in match.endpoint_agreements
+    }
+    if set(mapping) != first_trace.endpoint_edges or set(mapping.values()) != (
+        second_trace.endpoint_edges
+    ):
+        raise ValueError("join endpoints do not define a trace orientation map")
+    # Shared polygon boundaries must run oppositely in an orientable surface.
+    # If their stored trace directions agree, exactly one loop must be flipped.
+    return mapping[first_trace.first.edge] == second_trace.first.edge
+
+
 def _common_crossing_feature(edges: set[GridEdge]) -> object | None:
     if len(edges) == 1:
         return next(iter(edges))
@@ -149,6 +211,7 @@ def _select_consistent_joins(
 ) -> tuple[tuple[TraceMatch, ...], tuple[DeferredJoin, ...]]:
     patch_by_id = {value.patch_id: value for value in patches}
     patch_set = _DisjointSet(patch_by_id)
+    orientation_set = _ParityDisjointSet(patch_by_id)
     component_cells: dict[object, set[Int3]] = {
         patch_id: {patch.cell_xyz} for patch_id, patch in patch_by_id.items()
     }
@@ -249,7 +312,20 @@ def _select_consistent_joins(
         if not crossings_remain_feasible(match):
             deferred.append(DeferredJoin(match, "crossing-topology-cycle"))
             continue
+        required_orientation_xor = _join_orientation_xor(patch_by_id, match)
+        if not orientation_set.compatible(
+            match.first_patch_id,
+            match.second_patch_id,
+            required_orientation_xor,
+        ):
+            deferred.append(DeferredJoin(match, "orientation-parity-cycle"))
+            continue
         union_crossings(match)
+        orientation_set.union(
+            match.first_patch_id,
+            match.second_patch_id,
+            required_orientation_xor,
+        )
         if first_root != second_root:
             cells = component_cells.pop(first_root) | component_cells.pop(second_root)
             patch_set.union(first_root, second_root)
@@ -527,6 +603,56 @@ def assemble_surface_block(
             )
             joins.extend(alignment.matches)
     return _summarize_block(grid, bounds, patch_values, joins)
+
+
+def rebuild_surface_block(
+    block: SurfaceBlock,
+    retained_joins: Iterable[TraceMatch],
+) -> SurfaceBlock:
+    """Rebuild exact welded geometry from a declared subset of accepted joins.
+
+    This is the post-assembly refinement boundary: callers may remove joins
+    using independent evidence, but cannot introduce geometry or silently
+    reconsider pair-gated alternatives.
+    """
+
+    retained = tuple(retained_joins)
+    baseline = {
+        (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        for value in block.joins
+    }
+    for value in retained:
+        key = (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        if key not in baseline:
+            raise ValueError("refinement cannot introduce a non-retained join")
+    if len(retained) != len(
+        {
+            (
+                value.first_patch_id,
+                value.second_patch_id,
+                value.face.axis,
+                value.face.anchor_xyz,
+            )
+            for value in retained
+        }
+    ):
+        raise ValueError("refinement contains duplicate joins")
+    return _summarize_block(
+        block.grid,
+        block.bounds,
+        block.patches,
+        retained,
+    )
 
 
 def _shared_block_face(

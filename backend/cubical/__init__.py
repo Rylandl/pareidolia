@@ -12,6 +12,13 @@ from .block import (
     assemble_surface_hierarchy,
     assemble_surface_block,
     merge_surface_blocks,
+    rebuild_surface_block,
+)
+from .continuity import (
+    JoinContinuitySettings,
+    apply_join_continuity_refinement,
+    run_join_continuity_refinement,
+    score_join_continuity,
 )
 from .contracts import (
     ExtractionTileSpec,
@@ -95,6 +102,7 @@ __all__ = [
     "CellEvidenceTable",
     "ConfigurationTable",
     "LayerModeTable",
+    "JoinContinuitySettings",
     "ConfigurationSelection",
     "configuration_options",
     "component_mesh",
@@ -115,6 +123,7 @@ __all__ = [
     "match_face_traces",
     "load_acus_flake_window",
     "merge_surface_blocks",
+    "rebuild_surface_block",
     "optimize_configurations",
     "rasterize_chart",
     "extraction_tiles_for_shard",
@@ -123,6 +132,9 @@ __all__ = [
     "read_patch_shard",
     "write_patch_shard",
     "run_raw_acus_pipeline",
+    "run_join_continuity_refinement",
+    "score_join_continuity",
+    "apply_join_continuity_refinement",
     "run_component_flattening",
     "sample_depth_stack",
     "tangent_atlas_chart",

@@ -263,13 +263,71 @@ The first four-component checkpoint is deliberately mixed rather than a
 success-only gallery. Ranks 1, 2, 3, and 7 contain 201, 194, 188, and 165
 selected patches. Their median linear atlas distortion stays within 2%, and
 their nonadjacent UV-overlap fractions are 0.83%, 1.85%, 0.10%, and 0.88%.
-Ranks 2 and 3 show broad native-fiber continuity across many cells. Rank 7
-shows abrupt cell-scale texture changes consistent with a mixed-ply component.
-Rank 1 exposes nine orientation-cycle conflicts and one nonmanifold edge, so
-its 201-cell graph component is not one clean orientable surface even though
-much of its sampled texture is coherent. These observations make local
-chartability, orientation-parity consistency, and fixed-depth CT continuity
-useful assembly gates before further component growth.
+Ranks 2 and 3 show broad native-fiber continuity across many cells. The initial
+rank-7 image raised a mixed-ply concern, but the local tests below do not
+separate it from the other large components; it remains unverified rather than
+being labeled a failure. Rank 1 exposed nine orientation-cycle conflicts,
+which identified a missing assembly invariant.
+
+## Orientability and native-CT join refinement
+
+Every accepted face join now contributes a binary polygon-orientation parity
+constraint. The hierarchical assembler carries those constraints through its
+disjoint set and defers a join as `orientation-parity-cycle` when it would
+close a contradictory loop. On the complete slab this rejects 11 redundant
+cycle edges, removes all orientation conflicts from the twelve largest
+components, and does not remove a patch or split a component.
+
+The original rank-1 `nonmanifoldEdges: 1` report was a diagnostic error rather
+than a branching surface. Several crossing identities had snapped to exactly
+the same cube corner, creating zero-length polygon edges with three apparent
+incidences. These are now excluded from manifold edge counts and recorded as
+`coincidentZeroLengthEdges`; rank 1 has five such degeneracies and zero
+physical nonmanifold edges.
+
+Native CT provides a second, independent refinement stage:
+
+```bash
+python3 -m backend.cubical refine-join-continuity \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-join-continuity-final-v2
+```
+
+For every retained join, seven shared-trace locations are sampled at fixed
+normal depths. Points 1.5 voxels inside the seam are compared across cells;
+points another three voxels inside each patch provide equal-span controls.
+Mismatch ratios are calibrated independently for each face axis with a robust
+median/MAD scale. Only ratios in the four-standard-deviation outer tail and at
+least 1.5 times their within-patch controls change connectivity. Tiled source
+reads keep this stage schedulable for larger volumes.
+
+The pass scores all 12,384 parity-safe joins in 25 seconds. It rejects 14,
+retains 12,370, and splits eight small components. Removing a bad redundant
+edge does not split a component when a clean alternate route remains, so none
+of the twenty largest component sizes changes. The complete table records
+surface-texture angles and best normal-profile shifts as diagnostics, but they
+do not gate connectivity: raw texture angles correlate only 0.07--0.09 with
+independent Acus fiber disagreement, and 3,333 joins prefer a profile shift of
+at least four voxels without forming a robust outlier tail. Promoting either
+would therefore be slice-specific tuning.
+
+The refinement table can be applied without altering selected patch evidence:
+
+```bash
+python3 -m backend.cubical flatten-components \
+  --root /mnt/t5/pareidolia/raw-acus-16x16x14-mode-continuation-config3-final-v1 \
+  --join-refinement /mnt/t5/pareidolia/raw-acus-16x16x14-join-continuity-final-v2 \
+  --component-ranks 1 2 3 7 \
+  --depth-min -12 --depth-max 12 --depth-step 1 \
+  --output /mnt/t5/pareidolia/raw-acus-16x16x14-flattened-refined-final-v2
+```
+
+For rank 1, orientability plus corrected corner accounting reduces conflict
+seams from 10 to zero, p90 projection distortion from 1.174 to 1.106, and UV
+overlap from 0.83% to 0.31%, while preserving all 201 patches. This is a real
+topological improvement. The unchanged large-component sizes are also an
+important result: local CT mismatch safely removes obvious discontinuities,
+but does not by itself establish ply identity.
 
 The raw and local-inference stages are already independently sharded. The
 selected-patch assembler is hierarchical. Configuration selection currently

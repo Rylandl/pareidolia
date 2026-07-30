@@ -9,10 +9,13 @@ import numpy as np
 
 from backend.cubical.block import (
     BlockBounds,
+    _ParityDisjointSet,
     assemble_surface_hierarchy,
     assemble_surface_block,
     merge_surface_blocks,
+    rebuild_surface_block,
 )
+from backend.cubical.continuity import score_join_continuity
 from backend.cubical.geometry import (
     DegeneratePlaneIntersection,
     PlaneEstimate,
@@ -69,6 +72,13 @@ class CubicalGeometryTests(unittest.TestCase):
     def test_cell_topology_has_canonical_shared_features(self) -> None:
         self.assertEqual(len(set(cell_edges((2, 3, 4)))), 12)
         self.assertEqual(cell_face((2, 3, 4), 0, 1), cell_face((3, 3, 4), 0, 0))
+
+    def test_orientation_parity_rejects_a_contradictory_cycle(self) -> None:
+        orientation = _ParityDisjointSet((1, 2, 3))
+        orientation.union(1, 2, False)
+        orientation.union(2, 3, False)
+        self.assertTrue(orientation.compatible(1, 3, False))
+        self.assertFalse(orientation.compatible(1, 3, True))
 
     def test_axis_aligned_plane_clips_to_four_edge_loop(self) -> None:
         grid = GridSpec((2, 2, 2))
@@ -151,6 +161,71 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         np.testing.assert_allclose(medians, (75.0, 80.0, 85.0), atol=0.5)
         self.assertEqual(statistics["depthOffsetsVoxels"], [-1.0, 0.0, 1.0])
+
+    def test_join_continuity_compares_against_equal_span_controls(self) -> None:
+        grid = GridSpec(
+            (2, 1, 1),
+            cell_size_xyz=(8.0, 8.0, 8.0),
+            origin_xyz=(8.0, 8.0, 8.0),
+        )
+        patches = tuple(
+            self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+            for x in range(2)
+        )
+        block = assemble_surface_block(
+            grid, BlockBounds((0, 0, 0), (2, 1, 1)), patches
+        )
+        z_index, _, x_index = np.indices((32, 32, 32))
+        continuous = np.clip(20 + 2 * x_index + 3 * z_index, 0, 255).astype(
+            np.uint8
+        )
+        discontinuous = np.clip(
+            continuous.astype(np.int16) + 50 * (x_index >= 16), 0, 255
+        ).astype(np.uint8)
+        ratios = []
+        texture_angles = []
+        with tempfile.TemporaryDirectory() as directory:
+            for name, volume in (
+                ("continuous", continuous),
+                ("discontinuous", discontinuous),
+            ):
+                source_path = Path(directory) / f"{name}.npy"
+                np.save(source_path, volume)
+                records = score_join_continuity(
+                    block, VolumeSource.open(source_path)
+                )
+                self.assertEqual(len(records), 1)
+                ratios.append(records[0]["mismatchRatio"])
+                texture_angles.append(records[0]["surfaceTextureAngleDegrees"])
+            profile = np.asarray(
+                [
+                    21, 32, 48, 79, 116, 143, 128, 88,
+                    49, 37, 61, 105, 151, 173, 139, 82,
+                    44, 53, 97, 148, 164, 121, 68, 35,
+                    46, 91, 137, 155, 109, 57, 31, 42,
+                ],
+                dtype=np.uint8,
+            )
+            shifted_z = np.clip(z_index - 4, 0, len(profile) - 1)
+            shifted_profile = np.where(
+                x_index < 16,
+                profile[z_index],
+                profile[shifted_z],
+            ).astype(np.uint8)
+            source_path = Path(directory) / "shifted-profile.npy"
+            np.save(source_path, shifted_profile)
+            shifted_record = score_join_continuity(
+                block, VolumeSource.open(source_path)
+            )[0]
+        self.assertAlmostEqual(ratios[0], 1.0, places=5)
+        self.assertGreater(ratios[1], 8.0)
+        np.testing.assert_allclose(texture_angles, (0.0, 0.0), atol=1.0e-5)
+        self.assertAlmostEqual(
+            abs(shifted_record["bestDepthShiftVoxels"]), 4.0
+        )
+        self.assertEqual(shifted_record["firstControlDepthShiftVoxels"], 0.0)
+        self.assertEqual(shifted_record["secondControlDepthShiftVoxels"], 0.0)
+        self.assertGreater(shifted_record["excessDepthShiftCorrelationGain"], 0.5)
 
     def test_oblique_plane_supports_triangle_and_hexagon_topologies(self) -> None:
         grid = GridSpec((1, 1, 1))
@@ -414,6 +489,25 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(len(block.joins), 8)
         self.assertEqual(len(block.welded_crossings), 18)
         self.assertFalse(block.unresolved_interior_traces)
+
+    def test_post_assembly_refinement_only_removes_retained_joins(self) -> None:
+        grid = GridSpec((3, 1, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+            for x in range(3)
+        )
+        block = assemble_surface_block(
+            grid, BlockBounds((0, 0, 0), (3, 1, 1)), patches
+        )
+        refined = rebuild_surface_block(block, block.joins[:1])
+        self.assertEqual(len(block.joins), 2)
+        self.assertEqual(len(refined.joins), 1)
+        self.assertEqual(
+            sorted(len(value.patch_ids) for value in refined.components),
+            [1, 2],
+        )
+        with self.assertRaises(ValueError):
+            rebuild_surface_block(block, (*block.joins, block.joins[0]))
 
     def test_incompatible_neighbor_traces_remain_explicit_open_seams(self) -> None:
         grid = GridSpec((2, 1, 1))

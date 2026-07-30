@@ -87,6 +87,14 @@ deleting a layer. Reproducible `gap-census`, `mode-bank`,
 `mode-continuation-search`, and `apply-mode-continuations` commands and their
 artifact contracts are documented in the same pipeline note.
 
+Assembly now carries an explicit polygon-orientation parity state, preventing
+unsigned local normals from closing a globally contradictory surface loop.
+`refine-join-continuity` then scores every retained face using fixed-depth
+native CT against equal-span within-patch controls. Only robust per-axis
+intensity-mismatch outliers split connectivity; noisier texture-angle and
+normal-profile-shift measurements remain auditable diagnostics. Its compact
+table can be supplied to `flatten-components` with `--join-refinement`.
+
 `flatten-components` is the corresponding visual checkpoint. It unfolds a
 mixed set of reconstructed components into bounded-normal atlases and samples
 the native CT at one component-wide sequence of fixed depth offsets. Cyan marks
