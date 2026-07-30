@@ -24,7 +24,19 @@ from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
 from .selection import configuration_options
+from .sheet_packets import (
+    DualAxisPacketSettings,
+    run_dual_axis_packet_connectivity,
+)
 from .saturation import SheetSaturationSettings, run_sheet_saturation_audit
+from .saturation_reselection import (
+    SaturationReselectionSettings,
+    run_saturation_reselection,
+)
+from .saturation_selection import (
+    SaturationCandidateSelectionSettings,
+    run_saturation_candidate_selection,
+)
 from .stratigraphic_continuity import (
     StratigraphicContinuitySettings,
     run_stratigraphic_continuity_refinement,
@@ -691,6 +703,74 @@ def _sheet_saturation(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _saturation_reselection(args: argparse.Namespace) -> None:
+    settings = SaturationReselectionSettings(
+        joint_residual_limit=args.joint_residual,
+        maximum_configurations_per_cell=args.maximum_configurations,
+        maximum_configurations_per_coverage=args.maximum_per_coverage,
+        pairwise_scale=args.pairwise_scale,
+        interior_unmatched_trace_penalty=args.interior_unmatched_trace_penalty,
+        maximum_sweeps=args.maximum_sweeps,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+    )
+    last_report = -1
+
+    def progress(completed: int, total: int, cell: tuple[int, int, int], paths: int) -> None:
+        nonlocal last_report
+        bucket = completed // 64
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(
+                f"saturation reselection {completed:,}/{total:,} cells · "
+                f"{cell} · {paths:,} physical paths",
+                flush=True,
+            )
+
+    summary = run_saturation_reselection(
+        args.root,
+        args.mode_bank,
+        args.output,
+        settings=settings,
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _saturation_candidate_selection(args: argparse.Namespace) -> None:
+    settings = SaturationCandidateSelectionSettings(
+        coverage_reward_scale=args.coverage_reward_scale,
+        unary_scale=args.unary_scale,
+        pairwise_scale=args.pairwise_scale,
+        interior_unmatched_trace_penalty=args.interior_unmatched_trace_penalty,
+        maximum_sweeps=args.maximum_sweeps,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        write_visuals=not args.no_visuals,
+    )
+    summary = run_saturation_candidate_selection(
+        args.candidates,
+        args.output,
+        settings=settings,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _dual_axis_packets(args: argparse.Namespace) -> None:
+    summary = run_dual_axis_packet_connectivity(
+        args.root,
+        args.output,
+        settings=DualAxisPacketSettings(
+            leaf_shape_cells_xyz=tuple(args.leaf_shape),
+            maximum_preview_components=args.maximum_preview_components,
+            maximum_normal_angle_degrees=args.maximum_normal_angle,
+            maximum_fiber_frame_residual_degrees=args.maximum_fiber_residual,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _gap_repair_search(args: argparse.Namespace) -> None:
     root = Path(args.root)
     pipeline_manifest = json.loads((root / "pipeline.json").read_text())
@@ -1157,6 +1237,82 @@ def main() -> None:
     saturation.add_argument("--overview-scale", type=int, default=24)
     saturation.add_argument("--force", action="store_true")
     saturation.set_defaults(handler=_sheet_saturation)
+    saturation_reselection = subparsers.add_parser(
+        "saturation-reselect",
+        description=(
+            "Enumerate physical full-bank cell stratigraphies, score them against "
+            "owned Acus structural evidence, and globally reselect with face agreement."
+        ),
+    )
+    saturation_reselection.add_argument("--root", type=Path, required=True)
+    saturation_reselection.add_argument("--mode-bank", type=Path, required=True)
+    saturation_reselection.add_argument("--output", type=Path, required=True)
+    saturation_reselection.add_argument(
+        "--joint-residual", type=float, default=2.5
+    )
+    saturation_reselection.add_argument(
+        "--maximum-configurations", type=int, default=10
+    )
+    saturation_reselection.add_argument(
+        "--maximum-per-coverage", type=int, default=2
+    )
+    saturation_reselection.add_argument("--pairwise-scale", type=float, default=0.35)
+    saturation_reselection.add_argument(
+        "--interior-unmatched-trace-penalty", type=float, default=0.0
+    )
+    saturation_reselection.add_argument("--maximum-sweeps", type=int, default=12)
+    saturation_reselection.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    saturation_reselection.add_argument("--force", action="store_true")
+    saturation_reselection.set_defaults(handler=_saturation_reselection)
+    saturation_selection = subparsers.add_parser(
+        "select-saturation-candidates",
+        description=(
+            "Reuse one immutable full-bank physical candidate artifact for fast "
+            "global-selection and utilization-reward sweeps."
+        ),
+    )
+    saturation_selection.add_argument("--candidates", type=Path, required=True)
+    saturation_selection.add_argument("--output", type=Path, required=True)
+    saturation_selection.add_argument(
+        "--coverage-reward-scale", type=float, default=0.0
+    )
+    saturation_selection.add_argument("--unary-scale", type=float, default=1.0)
+    saturation_selection.add_argument("--pairwise-scale", type=float, default=0.2)
+    saturation_selection.add_argument(
+        "--interior-unmatched-trace-penalty", type=float, default=0.0
+    )
+    saturation_selection.add_argument("--maximum-sweeps", type=int, default=12)
+    saturation_selection.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    saturation_selection.add_argument("--no-visuals", action="store_true")
+    saturation_selection.add_argument("--force", action="store_true")
+    saturation_selection.set_defaults(handler=_saturation_candidate_selection)
+    packet_connectivity = subparsers.add_parser(
+        "dual-axis-packets",
+        description=(
+            "Build a separate sheet-level connectivity graph in which transported "
+            "parallel and orthogonal fiber axes represent the same papyrus packet."
+        ),
+    )
+    packet_connectivity.add_argument("--root", type=Path, required=True)
+    packet_connectivity.add_argument("--output", type=Path, required=True)
+    packet_connectivity.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    packet_connectivity.add_argument(
+        "--maximum-preview-components", type=int, default=128
+    )
+    packet_connectivity.add_argument(
+        "--maximum-normal-angle", type=float, default=15.0
+    )
+    packet_connectivity.add_argument(
+        "--maximum-fiber-residual", type=float, default=15.0
+    )
+    packet_connectivity.add_argument("--force", action="store_true")
+    packet_connectivity.set_defaults(handler=_dual_axis_packets)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

@@ -88,6 +88,13 @@ ancestor block summaries.
 7. Papyrus-specific sheet packets add thickness, paired-ply, fiber, and air-gap
    factors without changing the geometric representation.
 
+The first packet layer is now implemented as a separate dual-axis connectivity
+artifact. It fixes every retained single-ply join, admits only well-supported
+parallel-to-orthogonal fiber-frame continuations, and reruns the same global
+collision, crossing, and orientability checks for additions. The underlying
+patch shard and strict graph remain immutable. Thickness and air-gap factors
+remain later packet refinements rather than implicit properties of this graph.
+
 The geometry stages are validated independently on analytic surfaces. The
 native-CT implementation and its measured pilot are documented in
 [`raw-acus-cubical-pipeline.md`](raw-acus-cubical-pipeline.md).

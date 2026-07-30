@@ -669,6 +669,40 @@ def rebuild_surface_block(
     )
 
 
+def extend_surface_block_joins(
+    block: SurfaceBlock,
+    additions: Iterable[TraceMatch],
+) -> SurfaceBlock:
+    """Add candidate joins while preserving every already retained join.
+
+    This is the connectivity analogue of patch augmentation. Existing geometry
+    and joins are immutable; new pair-gated candidates still pass the complete
+    collision, crossing-topology, and orientability selector.
+    """
+
+    def key(value: TraceMatch) -> tuple[int, int, int, Int3]:
+        return (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+
+    candidates = {key(value): value for value in block.candidate_joins}
+    for value in additions:
+        if not value.accepted:
+            raise ValueError("join augmentation accepts only pair-gated candidates")
+        candidates.setdefault(key(value), value)
+    fixed = frozenset(key(value) for value in block.joins)
+    return _summarize_block(
+        block.grid,
+        block.bounds,
+        block.patches,
+        candidates.values(),
+        fixed_join_keys=fixed,
+    )
+
+
 def augment_surface_block(
     block: SurfaceBlock,
     additions: Iterable[ClippedPatch],

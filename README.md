@@ -87,6 +87,27 @@ deleting a layer. Reproducible `gap-census`, `mode-bank`,
 `mode-continuation-search`, and `apply-mode-continuations` commands and their
 artifact contracts are documented in the same pipeline note.
 
+Block saturation now has a calibrated structural audit and a full-bank
+reselection path. On the 16 × 16 × 14 slab, exhaustive physical enumeration
+tests 1,219,069 stacks and raises jointly supported Acus evidence from 60.09%
+to 64.79% while reducing assembled components from 1,378 to 1,127. The audit
+records the complete ceiling ladder: 79.09% has some fitted mode, 75.85% is
+covered by one normal family, and 72.70% is covered by one physically ordered
+stack. Candidate enumeration is immutable and can be reused for fast selection
+sweeps with `select-saturation-candidates`.
+
+A separate `dual-axis-packets` graph then gives sheet-level semantics to the
+two orthogonal papyrus fiber axes without weakening the single-ply graph. The
+strict graph is fixed; quarter-turn joins must pass absolute 15° normal and
+fiber-frame gates plus the existing endpoint, ordered-trace, same-cell
+collision, crossing-topology, and orientability checks. It adds 187 safe joins,
+reduces components from 1,127 to 977, grows the largest fragment from 191 to
+278 cells, and removes 374 unresolved traces. The evidence audit independently
+finds 70.44% direct-or-transverse support overall and 90.83% in the strongest
+needle-score decile. Details, commands, threshold sensitivity, and artifact
+contracts are in
+[`docs/raw-acus-cubical-pipeline.md`](docs/raw-acus-cubical-pipeline.md).
+
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.
 `refine-join-continuity` then scores every retained face using fixed-depth

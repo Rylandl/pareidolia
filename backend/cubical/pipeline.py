@@ -185,6 +185,7 @@ def write_selection_artifact(
             "continuationEnergy": selection.continuation_energy,
             "totalEnergy": selection.total_energy,
             "pairwiseEvaluationCount": selection.pairwise_evaluation_count,
+            "traceMatchEvaluationCount": selection.trace_match_evaluation_count,
             "interiorUnmatchedTraceCount": selection.interior_unmatched_trace_count,
             "degenerateLayerAlternatives": selection.degenerate_layer_count,
         },

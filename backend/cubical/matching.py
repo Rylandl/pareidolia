@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 import numpy as np
@@ -26,8 +26,11 @@ class TraceMatchSettings:
     maximum_endpoint_z: float = 4.5
     maximum_normal_z: float = 4.5
     maximum_fiber_z: float = 4.5
+    maximum_absolute_normal_angle_radians: float = 0.5 * math.pi
+    maximum_absolute_fiber_residual_radians: float = 0.5 * math.pi
     maximum_reduced_chi_square: float = 8.0
     unmatched_negative_log_likelihood: float = 7.0
+    orthogonal_fiber_equivalence: bool = False
 
     def __post_init__(self) -> None:
         positive = (
@@ -37,11 +40,20 @@ class TraceMatchSettings:
             self.maximum_endpoint_z,
             self.maximum_normal_z,
             self.maximum_fiber_z,
+            self.maximum_absolute_normal_angle_radians,
+            self.maximum_absolute_fiber_residual_radians,
             self.maximum_reduced_chi_square,
             self.unmatched_negative_log_likelihood,
         )
         if any(not np.isfinite(value) or value <= 0.0 for value in positive):
             raise ValueError("trace matching settings must be finite and positive")
+        if not isinstance(self.orthogonal_fiber_equivalence, bool):
+            raise ValueError("orthogonal fiber equivalence must be boolean")
+        if (
+            self.maximum_absolute_normal_angle_radians > 0.5 * math.pi
+            or self.maximum_absolute_fiber_residual_radians > 0.5 * math.pi
+        ):
+            raise ValueError("absolute angular gates cannot exceed 90 degrees")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +77,7 @@ class TraceMatch:
     normal_z: float
     fiber_angle_radians: float | None
     fiber_z: float | None
+    fiber_quarter_turn: bool | None
     reduced_chi_square: float
     negative_log_likelihood: float
     score: float
@@ -233,10 +246,19 @@ def match_face_traces(
     chi_square_terms.append(normal_z**2)
     if normal_z > resolved.maximum_normal_z:
         failures.append("normal")
+    if normal_angle > resolved.maximum_absolute_normal_angle_radians:
+        failures.append("normal-angle")
 
     fiber_angle = _transported_fiber_angle(first_estimate, second_estimate)
     fiber_z: float | None = None
+    fiber_quarter_turn: bool | None = None
     if fiber_angle is not None:
+        fiber_quarter_turn = False
+        if resolved.orthogonal_fiber_equivalence:
+            orthogonal_residual = abs(0.5 * math.pi - fiber_angle)
+            if orthogonal_residual < fiber_angle:
+                fiber_angle = orthogonal_residual
+                fiber_quarter_turn = True
         first_std = first_estimate.fiber_angular_std_radians or 0.0
         second_std = second_estimate.fiber_angular_std_radians or 0.0
         fiber_std = math.sqrt(
@@ -248,6 +270,8 @@ def match_face_traces(
         chi_square_terms.append(fiber_z**2)
         if fiber_z > resolved.maximum_fiber_z:
             failures.append("fiber")
+        if fiber_angle > resolved.maximum_absolute_fiber_residual_radians:
+            failures.append("fiber-angle")
 
     reduced_chi_square = float(np.mean(chi_square_terms)) if chi_square_terms else math.inf
     if reduced_chi_square > resolved.maximum_reduced_chi_square:
@@ -270,6 +294,7 @@ def match_face_traces(
         normal_z=normal_z,
         fiber_angle_radians=fiber_angle,
         fiber_z=fiber_z,
+        fiber_quarter_turn=fiber_quarter_turn,
         reduced_chi_square=reduced_chi_square,
         negative_log_likelihood=negative_log_likelihood,
         score=score,
@@ -303,6 +328,7 @@ def align_face_patches(
     settings: TraceMatchSettings | None = None,
     *,
     grid: GridSpec | None = None,
+    _match_cache: dict[tuple[object, ...], TraceMatch] | None = None,
 ) -> FaceAlignment:
     """Order-preserving partial alignment of all patch traces on one face."""
 
@@ -337,14 +363,46 @@ def align_face_patches(
     pair_matches: dict[tuple[int, int], TraceMatch] = {}
     for first_index, (first_trace, first_estimate) in enumerate(first_values):
         for second_index, (second_trace, second_estimate) in enumerate(second_values):
-            pair_matches[(first_index, second_index)] = match_face_traces(
-                first_trace,
+            cache_key = (
+                face,
+                first_trace.first.edge,
+                first_trace.first.t,
+                first_trace.first.variance,
+                first_trace.second.edge,
+                first_trace.second.t,
+                first_trace.second.variance,
                 first_estimate,
-                second_trace,
+                second_trace.first.edge,
+                second_trace.first.t,
+                second_trace.first.variance,
+                second_trace.second.edge,
+                second_trace.second.t,
+                second_trace.second.variance,
                 second_estimate,
-                resolved,
-                grid=grid,
+                None if grid is None else grid.cell_size_xyz,
             )
+            match = None if _match_cache is None else _match_cache.get(cache_key)
+            if match is None:
+                match = match_face_traces(
+                    first_trace,
+                    first_estimate,
+                    second_trace,
+                    second_estimate,
+                    resolved,
+                    grid=grid,
+                )
+                if _match_cache is not None:
+                    _match_cache[cache_key] = match
+            elif (
+                match.first_patch_id != first_trace.patch_id
+                or match.second_patch_id != second_trace.patch_id
+            ):
+                match = replace(
+                    match,
+                    first_patch_id=first_trace.patch_id,
+                    second_patch_id=second_trace.patch_id,
+                )
+            pair_matches[(first_index, second_index)] = match
 
     costs = np.full((first_count + 1, second_count + 1), np.inf, dtype=np.float64)
     operations = np.full((first_count + 1, second_count + 1), -1, dtype=np.int8)

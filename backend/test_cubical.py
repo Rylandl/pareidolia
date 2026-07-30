@@ -13,6 +13,7 @@ from backend.cubical.block import (
     augment_surface_block,
     assemble_surface_hierarchy,
     assemble_surface_block,
+    extend_surface_block_joins,
     merge_surface_blocks,
     rebuild_surface_block,
 )
@@ -27,7 +28,11 @@ from backend.cubical.geometry import (
     axial_angle_radians,
     clip_plane_to_cell,
 )
-from backend.cubical.matching import align_face_patches, match_face_traces
+from backend.cubical.matching import (
+    TraceMatchSettings,
+    align_face_patches,
+    match_face_traces,
+)
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
 from backend.cubical.flatten import (
@@ -39,6 +44,12 @@ from backend.cubical.flatten import (
 from backend.cubical.contracts import RawAcusSettings, VolumeSource
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
 from backend.cubical.saturation import classify_cell_structural_evidence
+from backend.cubical.saturation_reselection import (
+    SaturationReselectionSettings,
+    configuration_evidence_log_score,
+    enumerate_cell_saturation_configurations,
+)
+from backend.cubical.saturation_selection import reweight_saturation_candidates
 from backend.cubical.selection import ConfigurationOption
 from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
@@ -47,7 +58,7 @@ from backend.cubical.stratigraphic_continuity import (
     build_patch_fingerprints,
     score_patch_fingerprints,
 )
-from backend.cubical.stratigraphy import LayerModeTable
+from backend.cubical.stratigraphy import ConfigurationTable, LayerModeTable
 from backend.cubical.topology import GridSpec, cell_edges, cell_face
 from backend.cubical.tables import PatchTable, read_patch_shard, write_patch_shard
 from backend.cubical.synthetic import (
@@ -123,6 +134,7 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertLess(assignment.best_joint_residual[0], 0.25)
         self.assertGreater(assignment.best_joint_residual[1], 2.5)
         self.assertGreater(assignment.best_joint_residual[2], 8.0)
+        self.assertLess(assignment.best_orthogonal_joint_residual[2], 0.25)
         np.testing.assert_allclose(assignment.best_assignment_share, 1.0)
 
     def test_structural_saturation_reports_competing_layer_ambiguity(self) -> None:
@@ -144,6 +156,102 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         self.assertLess(assignment.best_joint_residual[0], 0.2)
         self.assertAlmostEqual(float(assignment.best_assignment_share[0]), 0.5)
+
+    def test_saturation_mixture_normalization_does_not_reward_duplicate_modes(self) -> None:
+        weights = np.asarray((1.0, 2.0), dtype=np.float32)
+        one = configuration_evidence_log_score(
+            np.asarray((0.8, 0.2)),
+            0.8,
+            weights,
+            background_likelihood=0.05,
+        )
+        duplicate = configuration_evidence_log_score(
+            np.asarray((1.6, 0.4)),
+            1.6,
+            weights,
+            background_likelihood=0.05,
+        )
+        self.assertAlmostEqual(one, duplicate)
+
+    def test_saturation_reselection_enumerates_physical_multilayer_coverage(self) -> None:
+        modes = LayerModeTable(
+            np.asarray(((0, 0, 0),), dtype=np.int32),
+            np.asarray((0, 2), dtype=np.uint64),
+            np.asarray((0, 0), dtype=np.int8),
+            np.asarray(((0.0, 0.0, 1.0), (0.0, 0.0, 1.0)), dtype=np.float32),
+            np.asarray((-5.0, 5.0), dtype=np.float32),
+            np.zeros((2, 6), dtype=np.float32),
+            np.asarray(((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)), dtype=np.float32),
+            np.radians(np.asarray((2.0, 2.0), dtype=np.float32)),
+            np.asarray((0.8, 0.8), dtype=np.float32),
+            np.asarray((-5.0, 5.0), dtype=np.float32),
+            np.asarray((0.0, 0.0), dtype=np.float32),
+            np.asarray((0.7, 0.7), dtype=np.float32),
+            np.asarray((0.9, 0.9), dtype=np.float32),
+            np.asarray((6.0, 6.0), dtype=np.float32),
+        )
+        modes.validate()
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.npy"
+            metadata_path = Path(directory) / "source.json"
+            np.save(source_path, np.zeros((4, 4, 4), dtype=np.uint8))
+            metadata_path.write_text('{"voxelSizeMicrons": 10.0}\n')
+            source = VolumeSource.open(source_path, metadata_path)
+            configurations, statistics = enumerate_cell_saturation_configurations(
+                (0, 0, 0),
+                "synthetic",
+                modes,
+                0,
+                np.asarray(((0.0, 0.0, -5.0), (0.0, 0.0, 5.0)), dtype=np.float32),
+                np.asarray(((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)), dtype=np.float32),
+                np.ones(2, dtype=np.float32),
+                cell_center_xyz=np.zeros(3, dtype=np.float32),
+                normal_confidence=np.asarray((0.8, 0.0), dtype=np.float32),
+                current_mode_indices=(0,),
+                source=source,
+                raw_settings=RawAcusSettings(),
+                settings=SaturationReselectionSettings(),
+            )
+        self.assertEqual(statistics["currentCoveredEvidenceMass"], 1.0)
+        self.assertEqual(statistics["oracleCoveredEvidenceMass"], 2.0)
+        self.assertTrue(any(value.mode_indices == (0, 1) for value in configurations))
+        self.assertTrue(any(value.is_current for value in configurations))
+
+    def test_saturation_candidate_coverage_reward_is_cell_normalized(self) -> None:
+        table = ConfigurationTable(
+            np.asarray(((0, 0, 0),), dtype=np.int32),
+            np.asarray((0, 2), dtype=np.uint64),
+            np.asarray((0, 1), dtype=np.uint16),
+            np.asarray((0.0, 0.0), dtype=np.float32),
+            np.asarray((-1, 0), dtype=np.int8),
+            np.asarray((0, 0, 1), dtype=np.uint64),
+            np.asarray(((0.0, 0.0, 1.0),), dtype=np.float32),
+            np.asarray((0.0,), dtype=np.float32),
+            np.zeros((1, 6), dtype=np.float32),
+            np.asarray(((1.0, 0.0, 0.0),), dtype=np.float32),
+            np.asarray((0.1,), dtype=np.float32),
+            np.asarray((0.8,), dtype=np.float32),
+            np.asarray((0.7,), dtype=np.float32),
+            np.asarray((0.9,), dtype=np.float32),
+            np.asarray((4.0,), dtype=np.float32),
+        )
+        table.validate()
+        reweighted = reweight_saturation_candidates(
+            table,
+            {
+                "totalLogScore": np.asarray((0.0, 0.0), dtype=np.float32),
+                "coveredEvidenceMass": np.asarray((0.0, 2.0), dtype=np.float32),
+            },
+            coverage_reward_scale=0.5,
+        )
+        self.assertAlmostEqual(
+            float(
+                reweighted.configuration_log_weight[1]
+                - reweighted.configuration_log_weight[0]
+            ),
+            1.0,
+            places=6,
+        )
 
     def test_stratigraphic_fingerprint_resolves_axial_depth_gauge(self) -> None:
         depths = np.arange(-10.0, 11.0, 5.0, dtype=np.float32)
@@ -536,6 +644,93 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("endpoint", result.failure_reasons)
 
+    def test_orthogonal_fiber_equivalence_is_explicit_packet_semantics(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        first = self._horizontal_patch(grid, (0, 0, 0), 0.1, 1)
+        second = clip_plane_to_cell(
+            grid,
+            (1, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                0.1,
+                angular_std_radians=math.radians(1.0),
+                height_std=0.02,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=2,
+        )
+        assert second is not None
+        face = cell_face((0, 0, 0), 0, 1)
+        strict = match_face_traces(
+            first.trace_on(face),  # type: ignore[arg-type]
+            first.estimate,
+            second.trace_on(face),  # type: ignore[arg-type]
+            second.estimate,
+            grid=grid,
+        )
+        packet = match_face_traces(
+            first.trace_on(face),  # type: ignore[arg-type]
+            first.estimate,
+            second.trace_on(face),  # type: ignore[arg-type]
+            second.estimate,
+            TraceMatchSettings(orthogonal_fiber_equivalence=True),
+            grid=grid,
+        )
+        self.assertFalse(strict.accepted)
+        self.assertIn("fiber", strict.failure_reasons)
+        self.assertFalse(strict.fiber_quarter_turn)
+        self.assertTrue(packet.accepted)
+        self.assertTrue(packet.fiber_quarter_turn)
+        self.assertIsNotNone(packet.fiber_angle_radians)
+        self.assertAlmostEqual(float(packet.fiber_angle_radians), 0.0)
+
+    def test_packet_join_extension_preserves_strict_connectivity(self) -> None:
+        grid = GridSpec((3, 1, 1))
+        first = self._horizontal_patch(grid, (0, 0, 0), 0.1, 1)
+        second = self._horizontal_patch(grid, (1, 0, 0), 0.1, 2)
+        third = clip_plane_to_cell(
+            grid,
+            (2, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                0.1,
+                angular_std_radians=math.radians(1.0),
+                height_std=0.02,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=3,
+        )
+        assert third is not None
+        strict = assemble_surface_block(
+            grid, BlockBounds((0, 0, 0), (3, 1, 1)), (first, second, third)
+        )
+        self.assertEqual(len(strict.joins), 1)
+        face = cell_face((1, 0, 0), 0, 1)
+        quarter_turn = match_face_traces(
+            second.trace_on(face),  # type: ignore[arg-type]
+            second.estimate,
+            third.trace_on(face),  # type: ignore[arg-type]
+            third.estimate,
+            TraceMatchSettings(orthogonal_fiber_equivalence=True),
+            grid=grid,
+        )
+        extended = extend_surface_block_joins(strict, (quarter_turn,))
+        self.assertEqual(len(extended.joins), 2)
+        self.assertEqual(len(extended.components), 1)
+        self.assertTrue(
+            {
+                (value.first_patch_id, value.second_patch_id)
+                for value in strict.joins
+            }.issubset(
+                {
+                    (value.first_patch_id, value.second_patch_id)
+                    for value in extended.joins
+                }
+            )
+        )
+
     def test_face_alignment_is_ordered_and_permutation_invariant(self) -> None:
         grid = GridSpec((2, 1, 1))
         first = [
@@ -558,6 +753,30 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         self.assertEqual(result.unmatched_first_patch_ids, (11,))
         self.assertFalse(result.unmatched_second_patch_ids)
+
+    def test_face_alignment_reuses_geometry_matches_without_leaking_patch_ids(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        face = cell_face((0, 0, 0), 0, 1)
+        cache = {}
+        first = self._horizontal_patch(grid, (0, 0, 0), 0.1, 1)
+        second = self._horizontal_patch(grid, (1, 0, 0), 0.1, 2)
+        initial = align_face_patches(
+            (first,), (second,), face, grid=grid, _match_cache=cache
+        )
+        cache_size = len(cache)
+        repeated = align_face_patches(
+            (self._horizontal_patch(grid, (0, 0, 0), 0.1, 101),),
+            (self._horizontal_patch(grid, (1, 0, 0), 0.1, 102),),
+            face,
+            grid=grid,
+            _match_cache=cache,
+        )
+        self.assertEqual(cache_size, 1)
+        self.assertEqual(len(cache), cache_size)
+        self.assertEqual(initial.matches[0].first_patch_id, 1)
+        self.assertEqual(initial.matches[0].second_patch_id, 2)
+        self.assertEqual(repeated.matches[0].first_patch_id, 101)
+        self.assertEqual(repeated.matches[0].second_patch_id, 102)
 
     def test_trace_matching_rejects_different_face_topology(self) -> None:
         grid = GridSpec((2, 1, 1))

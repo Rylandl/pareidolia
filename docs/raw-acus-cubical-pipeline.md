@@ -410,6 +410,126 @@ every alternative plane as a Python object in one process. The artifact
 contracts are designed for that scheduler, and no evidence-stage rewrite is
 required.
 
+## Structural saturation and dual-axis sheet packets
+
+The selected surfaces now have a calibrated saturation audit. It uses only the
+canonical, source-owned, finite-length Acus needles and weights each by its
+score times the square root of axial coverage times support. Normal and fiber
+directions remain axial. The raw intensity admission gate is not reused as a
+voxel-occupancy label: 99.85% of this slab lies above it, so it cannot separate
+papyrus from the broad attenuation field.
+
+```bash
+python3 -m backend.cubical audit-sheet-saturation \
+  --root /path/to/selected-block \
+  --output /path/to/saturation-audit
+```
+
+For each needle, the audit records distance to the selected plane, transported
+unsigned-fiber residual, a two-dimensional standardized joint residual, and
+assignment share among competing layers. The primary contour is 2.5 in joint
+depth/fiber residual and the confident share is 0.8. The complete per-needle
+classification is persisted, including failure decomposition and score-decile
+calibration; summary percentages are not the only surviving result.
+
+Full-bank saturation reselection enumerates every physically ordered stack in
+every cell before retaining a bounded, diverse candidate set. One normal
+family, minimum spacing, and within-cell non-crossing remain hard constraints.
+The best-coverage physical stack is always retained alongside the current and
+empty configurations. A confidence-normalized Gaussian mixture scores Acus
+evidence without rewarding duplicate modes, and the ordinary shared-face ICM
+then selects one stack per cell:
+
+```bash
+python3 -m backend.cubical saturation-reselect \
+  --root /path/to/selected-block \
+  --mode-bank /path/to/full-mode-bank \
+  --pairwise-scale 0.2 \
+  --output /path/to/saturation-reselection
+```
+
+The 16 × 16 × 14 slab contains 3,584 cells. Reselection enumerates 1,219,069
+physical paths and retains 40,271 configurations with 87,813 layer
+alternatives. Its structural-evidence ceiling ladder is:
+
+| Constraint | supported evidence mass |
+| --- | ---: |
+| current contextual-growth stack | 60.09% |
+| local unary winner | 62.63% |
+| selected global stack | 64.79% |
+| complete physical per-cell oracle | 72.70% |
+| any modes from the best single normal family | 75.85% |
+| any fitted mode | 79.09% |
+
+The selected result contains 11,748 patches, 13,100 retained joins, 1,127
+components, and 18,883 unresolved interior traces. Its independent audit finds
+58.55% confidently assigned mass, 6.24% ambiguous mass, and 35.21%
+unexplained mass. A 0.25 explicit utilization reward raises direct support by
+0.62 percentage points but produces 36 more components and 233 more unresolved
+traces, so it is not the default. This is an example of the audit preventing a
+nominal coverage gain from silently replacing cohesion.
+
+The candidate artifact is immutable and reusable:
+
+```bash
+python3 -m backend.cubical select-saturation-candidates \
+  --candidates /path/to/saturation-reselection \
+  --pairwise-scale 0.2 --no-visuals \
+  --output /path/to/selection-variant
+```
+
+Geometry-level trace memoization reduces global selection from 136.3 to 78.9
+seconds with exactly identical cells, energies, support, and topology. Reusing
+the candidate bank and verified baseline statistics reduces a no-preview
+selection iteration to 99.9 seconds, including selected-graph assembly.
+
+The failure decomposition provides the next physical distinction. Only 30.8%
+of unexplained mass lacks a selected plane within the 6.25-voxel depth gate;
+69.2% is near selected geometry but incompatible with its one stored fiber
+axis. Testing the actual transverse in-plane cross-product axis as a diagnostic
+explains another 5.65% of total evidence. Direct or transverse support is
+therefore 70.44% overall and rises monotonically with needle score to 90.83% in
+the strongest
+decile. This diagnostic does not relabel or join anything.
+
+`dual-axis-packets` materializes that hypothesis as a separate sheet-level
+connectivity graph. It never modifies the strict single-ply graph. Existing
+strict joins are fixed, and only new quarter-turn candidates are considered.
+They must satisfy explicit absolute normal and fiber-frame residual gates, then
+pass the unchanged endpoint likelihood, ordered trace alignment, same-cell
+collision, crossing-topology, and orientability selector:
+
+```bash
+python3 -m backend.cubical dual-axis-packets \
+  --root /path/to/saturation-reselection \
+  --maximum-normal-angle 15 \
+  --maximum-fiber-residual 15 \
+  --output /path/to/dual-axis-packets
+```
+
+The 15° run discovers 2,157 quarter-turn possibilities, admits 1,149 through
+the absolute gates, and retains 187 after global topology. Retained joins have
+median/p90 normal residuals of 8.85°/13.86°, fiber-frame residuals of
+3.98°/10.41°, and endpoint residuals of 0.90/2.36 standard deviations. They
+reduce components from 1,127 to 977, grow the largest fragment from 191 to 278
+cells, and remove 374 unresolved traces. The graph NPZ stores retained joins,
+quarter-turn provenance, residuals, and patch-to-component membership.
+
+The absolute-gate sensitivity is smooth rather than singular:
+
+| normal/fiber cap | retained quarter-turn joins | components | largest | unresolved traces |
+| ---: | ---: | ---: | ---: | ---: |
+| 10° | 99 | 1,037 | 270 | 18,685 |
+| 15° | 187 | 977 | 278 | 18,509 |
+| 20° | 243 | 935 | 278 | 18,397 |
+
+The largest fragment saturates by 15°, while 20° mainly merges smaller
+components with weaker angular agreement. Fifteen degrees is therefore the
+current conservative default, not a claim about a scroll-specific fiber angle.
+The packet graph remains a downstream interpretation layer; block merging can
+exchange its retained boundary traces without changing Acus extraction,
+physical stack selection, or the strict ply graph.
+
 ## Tests
 
 ```bash

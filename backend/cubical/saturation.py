@@ -98,6 +98,7 @@ class CellEvidenceAssignment:
     nearest_distance_voxels: np.ndarray
     best_fiber_residual_degrees: np.ndarray
     best_joint_residual: np.ndarray
+    best_orthogonal_joint_residual: np.ndarray
     best_assignment_share: np.ndarray
     best_patch_index: np.ndarray
 
@@ -152,6 +153,7 @@ def classify_cell_structural_evidence(
             empty_float.copy(),
             empty_float.copy(),
             empty_float.copy(),
+            empty_float.copy(),
             np.zeros(sample_count, dtype=np.float64),
             np.full(sample_count, -1, dtype=np.int64),
         )
@@ -168,6 +170,7 @@ def classify_cell_structural_evidence(
             empty_float.copy(),
             empty_float.copy(),
             empty_float.copy(),
+            empty_float.copy(),
             np.zeros(sample_count, dtype=np.float64),
             np.full(sample_count, -1, dtype=np.int64),
         )
@@ -181,9 +184,20 @@ def classify_cell_structural_evidence(
     distance = np.abs(offsets @ normals.T - heights[None, :])
     axial_dot = np.clip(np.abs(directions @ fibers.T), 0.0, 1.0)
     angular = np.degrees(np.arccos(axial_dot))
+    orthogonal_fibers = np.cross(normals, fibers)
+    orthogonal_fibers /= np.maximum(
+        np.linalg.norm(orthogonal_fibers, axis=1, keepdims=True), 1.0e-12
+    )
+    orthogonal_dot = np.clip(
+        np.abs(directions @ orthogonal_fibers.T), 0.0, 1.0
+    )
+    orthogonal_angular = np.degrees(np.arccos(orthogonal_dot))
     angular_sigma = np.hypot(orientation_kernel_degrees, fiber_std)
     joint_squared = (distance / depth_sigma_voxels) ** 2 + (
         angular / angular_sigma[None, :]
+    ) ** 2
+    orthogonal_joint_squared = (distance / depth_sigma_voxels) ** 2 + (
+        orthogonal_angular / angular_sigma[None, :]
     ) ** 2
     local_best = np.argmin(joint_squared, axis=1)
     row = np.arange(sample_count)
@@ -196,6 +210,7 @@ def classify_cell_structural_evidence(
         np.min(distance, axis=1),
         angular[row, local_best],
         best_joint,
+        np.sqrt(np.min(orthogonal_joint_squared, axis=1)),
         best_share,
         retained[local_best],
     )
@@ -327,7 +342,9 @@ def _write_overview(
     temporary.replace(path)
 
 
-def _canonical_needle_artifact_identity(pipeline_root: Path) -> tuple[str, list[Path]]:
+def canonical_needle_artifact_identity(
+    pipeline_root: Path,
+) -> tuple[str, list[Path]]:
     manifests = sorted(pipeline_root.glob("extraction-tiles/*/needles-v1.json"))
     if not manifests:
         raise ValueError("raw Acus pipeline contains no canonical extraction tiles")
@@ -344,7 +361,7 @@ def _canonical_needle_artifact_identity(pipeline_root: Path) -> tuple[str, list[
     return canonical_json_hash(records), manifests
 
 
-def _load_owned_canonical_needles(
+def load_owned_canonical_needles(
     pipeline_root: Path,
     manifests: list[Path],
     *,
@@ -470,7 +487,7 @@ def run_sheet_saturation_audit(
     window_start = np.asarray(window_values["originVoxelXYZ"], dtype=np.float64)
     shape = tuple(int(value) for value in patches.grid.shape_cells_xyz)
     window_stop = window_start + np.asarray(shape, dtype=np.float64) * stride
-    needle_identity, needle_manifests = _canonical_needle_artifact_identity(
+    needle_identity, needle_manifests = canonical_needle_artifact_identity(
         pipeline_root
     )
     identity = _identity(root, pipeline_root, source, resolved, needle_identity)
@@ -497,7 +514,7 @@ def run_sheet_saturation_audit(
     }
     atomic_json(manifest_path, manifest)
 
-    needles = _load_owned_canonical_needles(
+    needles = load_owned_canonical_needles(
         pipeline_root,
         needle_manifests,
         pipeline_identity=pipeline_identity,
@@ -581,6 +598,14 @@ def run_sheet_saturation_audit(
     category_evidence_mass = np.zeros(4, dtype=np.float64)
     category_class_count = np.zeros((4, 3), dtype=np.uint64)
     category_class_mass = np.zeros((4, 3), dtype=np.float64)
+    evidence_class = np.full(needles.count, 2, dtype=np.uint8)
+    evidence_nearest_distance = np.full(needles.count, np.inf, dtype=np.float32)
+    evidence_best_fiber_residual = np.full(needles.count, np.inf, dtype=np.float32)
+    evidence_best_joint_residual = np.full(needles.count, np.inf, dtype=np.float32)
+    evidence_best_orthogonal_joint_residual = np.full(
+        needles.count, np.inf, dtype=np.float32
+    )
+    evidence_best_assignment_share = np.zeros(needles.count, dtype=np.float32)
     manifest["state"] = "classifying"
     atomic_json(manifest_path, manifest)
     primary_joint = float(resolved.primary_joint_residual_limit)
@@ -619,6 +644,17 @@ def run_sheet_saturation_audit(
             ambiguous = supported & ~confident
             unexplained = ~supported
             masks = (confident, ambiguous, unexplained)
+            evidence_class[sample[confident]] = 0
+            evidence_class[sample[ambiguous]] = 1
+            evidence_nearest_distance[sample] = assignment.nearest_distance_voxels
+            evidence_best_fiber_residual[sample] = (
+                assignment.best_fiber_residual_degrees
+            )
+            evidence_best_joint_residual[sample] = assignment.best_joint_residual
+            evidence_best_orthogonal_joint_residual[sample] = (
+                assignment.best_orthogonal_joint_residual
+            )
+            evidence_best_assignment_share[sample] = assignment.best_assignment_share
             for class_index, mask in enumerate(masks):
                 count = int(np.count_nonzero(mask))
                 mass = float(np.sum(weights[mask]))
@@ -726,6 +762,16 @@ def run_sheet_saturation_audit(
             selectedLayerCount=layer_count,
             classPointCount=class_count_by_cell,
             classMass=class_mass_by_cell,
+            evidenceCellXYZ=cell_xyz,
+            evidenceClass=evidence_class,
+            evidenceWeight=evidence_weight.astype(np.float32),
+            evidenceNearestPlaneDistanceVoxels=evidence_nearest_distance,
+            evidenceBestFiberResidualDegrees=evidence_best_fiber_residual,
+            evidenceBestJointResidual=evidence_best_joint_residual,
+            evidenceBestOrthogonalJointResidual=(
+                evidence_best_orthogonal_joint_residual
+            ),
+            evidenceBestAssignmentShare=evidence_best_assignment_share,
             distanceCoveredPointCount=distance_count_by_cell,
             distanceCoveredMass=distance_mass_by_cell,
             jointSupportedPointCount=joint_count_by_cell,
@@ -807,6 +853,75 @@ def run_sheet_saturation_audit(
         )
         for index, name in enumerate(class_names)
     }
+    unexplained_mask = evidence_class == 2
+    maximum_depth_residual = (
+        primary_joint * raw_settings.depth_kernel_voxels
+    )
+    depth_gap_mask = unexplained_mask & (
+        evidence_nearest_distance > maximum_depth_residual
+    )
+    near_plane_fiber_gap_mask = unexplained_mask & ~depth_gap_mask
+    orthogonal_ply_rescue_mask = unexplained_mask & (
+        evidence_best_orthogonal_joint_residual <= primary_joint
+    )
+
+    def failure_record(mask: np.ndarray) -> dict[str, Any]:
+        count = int(np.count_nonzero(mask))
+        mass = float(np.sum(evidence_weight[mask]))
+        record = _class_record(
+            count,
+            mass,
+            total_count=total_count,
+            total_mass=total_mass,
+        )
+        record["fractionOfUnexplainedMass"] = round(
+            _fraction(mass, total_class_mass[2]), 7
+        )
+        return record
+
+    ordered_quality = np.argsort(needles.score, kind="stable")
+    quality_deciles = []
+    for decile, indices in enumerate(np.array_split(ordered_quality, 10), start=1):
+        decile_mass = float(np.sum(evidence_weight[indices]))
+        orthogonal_mass = float(
+            np.sum(evidence_weight[indices[orthogonal_ply_rescue_mask[indices]]])
+        )
+        directly_supported_mass = float(
+            np.sum(evidence_weight[indices[evidence_class[indices] != 2]])
+        )
+        quality_deciles.append(
+            {
+                "decile": decile,
+                "minimumNeedleScore": round(float(np.min(needles.score[indices])), 7),
+                "maximumNeedleScore": round(float(np.max(needles.score[indices])), 7),
+                "evidencePointCount": len(indices),
+                "evidenceMass": round(decile_mass, 7),
+                "classEvidenceMassFraction": {
+                    class_name: round(
+                        _fraction(
+                            np.sum(
+                                evidence_weight[
+                                    indices[evidence_class[indices] == class_index]
+                                ]
+                            ),
+                            decile_mass,
+                        ),
+                        7,
+                    )
+                    for class_index, class_name in enumerate(class_names)
+                },
+                "orthogonalCompatibleUnexplainedEvidenceMassFraction": round(
+                    _fraction(orthogonal_mass, decile_mass), 7
+                ),
+                "directlySupportedOrOrthogonalCompatibleEvidenceMassFraction": round(
+                    _fraction(
+                        directly_supported_mass + orthogonal_mass,
+                        decile_mass,
+                    ),
+                    7,
+                ),
+            }
+        )
     categories: dict[str, Any] = {}
     for category, name in enumerate(
         ("interior", "outer-face", "outer-edge", "outer-corner")
@@ -927,6 +1042,36 @@ def run_sheet_saturation_audit(
             "primaryConfidentShare": primary_share,
         },
         "primaryClasses": classes,
+        "unexplainedDecomposition": {
+            "maximumDepthResidualVoxels": maximum_depth_residual,
+            "maximumDepthResidualMicrons": round(
+                maximum_depth_residual * source.voxel_size_microns, 5
+            ),
+            "noPlaneWithinDepthGate": failure_record(depth_gap_mask),
+            "nearPlaneButNoCompatibleFiberMode": failure_record(
+                near_plane_fiber_gap_mask
+            ),
+        },
+        "orthogonalPlyDiagnostic": {
+            "interpretation": (
+                "Diagnostic only: unexplained evidence whose unsigned fiber is "
+                "compatible with the in-plane axis orthogonal to a selected layer "
+                "at the same joint residual limit. It is not assigned or promoted."
+            ),
+            "compatibleUnexplainedEvidence": failure_record(
+                orthogonal_ply_rescue_mask
+            ),
+            "directlySupportedOrOrthogonalCompatibleEvidenceMassFraction": round(
+                _fraction(
+                    total_class_mass[0]
+                    + total_class_mass[1]
+                    + np.sum(evidence_weight[orthogonal_ply_rescue_mask]),
+                    total_mass,
+                ),
+                7,
+            ),
+        },
+        "assignmentByNeedleScoreDecile": quality_deciles,
         "coverageByPlaneDistance": distance_curve,
         "coverageByJointResidual": joint_curve,
         "residualDistributions": {

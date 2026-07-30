@@ -7,7 +7,7 @@ from typing import Iterable
 import numpy as np
 
 from .geometry import ClippedPatch, DegeneratePlaneIntersection, clip_plane_to_cell
-from .matching import TraceMatchSettings, align_face_patches
+from .matching import TraceMatch, TraceMatchSettings, align_face_patches
 from .stratigraphy import ConfigurationTable
 from .topology import GridSpec, Int3, cell_face
 
@@ -36,6 +36,7 @@ class ConfigurationSelection:
     continuation_energy: float
     total_energy: float
     pairwise_evaluation_count: int
+    trace_match_evaluation_count: int
     interior_unmatched_trace_count: int
     degenerate_layer_count: int
 
@@ -166,6 +167,7 @@ def optimize_configurations(
     pair_details: dict[
         tuple[int, int, int, bool], tuple[float, float, int]
     ] = {}
+    trace_match_cache: dict[tuple[object, ...], TraceMatch] = {}
 
     def pair_energy(
         first: ConfigurationOption,
@@ -195,6 +197,7 @@ def optimize_configurations(
                     face,
                     resolved_matching,
                     grid=grid,
+                    _match_cache=trace_match_cache,
                 )
                 relative = alignment.negative_log_likelihood - baseline
                 unmatched = len(alignment.unmatched_first_patch_ids) + len(
@@ -290,6 +293,7 @@ def optimize_configurations(
         float(continuation_energy),
         float(unary_energy + pairwise_energy),
         len(pair_cache) // 2,
+        len(trace_match_cache),
         interior_unmatched_trace_count,
         degenerate_total,
     )
