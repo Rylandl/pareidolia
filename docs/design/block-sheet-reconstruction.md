@@ -204,6 +204,83 @@ deliberate geometry/coverage tradeoff and identifies the now-clean open boundari
 for configuration-level recovery rather than hiding incorrect layer crossings inside
 large component counts.
 
+### Typed sheetlet graph and lifted layer exclusions
+
+Smooth curvature is not sufficient to establish surface identity. Two nearly
+parallel papyrus layers can be connected through a sequence of individually
+plausible joins while every retained join remains below the abrupt-bend limit.
+The resulting component is smooth but locally multi-valued along its own
+normal. This is a transitive partition failure rather than a bad-edge failure.
+
+`restitch-block-sheets --layer-partition` therefore persists and solves a typed
+`sheetlet-graph-v1` with:
+
+- one fixed active Acus sheetlet node per selected clipped mode;
+- attractive shared-face continuation edges carrying both raw pair likelihood
+  and their exact marginal probability over every order-preserving whole-face
+  stack alignment;
+- hard lifted exclusions for the original high-confidence local collision
+  definition; and
+- a denser soft repulsion graph between nearby, near-parallel sheetlets whose
+  tangent projections overlap while their normal heights remain distinct.
+
+An exclusion is independent of the current component assignment. Its two
+endpoints may not enter the same local surface chart even through a long chain
+of attractive edges. Dense face alignment is segmented by minimum-cost cuts
+until both same-cell collisions and lifted exclusions are separated. Every
+proposal, neighborhood exchange, and curvature refill then replays exclusions
+alongside trace occupancy, face order, crossing consistency, cell uniqueness,
+and orientability. Normal and fiber comparisons remain axial/unsigned.
+
+Hard exclusions alone do not identify a layer substitution in which a track
+leaves one physical layer and continues on the next without retaining both
+layers in the same local neighborhood. Conversely, requiring one constant
+integer rank offset between every pair of adjacent cell stacks is too strict:
+missing Acus modes and patches that do not cross a particular cube face are
+insertions and deletions in a partial ordered correspondence. The implemented
+integer-potential union-find is therefore retained as an explicit
+`--stack-transport` audit, not enabled by default.
+
+The production fixed-node proposal instead performs signed correlation
+clustering. For two current components, a merge realizes the sum of every
+attractive continuation edge between them and the sum of every soft lifted
+repulsion between them. It is accepted only when the complete component-pair
+gain is positive, while same-cell pairs and the narrower high-confidence
+lifted exclusions remain hard-separated. Thus neither a direct edge nor an
+arbitrarily long loop may reconnect a physically excluded layer pair, and one
+locally plausible shear bridge must still pay for all weaker downstream
+evidence that the two tracks occupy distinct layers. The clustering result is
+only a proposed partition: retained joins are reconstructed afterward by the
+unchanged exact trace-occupancy, face-order, crossing, cell-uniqueness, and
+orientability validator.
+
+The first hard-exclusion fixed-node pilot contains 4,784 nodes, 16,398 continuation edges, and
+30,108 geometric exclusion edges. Only 101 exclusions were connected through a
+normal-coherent path in the pre-curvature graph. The combined partition and
+curvature solve reduced those 101 local multi-depth conflicts and 391 abrupt
+hinges to zero under the frozen declared models. It retained 5,287 joins, 49
+fewer than the curvature-only graph, with 98 additional open endpoints and 26
+additional components. The former 161-cell suspect component was reorganized
+primarily into 121- and 100-cell charts, while the prior 169-cell component
+remained largely intact at 164 cells. This is the intended behavior: component
+count and size remain audits, while supported continuation is maximized subject
+to explicit physical incompatibility.
+
+The following hybrid signed solve keeps those 30,108 exclusions hard and adds
+57,660 lower-threshold lifted relations as soft costs. It eliminates all 101
+strong conflicts while retaining 5,577 joins in 600 components, including four
+components of at least 128 cells and a largest component of 172 cells. Relative
+to the first hard-exclusion result, that is 290 more retained joins and 580
+fewer open trace endpoints. Relative to a soft-only signed solve, its residual
+weak repulsion cost falls from 359.94 to 181.01. The exact component audit finds
+no duplicate occupied cell in any reconstructed sheet.
+
+This pilot freezes node activation to isolate the partition problem. The next
+stage applies the same typed-edge contract to the complete Acus mode bank, with
+one physical configuration hyperedge active per cell. That joint state can
+recover inactive modes at holes; a fixed-node partition can only reorganize or
+split the sheetlets it was given.
+
 ## Joint configuration and sheet inference
 
 The joint solver consumes `sheet-evidence-v1`, not only the current selected

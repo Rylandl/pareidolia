@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c/sheet-halo-core-12x12x10-v1/halo-1"
-    / "owned-bp32-c10-u010-collision-cut-curvature-v1"
+    / "owned-bp32-c10-u010-signed-hard-hybrid-v5"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -164,6 +164,12 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
         summary = json.loads(summary_path.read_text())
     best = summary.get("restitch", {}).get("best", {})
     curvature = summary.get("restitch", {}).get("sheetCurvatureRefinement", {})
+    layer_partition = summary.get("restitch", {}).get(
+        "sheetletLayerPartition", {}
+    )
+    signed_partition = summary.get("restitch", {}).get(
+        "signedLayerRepulsion", {}
+    )
     curvature_by_component = {
         str(value["componentId"]): value
         for value in curvature.get("after", {}).get("components", ())
@@ -218,6 +224,18 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
             ),
             "curvatureFlaggedJoinsAfter": int(
                 curvature.get("after", {}).get("flaggedJoins", 0)
+            ),
+            "layerConflictsBefore": int(
+                layer_partition.get("before", {}).get("conflictCount", 0)
+            ),
+            "layerConflictsAfter": int(
+                layer_partition.get("after", {}).get("conflictCount", 0)
+            ),
+            "modeledLayerRepulsionPairs": int(
+                signed_partition.get("repulsions", 0)
+            ),
+            "internalLayerRepulsionCost": float(
+                best.get("totalLayerRepulsion", 0.0)
             ),
         },
         "components": components,

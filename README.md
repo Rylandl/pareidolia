@@ -236,7 +236,8 @@ python3 -m backend.cubical restitch-block-sheets \
   --cluster /path/to/cluster-reselection-v2 \
   --materialized /path/to/materialized-block \
   --output /path/to/restitch-result \
-  --curvature-refinement
+  --curvature-refinement \
+  --layer-partition
 ```
 
 The collision cut runs to physical completion by default; an operational cap
@@ -263,6 +264,23 @@ resolved into smooth fragments, while the two convincing large components remain
 169 and 161 cells. This tradeoff is explicit: retained endpoint utilization falls
 from 63.93% to 59.93% until later configuration-level gap recovery can add genuinely
 supported geometry.
+
+The optional layer partition compiles fixed active sheetlets into a persisted
+typed graph. Continuations retain raw likelihood plus exact whole-face matching
+marginals. High-confidence local collisions remain hard constraints, while a
+denser lifted graph supplies soft distinct-layer costs to a signed
+component-level partition: a shear bridge must outweigh every repulsive
+relation it would pull into one sheet, not merely look plausible at one face.
+Same-cell returns and the narrower high-confidence collision set remain hard:
+no indirect path or loop can reconnect their endpoints. The resulting cluster
+is replayed through the exact topology validator. On the 4,784-node owned core,
+the hybrid solve retains 5,577 joins in 600 components, eliminates all 101
+strong transitive layer conflicts, and leaves 6,654 open endpoints. An
+experimental `--stack-transport` audit enforces a single integer cell-stack
+gauge, but is deliberately off by default because incomplete stacks require
+partial monotone correspondences. This fixed-node stage can reorganize or split
+selected sheetlets but cannot activate unused Acus candidates to fill holes.
+
 `audit-sheet-core` writes the complete reusable
 evidence/configuration/topology failure decomposition.
 

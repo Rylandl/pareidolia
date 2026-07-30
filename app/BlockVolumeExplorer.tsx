@@ -59,6 +59,10 @@ type BlockSheetResult = {
     retainedInteriorTraceFraction: number;
     curvatureFlaggedJoinsBefore: number;
     curvatureFlaggedJoinsAfter: number;
+    layerConflictsBefore: number;
+    layerConflictsAfter: number;
+    modeledLayerRepulsionPairs: number;
+    internalLayerRepulsionCost: number;
   };
   components: BlockComponent[];
   patches: BlockPatch[];
@@ -758,7 +762,7 @@ export function BlockVolumeExplorer() {
         </div>
         <p className="block-volume-summary">
           {result
-            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.curvatureFlaggedJoinsAfter} abrupt hinges`
+            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.layerConflictsAfter}/${result.stats.layerConflictsBefore} strong layer conflicts · ${result.stats.internalLayerRepulsionCost.toFixed(1)} residual stack cost`
             : message}
         </p>
       </header>

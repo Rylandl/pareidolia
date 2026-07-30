@@ -702,6 +702,28 @@ def _restitch_block_sheets(args: argparse.Namespace) -> None:
             ),
             curvature_round_count=args.curvature_rounds,
             curvature_cut_penalty_weight=args.curvature_cut_penalty_weight,
+            layer_partition_enabled=args.layer_partition,
+            stack_transport_enabled=args.stack_transport,
+            signed_partition_enabled=not args.no_signed_partition,
+            layer_repulsion_minimum_overlap_fraction=(
+                args.layer_repulsion_minimum_overlap_fraction
+            ),
+            layer_repulsion_minimum_normal_separation_cells=(
+                args.layer_repulsion_minimum_normal_separation_cells
+            ),
+            layer_repulsion_scale=args.layer_repulsion_scale,
+            layer_exclusion_proximity_radius_cells=(
+                args.layer_exclusion_proximity_radius
+            ),
+            layer_exclusion_minimum_overlap_fraction=(
+                args.layer_exclusion_minimum_overlap_fraction
+            ),
+            layer_exclusion_minimum_normal_separation_cells=(
+                args.layer_exclusion_minimum_normal_separation_cells
+            ),
+            layer_exclusion_maximum_normal_angle_degrees=(
+                args.layer_exclusion_maximum_normal_angle_degrees
+            ),
         ),
         force=args.force,
     )
@@ -2108,6 +2130,69 @@ def main() -> None:
     sheet_restitch.add_argument("--curvature-rounds", type=int, default=3)
     sheet_restitch.add_argument(
         "--curvature-cut-penalty-weight", type=float, default=1.0
+    )
+    sheet_restitch.add_argument(
+        "--layer-partition",
+        action="store_true",
+        help=(
+            "partition the typed sheetlet graph with lifted tangent-overlap "
+            "layer exclusions"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--stack-transport",
+        action="store_true",
+        help=(
+            "experimentally require one shared integer cell-stack gauge; "
+            "this is intentionally off because incomplete stacks require "
+            "partial monotone transport"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--no-signed-partition",
+        action="store_true",
+        help="disable soft lifted correlation clustering",
+    )
+    sheet_restitch.add_argument(
+        "--layer-repulsion-minimum-overlap-fraction",
+        type=float,
+        default=0.05,
+    )
+    sheet_restitch.add_argument(
+        "--layer-repulsion-minimum-normal-separation-cells",
+        type=float,
+        default=0.15,
+    )
+    sheet_restitch.add_argument(
+        "--layer-repulsion-scale",
+        type=float,
+        default=0.0,
+        help=(
+            "soft distinct-layer cost scale; zero uses one unmatched-trace "
+            "negative log likelihood"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--layer-exclusion-proximity-radius", type=int, default=2
+    )
+    sheet_restitch.add_argument(
+        "--layer-exclusion-minimum-overlap-fraction",
+        type=float,
+        default=0.25,
+    )
+    sheet_restitch.add_argument(
+        "--layer-exclusion-minimum-normal-separation-cells",
+        type=float,
+        default=0.35,
+    )
+    sheet_restitch.add_argument(
+        "--layer-exclusion-maximum-normal-angle-degrees",
+        type=float,
+        default=0.0,
+        help=(
+            "parallel-normal limit; zero derives it robustly from retained "
+            "continuations"
+        ),
     )
     sheet_restitch.add_argument("--force", action="store_true")
     sheet_restitch.set_defaults(handler=_restitch_block_sheets)

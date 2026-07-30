@@ -18,6 +18,9 @@ from .matching import (
 from .topology import Float3, GridEdge, GridFace, GridSpec, Int3, cell_face
 
 
+PatchPair = tuple[int, int]
+
+
 @dataclass(frozen=True, slots=True)
 class BlockBounds:
     start_cell_xyz: Int3
@@ -185,6 +188,57 @@ class _ParityDisjointSet:
         self.size[first_root] += self.size.pop(second_root)
 
 
+class _IntegerPotentialDisjointSet:
+    """Disjoint set carrying an integer gauge difference between cells."""
+
+    def __init__(self, values: Iterable[Int3]) -> None:
+        self.parent = {value: value for value in values}
+        # potential[value] = gauge(value) - gauge(parent(value)).
+        self.potential = {value: 0 for value in self.parent}
+        self.size = {value: 1 for value in self.parent}
+
+    def find(self, value: Int3) -> tuple[Int3, int]:
+        parent = self.parent[value]
+        if parent != value:
+            root, relative = self.find(parent)
+            self.potential[value] += relative
+            self.parent[value] = root
+        return self.parent[value], self.potential[value]
+
+    def compatible(
+        self, first: Int3, second: Int3, required_difference: int
+    ) -> bool:
+        """Test gauge(second) - gauge(first) == required_difference."""
+
+        first_root, first_potential = self.find(first)
+        second_root, second_potential = self.find(second)
+        return first_root != second_root or (
+            second_potential - first_potential == required_difference
+        )
+
+    def union(
+        self, first: Int3, second: Int3, required_difference: int
+    ) -> None:
+        first_root, first_potential = self.find(first)
+        second_root, second_potential = self.find(second)
+        if first_root == second_root:
+            if second_potential - first_potential != required_difference:
+                raise ValueError("integer potential union contradicts cell gauge")
+            return
+        if self.size[first_root] >= self.size[second_root]:
+            self.parent[second_root] = first_root
+            self.potential[second_root] = (
+                required_difference + first_potential - second_potential
+            )
+            self.size[first_root] += self.size.pop(second_root)
+        else:
+            self.parent[first_root] = second_root
+            self.potential[first_root] = (
+                -required_difference + second_potential - first_potential
+            )
+            self.size[second_root] += self.size.pop(first_root)
+
+
 def join_orientation_xor(
     patch_by_id: dict[int, ClippedPatch], match: TraceMatch
 ) -> bool:
@@ -223,6 +277,8 @@ def _select_consistent_joins(
     candidate_priorities: Mapping[
         tuple[int, int, int, Int3], float
     ] | None = None,
+    incompatible_patch_pairs: frozenset[PatchPair] = frozenset(),
+    stack_rank_by_patch: Mapping[int, int] | None = None,
 ) -> tuple[tuple[TraceMatch, ...], tuple[DeferredJoin, ...]]:
     patch_by_id = {value.patch_id: value for value in patches}
     patch_set = _DisjointSet(patch_by_id)
@@ -230,6 +286,13 @@ def _select_consistent_joins(
     component_cells: dict[object, set[Int3]] = {
         patch_id: {patch.cell_xyz} for patch_id, patch in patch_by_id.items()
     }
+    component_members: dict[object, set[int]] = {
+        patch_id: {patch_id} for patch_id in patch_by_id
+    }
+    incompatible_by_patch: dict[int, set[int]] = defaultdict(set)
+    for first, second in incompatible_patch_pairs:
+        incompatible_by_patch[first].add(second)
+        incompatible_by_patch[second].add(first)
     observations = [
         (patch.patch_id, vertex.edge)
         for patch in patches
@@ -245,6 +308,11 @@ def _select_consistent_joins(
     patches_by_cell: dict[Int3, list[ClippedPatch]] = defaultdict(list)
     for patch in patches:
         patches_by_cell[patch.cell_xyz].append(patch)
+    stack_transport = (
+        _IntegerPotentialDisjointSet(patches_by_cell)
+        if stack_rank_by_patch is not None
+        else None
+    )
     used_traces: set[tuple[int, GridFace]] = set()
     retained_face_ranks: dict[GridFace, list[tuple[int, int]]] = defaultdict(list)
     face_rank_cache: dict[GridFace, tuple[dict[int, int], dict[int, int]]] = {}
@@ -291,6 +359,29 @@ def _select_consistent_joins(
             )
             for value in match.endpoint_agreements
         ]
+
+    def stack_transport_relation(
+        match: TraceMatch,
+    ) -> tuple[Int3, Int3, int]:
+        if stack_rank_by_patch is None:
+            raise RuntimeError("stack transport relation was not configured")
+        lower, upper = match.face.adjacent_cells()
+        first_cell = patch_by_id[match.first_patch_id].cell_xyz
+        second_cell = patch_by_id[match.second_patch_id].cell_xyz
+        if first_cell == lower and second_cell == upper:
+            lower_patch = match.first_patch_id
+            upper_patch = match.second_patch_id
+        elif second_cell == lower and first_cell == upper:
+            lower_patch = match.second_patch_id
+            upper_patch = match.first_patch_id
+        else:
+            raise ValueError("join does not cross its declared adjacent cells")
+        return (
+            lower,
+            upper,
+            int(stack_rank_by_patch[lower_patch])
+            - int(stack_rank_by_patch[upper_patch]),
+        )
 
     def crossings_remain_feasible(match: TraceMatch) -> bool:
         pairs = crossing_pairs(match)
@@ -340,6 +431,16 @@ def _select_consistent_joins(
             crossing_edges[root] = edges
             crossing_owners[root] = owners
 
+    def components_are_incompatible(first_root: object, second_root: object) -> bool:
+        first_members = component_members[first_root]
+        second_members = component_members[second_root]
+        if len(first_members) > len(second_members):
+            first_members, second_members = second_members, first_members
+        return any(
+            incompatible_by_patch.get(patch_id, set()) & second_members
+            for patch_id in first_members
+        )
+
     retained: list[TraceMatch] = []
     deferred: list[DeferredJoin] = []
     ordered = sorted(
@@ -385,6 +486,17 @@ def _select_consistent_joins(
         ):
             deferred.append(DeferredJoin(match, "component-cell-collision"))
             continue
+        if first_root != second_root and components_are_incompatible(
+            first_root, second_root
+        ):
+            deferred.append(DeferredJoin(match, "component-layer-exclusion"))
+            continue
+        transport_relation: tuple[Int3, Int3, int] | None = None
+        if stack_transport is not None:
+            transport_relation = stack_transport_relation(match)
+            if not stack_transport.compatible(*transport_relation):
+                deferred.append(DeferredJoin(match, "stack-transport-cycle"))
+                continue
         if not crossings_remain_feasible(match):
             deferred.append(DeferredJoin(match, "crossing-topology-cycle"))
             continue
@@ -402,10 +514,17 @@ def _select_consistent_joins(
             match.second_patch_id,
             required_orientation_xor,
         )
+        if stack_transport is not None and transport_relation is not None:
+            stack_transport.union(*transport_relation)
         if first_root != second_root:
             cells = component_cells.pop(first_root) | component_cells.pop(second_root)
+            members = component_members.pop(first_root) | component_members.pop(
+                second_root
+            )
             patch_set.union(first_root, second_root)
-            component_cells[patch_set.find(first_root)] = cells
+            merged_root = patch_set.find(first_root)
+            component_cells[merged_root] = cells
+            component_members[merged_root] = members
         used_traces.update(trace_keys)
         retained_face_ranks[match.face].append((first_rank, second_rank))
         retained.append(match)
@@ -750,6 +869,8 @@ def select_surface_joins(
     candidate_priorities: Mapping[
         tuple[int, int, int, Int3], float
     ] | None = None,
+    incompatible_patch_pairs: frozenset[PatchPair] = frozenset(),
+    stack_rank_by_patch: Mapping[int, int] | None = None,
 ) -> SurfaceJoinSelection:
     """Select a complete topology-safe edge set without welding its geometry.
 
@@ -757,6 +878,10 @@ def select_surface_joins(
     Candidate order may vary between proposals, while trace occupancy, face
     order, component/cell uniqueness, crossing consistency, and orientability
     remain exact. ``fixed_join_keys`` are replayed first and must all survive.
+    ``incompatible_patch_pairs`` are lifted graph constraints: no transitive
+    component may contain both endpoints of one pair.  ``stack_rank_by_patch``
+    activates a shared integer gauge over cells: every retained continuation
+    must transport the complete local layer order consistently around loops.
     """
 
     patch_values = tuple(patches)
@@ -787,6 +912,41 @@ def select_surface_joins(
             "sheet joins reference absent patches: "
             f"{sorted(missing_patches)[:2]}"
         )
+    canonical_incompatible = frozenset(
+        (min(int(first), int(second)), max(int(first), int(second)))
+        for first, second in incompatible_patch_pairs
+    )
+    if any(first == second for first, second in canonical_incompatible):
+        raise ValueError("a sheetlet cannot exclude itself")
+    unknown_incompatible = {
+        patch_id
+        for pair in canonical_incompatible
+        for patch_id in pair
+        if patch_id not in patch_ids
+    }
+    if unknown_incompatible:
+        raise ValueError(
+            "sheet layer exclusions reference absent patches: "
+            f"{sorted(unknown_incompatible)[:2]}"
+        )
+    if stack_rank_by_patch is not None:
+        missing_stack_ranks = patch_ids - set(stack_rank_by_patch)
+        extra_stack_ranks = set(stack_rank_by_patch) - patch_ids
+        if missing_stack_ranks or extra_stack_ranks:
+            raise ValueError(
+                "sheet stack ranks must cover exactly the patch universe"
+            )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in stack_rank_by_patch.values()
+        ):
+            raise ValueError("sheet stack ranks must be nonnegative integers")
+        ranks_by_cell: dict[Int3, set[int]] = defaultdict(set)
+        for patch in patch_values:
+            rank = int(stack_rank_by_patch[patch.patch_id])
+            if rank in ranks_by_cell[patch.cell_xyz]:
+                raise ValueError("sheet stack ranks must be unique within a cell")
+            ranks_by_cell[patch.cell_xyz].add(rank)
     missing_fixed = set(fixed_join_keys) - key_set
     if missing_fixed:
         raise ValueError(
@@ -810,6 +970,8 @@ def select_surface_joins(
         candidate_values,
         fixed_join_keys,
         candidate_priorities,
+        canonical_incompatible,
+        stack_rank_by_patch,
     )
     retained_keys = {
         (

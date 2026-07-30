@@ -10,6 +10,7 @@ import numpy as np
 
 from backend.cubical.block import (
     BlockBounds,
+    _IntegerPotentialDisjointSet,
     _ParityDisjointSet,
     augment_surface_block,
     assemble_surface_hierarchy,
@@ -18,6 +19,7 @@ from backend.cubical.block import (
     extend_surface_block_joins,
     merge_surface_blocks,
     rebuild_surface_block,
+    select_surface_joins,
 )
 from backend.cubical.boundary_band import (
     BoundaryBandSettings,
@@ -67,6 +69,18 @@ from backend.cubical.matching import (
     match_face_traces,
 )
 from backend.cubical.sheet_curvature import analyze_sheet_curvature
+from backend.cubical.sheet_lamination import enumerate_layer_exclusions
+from backend.cubical.sheet_ports import enumerate_face_trace_crossings
+from backend.cubical.sheet_stack import (
+    OrderedMatchEvidence,
+    ordered_stack_posterior,
+)
+from backend.cubical.sheet_signed_graph import SignedEdge, signed_graph_partition
+from backend.cubical.sheet_transport import (
+    StackContinuationEvidence,
+    stack_cycle_consistency,
+    synchronize_stack_transport,
+)
 from backend.cubical.multiseam import run_multiseam_audit
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
@@ -300,6 +314,76 @@ class CubicalGeometryTests(unittest.TestCase):
         orientation.union(2, 3, False)
         self.assertTrue(orientation.compatible(1, 3, False))
         self.assertFalse(orientation.compatible(1, 3, True))
+
+    def test_integer_stack_transport_rejects_layer_changing_loop(self) -> None:
+        south_west = (0, 0, 0)
+        south_east = (1, 0, 0)
+        north_west = (0, 1, 0)
+        north_east = (1, 1, 0)
+        transport = _IntegerPotentialDisjointSet(
+            (south_west, south_east, north_west, north_east)
+        )
+        transport.union(south_west, south_east, 0)
+        transport.union(south_east, north_east, 0)
+        transport.union(south_west, north_west, 1)
+
+        self.assertFalse(
+            transport.compatible(north_west, north_east, 0)
+        )
+        self.assertTrue(
+            transport.compatible(north_west, north_east, -1)
+        )
+
+    def test_signed_partition_charges_shear_for_all_lifted_repulsions(self) -> None:
+        first_track = ("a0", "a1", "a2")
+        second_track = ("b0", "b1", "b2")
+        attractive = (
+            SignedEdge("a0", "a1", 5.0),
+            SignedEdge("a1", "a2", 5.0),
+            SignedEdge("b0", "b1", 5.0),
+            SignedEdge("b1", "b2", 5.0),
+            # Locally this bridge is attractive; component-wise it would fuse
+            # two tracks carrying three independent distinct-layer relations.
+            SignedEdge("a1", "b2", 4.0),
+        )
+        repulsive = tuple(
+            SignedEdge(first, second, 2.0)
+            for first, second in zip(first_track, second_track)
+        )
+        result = signed_graph_partition(
+            (*first_track, *second_track), attractive, repulsive
+        )
+
+        self.assertEqual(len(result.members_by_component), 2)
+        self.assertEqual(
+            result.component_by_node["a0"], result.component_by_node["a2"]
+        )
+        self.assertEqual(
+            result.component_by_node["b0"], result.component_by_node["b2"]
+        )
+        self.assertNotEqual(
+            result.component_by_node["a1"], result.component_by_node["b2"]
+        )
+        self.assertAlmostEqual(result.internal_attractive_weight, 20.0)
+        self.assertAlmostEqual(result.internal_repulsive_weight, 0.0)
+
+    def test_signed_partition_cannot_rejoin_a_hard_layer_pair_indirectly(self) -> None:
+        result = signed_graph_partition(
+            ("near", "bridge", "behind"),
+            (
+                SignedEdge("near", "bridge", 5.0),
+                SignedEdge("bridge", "behind", 5.0),
+            ),
+            (),
+            hard_separate_pairs=(("near", "behind"),),
+        )
+
+        self.assertNotEqual(
+            result.component_by_node["near"],
+            result.component_by_node["behind"],
+        )
+        self.assertEqual(len(result.members_by_component), 2)
+        self.assertAlmostEqual(result.internal_attractive_weight, 5.0)
 
     def test_structural_saturation_uses_unsigned_fiber_and_residual_gating(self) -> None:
         assignment = classify_cell_structural_evidence(
@@ -2631,6 +2715,192 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(
             result.summary["best"]["totalJoinBenefit"],
             result.summary["baseline"]["totalJoinBenefit"],
+        )
+
+    def test_layer_exclusions_detect_parallel_normal_depths(self) -> None:
+        grid = GridSpec((2, 1, 2))
+        patches = (
+            self._horizontal_patch(grid, (0, 0, 0), 0.0, 1),
+            self._horizontal_patch(grid, (0, 0, 1), 0.0, 2),
+            self._horizontal_patch(grid, (1, 0, 0), 0.0, 3),
+        )
+        exclusions = enumerate_layer_exclusions(
+            patches,
+            cell_size_xyz=grid.cell_size_xyz,
+            maximum_parallel_normal_angle_degrees=10.0,
+            proximity_radius_cells=1,
+            minimum_overlap_fraction=0.5,
+            minimum_normal_separation_cells=0.5,
+        )
+
+        self.assertEqual(tuple(value.pair for value in exclusions), ((1, 2),))
+        self.assertAlmostEqual(exclusions[0].overlap_fraction, 1.0)
+        self.assertAlmostEqual(exclusions[0].normal_separation_cells, 1.0)
+
+    def test_layer_exclusion_blocks_transitive_component_fusion(self) -> None:
+        grid = GridSpec((3, 1, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+            for x in range(3)
+        )
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        selection = select_surface_joins(
+            patches,
+            block.joins,
+            incompatible_patch_pairs=frozenset(((1, 3),)),
+        )
+
+        self.assertEqual(len(selection.joins), 1)
+        self.assertEqual(
+            [value.reason for value in selection.deferred_joins],
+            ["component-layer-exclusion"],
+        )
+
+    def test_face_trace_crossing_is_a_typed_port_conflict(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        patches = tuple(
+            clip_plane_to_cell(
+                grid,
+                (index, 0, 0),
+                PlaneEstimate.isotropic(
+                    normal,
+                    0.1,
+                    math.radians(1.0),
+                    0.02,
+                    fiber_xyz=(1.0, 0.0, 0.0),
+                ),
+                patch_id=index + 1,
+            )
+            for index, normal in enumerate(
+                ((0.0, -1.0, 1.0), (0.0, 1.0, 1.0))
+            )
+        )
+        self.assertTrue(all(value is not None for value in patches))
+        crossings = enumerate_face_trace_crossings(
+            value for value in patches if value is not None
+        )
+
+        self.assertEqual(len(crossings), 1)
+        self.assertEqual(crossings[0].pair, (1, 2))
+        self.assertEqual(crossings[0].face, GridFace(0, (1, 0, 0)))
+        self.assertTrue(
+            np.allclose(
+                crossings[0].intersection_xyz,
+                (1.0, 0.5, 0.5 + math.sqrt(2.0) * 0.1),
+            )
+        )
+        self.assertAlmostEqual(crossings[0].crossing_angle_degrees, 90.0)
+
+    def test_ordered_stack_single_edge_preserves_log_likelihood_ratio(self) -> None:
+        posterior = ordered_stack_posterior(
+            (OrderedMatchEvidence("edge", 0, 0, 2.0),)
+        )
+        marginal = posterior.by_key()["edge"]
+
+        self.assertAlmostEqual(marginal.probability, 1.0 / (1.0 + math.exp(-2.0)))
+        self.assertAlmostEqual(marginal.log_odds, 2.0)
+        self.assertAlmostEqual(marginal.maximum_score_regret, 0.0)
+
+    def test_ordered_stack_marginals_reject_crossing_shear_alternatives(self) -> None:
+        posterior = ordered_stack_posterior(
+            (
+                OrderedMatchEvidence("first-diagonal", 0, 0, 5.0),
+                OrderedMatchEvidence("second-diagonal", 1, 1, 5.0),
+                OrderedMatchEvidence("upper-shear", 0, 1, 5.0),
+                OrderedMatchEvidence("lower-shear", 1, 0, 5.0),
+            )
+        )
+        marginal = posterior.by_key()
+
+        self.assertGreater(
+            marginal["first-diagonal"].probability,
+            marginal["upper-shear"].probability,
+        )
+        self.assertGreater(
+            marginal["second-diagonal"].probability,
+            marginal["lower-shear"].probability,
+        )
+        self.assertGreater(marginal["first-diagonal"].log_odds, 0.0)
+        self.assertLess(marginal["upper-shear"].log_odds, 0.0)
+        self.assertAlmostEqual(
+            marginal["upper-shear"].maximum_score_regret, 5.0
+        )
+
+    def test_stack_transport_exposes_nonzero_layer_holonomy(self) -> None:
+        grid = GridSpec((2, 2, 1))
+        patch_by_cell_rank = {}
+        patches = []
+        patch_id = 1
+        for cell in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)):
+            for rank, height in enumerate((-0.2, 0.2)):
+                patch = clip_plane_to_cell(
+                    grid,
+                    cell,
+                    PlaneEstimate.isotropic(
+                        (0.0, 0.0, 1.0),
+                        height,
+                        math.radians(1.0),
+                        0.02,
+                        fiber_xyz=(1.0, 0.0, 0.0),
+                    ),
+                    patch_id=patch_id,
+                )
+                self.assertIsNotNone(patch)
+                patches.append(patch)
+                patch_by_cell_rank[cell, rank] = patch_id
+                patch_id += 1
+
+        def edge(
+            name: str,
+            lower: tuple[int, int, int],
+            upper: tuple[int, int, int],
+            axis: int,
+            lower_rank: int,
+            upper_rank: int,
+        ) -> StackContinuationEvidence:
+            anchor = list(lower)
+            anchor[axis] += 1
+            self.assertEqual(tuple(anchor), upper)
+            return StackContinuationEvidence(
+                name,
+                patch_by_cell_rank[lower, lower_rank],
+                patch_by_cell_rank[upper, upper_rank],
+                GridFace(axis, tuple(anchor)),
+                0.9,
+            )
+
+        evidence = (
+            edge("south", (0, 0, 0), (1, 0, 0), 0, 0, 0),
+            edge("east", (1, 0, 0), (1, 1, 0), 1, 0, 0),
+            edge("north", (0, 1, 0), (1, 1, 0), 0, 0, 0),
+            # One locally plausible shear advances the transported identity by
+            # a complete layer around the elementary square.
+            edge("west-shear", (0, 0, 0), (0, 1, 0), 1, 1, 0),
+        )
+        model = synchronize_stack_transport(
+            (value for value in patches if value is not None), evidence
+        )
+        cycle = stack_cycle_consistency(
+            (value for value in patches if value is not None), evidence
+        )
+
+        self.assertEqual(model.elementary_cycle_count, 1)
+        self.assertEqual(model.frustrated_elementary_cycle_count, 1)
+        self.assertEqual(model.elementary_cycle_holonomy, {-1: 1})
+        self.assertGreater(model.final_weighted_absolute_residual, 0.0)
+        self.assertTrue(
+            any(
+                value.residual_layers == 1
+                for value in model.candidate_residuals
+            )
+        )
+        self.assertEqual(cycle.plaquette_count, 1)
+        self.assertGreater(
+            cycle.by_key()["west-shear"].cycle_regret, 20.0
         )
 
     def test_sheet_curvature_separates_gradual_bend_from_abrupt_hinge(self) -> None:

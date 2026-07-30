@@ -6,7 +6,7 @@ import math
 import shutil
 import time
 from collections import Counter, defaultdict, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -27,6 +27,14 @@ from .matching import (
     match_face_traces,
 )
 from .sheet_curvature import SheetCurvatureAnalysis, analyze_sheet_curvature
+from .sheet_lamination import (
+    LayerExclusion,
+    analyze_sheet_lamination,
+    enumerate_layer_exclusions,
+)
+from .sheet_stack import OrderedMatchEvidence, ordered_stack_posterior
+from .sheet_signed_graph import SignedEdge, SignedPartition, signed_graph_partition
+from .sheet_transport import patch_stack_ranks
 from .surface_graph import (
     component_statistics,
     join_key,
@@ -41,6 +49,9 @@ SHEET_JOIN_CATALOG_VERSION = 1
 SHEET_JOIN_CATALOG_STEM = "sheet-join-catalog-v1"
 SHEET_RESTITCH_SCHEMA = "pareidolia.cubical-sheet-restitch"
 SHEET_RESTITCH_VERSION = 1
+SHEETLET_GRAPH_SCHEMA = "pareidolia.cubical-typed-sheetlet-graph"
+SHEETLET_GRAPH_VERSION = 1
+SHEETLET_GRAPH_STEM = "sheetlet-graph-v1"
 
 JoinKey = tuple[int, int, int, Int3]
 TraceKey = tuple[int, GridFace]
@@ -110,6 +121,16 @@ class SheetStitchingSettings:
     curvature_minimum_calibration_joins: int = 32
     curvature_round_count: int = 3
     curvature_cut_penalty_weight: float = 1.0
+    layer_partition_enabled: bool = False
+    stack_transport_enabled: bool = False
+    signed_partition_enabled: bool = True
+    layer_repulsion_minimum_overlap_fraction: float = 0.05
+    layer_repulsion_minimum_normal_separation_cells: float = 0.15
+    layer_repulsion_scale: float = 0.0
+    layer_exclusion_proximity_radius_cells: int = 2
+    layer_exclusion_minimum_overlap_fraction: float = 0.25
+    layer_exclusion_minimum_normal_separation_cells: float = 0.35
+    layer_exclusion_maximum_normal_angle_degrees: float = 0.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.minimum_join_benefit):
@@ -159,6 +180,53 @@ class SheetStitchingSettings:
             or self.curvature_cut_penalty_weight < 0.0
         ):
             raise ValueError("curvature cut penalty must be finite and nonnegative")
+        if not isinstance(self.layer_partition_enabled, bool):
+            raise ValueError("layer-partition enabled state must be boolean")
+        if not isinstance(self.stack_transport_enabled, bool):
+            raise ValueError("stack-transport enabled state must be boolean")
+        if not isinstance(self.signed_partition_enabled, bool):
+            raise ValueError("signed-partition enabled state must be boolean")
+        if not (
+            math.isfinite(self.layer_repulsion_minimum_overlap_fraction)
+            and 0.0 <= self.layer_repulsion_minimum_overlap_fraction <= 1.0
+        ):
+            raise ValueError("layer-repulsion overlap must lie in [0, 1]")
+        if (
+            not math.isfinite(
+                self.layer_repulsion_minimum_normal_separation_cells
+            )
+            or self.layer_repulsion_minimum_normal_separation_cells < 0.0
+        ):
+            raise ValueError("layer-repulsion separation must be nonnegative")
+        if not math.isfinite(self.layer_repulsion_scale) or self.layer_repulsion_scale < 0.0:
+            raise ValueError("layer-repulsion scale must be nonnegative")
+        if self.layer_exclusion_proximity_radius_cells < 1:
+            raise ValueError("layer-exclusion proximity radius must be positive")
+        if not (
+            math.isfinite(self.layer_exclusion_minimum_overlap_fraction)
+            and 0.0
+            <= self.layer_exclusion_minimum_overlap_fraction
+            <= 1.0
+        ):
+            raise ValueError("layer-exclusion overlap must lie in [0, 1]")
+        if (
+            not math.isfinite(
+                self.layer_exclusion_minimum_normal_separation_cells
+            )
+            or self.layer_exclusion_minimum_normal_separation_cells < 0.0
+        ):
+            raise ValueError(
+                "layer-exclusion normal separation must be nonnegative"
+            )
+        if (
+            not math.isfinite(
+                self.layer_exclusion_maximum_normal_angle_degrees
+            )
+            or not 0.0
+            <= self.layer_exclusion_maximum_normal_angle_degrees
+            <= 90.0
+        ):
+            raise ValueError("layer-exclusion normal angle must lie in [0, 90]")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -172,6 +240,9 @@ class SheetJoinCandidate:
     second_rank: int
     benefit: float
     currently_retained: bool
+    face_probability: float = math.nan
+    face_regret: float = math.nan
+    partition_benefit: float | None = None
 
     @property
     def key(self) -> JoinKey:
@@ -182,6 +253,14 @@ class SheetJoinCandidate:
         return (
             (self.match.first_patch_id, self.match.face),
             (self.match.second_patch_id, self.match.face),
+        )
+
+    @property
+    def objective_benefit(self) -> float:
+        return (
+            self.partition_benefit
+            if self.partition_benefit is not None
+            else self.benefit
         )
 
 
@@ -208,6 +287,12 @@ class SheetJoinCatalog:
             "positiveBenefitCandidates": sum(
                 value.benefit > 0.0 for value in self.candidates
             ),
+            "positivePartitionBenefitCandidates": sum(
+                value.objective_benefit > 0.0 for value in self.candidates
+            ),
+            "contextualizedFaceCandidates": sum(
+                value.partition_benefit is not None for value in self.candidates
+            ),
             "strictCandidates": sum(
                 value.family == "strict" for value in self.candidates
             ),
@@ -233,8 +318,12 @@ class SheetJoinCatalog:
 @dataclass(frozen=True, slots=True)
 class SheetRestitchResult:
     block: SurfaceBlock
+    catalog: SheetJoinCatalog
     summary: dict[str, Any]
     proposal_records: tuple[dict[str, Any], ...]
+    layer_exclusions: tuple[LayerExclusion, ...]
+    layer_repulsions: tuple[LayerExclusion, ...]
+    layer_repulsion_penalties: Mapping[tuple[int, int], float]
 
 
 def match_sheet_join_candidate(
@@ -382,6 +471,118 @@ def enumerate_sheet_join_catalog(
     )
 
 
+def contextualize_sheet_join_catalog(
+    catalog: SheetJoinCatalog,
+) -> tuple[SheetJoinCatalog, dict[str, Any]]:
+    """Replace independent edge scores with exact whole-face marginals.
+
+    The raw pair likelihood remains available as ``benefit``.  The partition
+    benefit is the edge log odds after summing over every order-preserving
+    partial alignment of the complete stack on that face.  An isolated edge
+    therefore keeps its original score, while a locally plausible shear edge
+    that excludes a much stronger collective alignment becomes unattractive.
+    """
+
+    contextualized = sum(
+        value.partition_benefit is not None for value in catalog.candidates
+    )
+    if contextualized:
+        if contextualized != len(catalog.candidates):
+            raise ValueError("sheet join catalog is only partly contextualized")
+        probability = np.asarray(
+            [value.face_probability for value in catalog.candidates],
+            dtype=np.float64,
+        )
+        return catalog, {
+            "enabled": True,
+            "source": "precontextualized catalog",
+            "faces": len({value.match.face for value in catalog.candidates}),
+            "candidates": len(catalog.candidates),
+            "positiveLogOddsCandidates": sum(
+                value.objective_benefit > 0.0 for value in catalog.candidates
+            ),
+            "probabilityQuantiles": {
+                name: round(float(value), 6)
+                for name, value in zip(
+                    ("minimum", "p10", "median", "p90", "maximum"),
+                    np.percentile(probability, (0, 10, 50, 90, 100))
+                    if len(probability)
+                    else (0.0,) * 5,
+                )
+            },
+        }
+    by_face: dict[GridFace, list[SheetJoinCandidate]] = defaultdict(list)
+    for value in catalog.candidates:
+        by_face[value.match.face].append(value)
+    marginal_by_key: dict[JoinKey, Any] = {}
+    face_log_partitions: list[float] = []
+    for values in by_face.values():
+        posterior = ordered_stack_posterior(
+            OrderedMatchEvidence(
+                value.key,
+                value.first_rank,
+                value.second_rank,
+                value.benefit,
+            )
+            for value in values
+        )
+        marginal_by_key.update(posterior.by_key())
+        face_log_partitions.append(posterior.log_partition)
+    candidates = tuple(
+        replace(
+            value,
+            face_probability=marginal_by_key[value.key].probability,
+            face_regret=marginal_by_key[value.key].maximum_score_regret,
+            partition_benefit=marginal_by_key[value.key].log_odds,
+        )
+        for value in catalog.candidates
+    )
+    probability = np.asarray(
+        [value.face_probability for value in candidates], dtype=np.float64
+    )
+    regret = np.asarray([value.face_regret for value in candidates], dtype=np.float64)
+    contextual_catalog = SheetJoinCatalog(
+        candidates,
+        catalog.interior_face_count,
+        catalog.unstable_face_count,
+    )
+    return contextual_catalog, {
+        "enabled": True,
+        "source": "exact ordered-face partition function",
+        "faces": len(by_face),
+        "candidates": len(candidates),
+        "positiveLogOddsCandidates": sum(
+            value.objective_benefit > 0.0 for value in candidates
+        ),
+        "negativeLogOddsDespitePositivePairBenefit": sum(
+            value.benefit > 0.0 and value.objective_benefit <= 0.0
+            for value in candidates
+        ),
+        "probabilityQuantiles": {
+            name: round(float(value), 6)
+            for name, value in zip(
+                ("minimum", "p10", "median", "p90", "maximum"),
+                np.percentile(probability, (0, 10, 50, 90, 100))
+                if len(probability)
+                else (0.0,) * 5,
+            )
+        },
+        "maximumScoreRegretQuantiles": {
+            name: round(float(value), 6)
+            for name, value in zip(
+                ("minimum", "median", "p90", "maximum"),
+                np.percentile(regret, (0, 50, 90, 100))
+                if len(regret)
+                else (0.0,) * 4,
+            )
+        },
+        "meanFaceLogPartition": round(
+            float(np.mean(face_log_partitions)) if face_log_partitions else 0.0,
+            6,
+        ),
+    }
+
+
 def _stable_jitter(key: JoinKey, restart: int) -> float:
     digest = hashlib.blake2b(
         repr((restart, key)).encode("utf-8"), digest_size=8
@@ -445,7 +646,7 @@ def _face_optimal_candidate_keys(
                 if candidate is not None:
                     diagonal = (
                         float(scores[first_index - 1, second_index - 1])
-                        + candidate.benefit
+                        + candidate.objective_benefit
                         + retained_join_reward,
                         int(counts[first_index - 1, second_index - 1]) + 1,
                         (*paths[first_index - 1][second_index - 1], candidate.key),
@@ -554,15 +755,16 @@ def _collision_cut_proposal(
     *,
     maximum_cuts: int,
     reverse: bool = False,
+    layer_exclusions: tuple[LayerExclusion, ...] = tuple(),
+    stack_rank_by_patch: Mapping[int, int] | None = None,
 ) -> tuple[SurfaceJoinSelection, dict[str, Any]]:
-    """Segment dense face-optimal sheets with minimum same-cell collision cuts.
+    """Segment a dense attractive graph against lifted repulsive constraints.
 
     Greedy construction commits to early edges before it knows which dense
     sheet they create. This proposal reverses that order: begin with every
-    independently optimal face edge, then separate duplicate layers in a cell
-    by the least-cost sheet cut. The ordinary exact validator remains the final
-    authority for crossing, parity, ordering, occupancy, and any residual
-    component collision.
+    independently optimal face edge, then separate both duplicate cell layers
+    and tangent-overlap exclusions by minimum-cost sheet cuts. The ordinary
+    exact validator remains authoritative for all local topology constraints.
     """
 
     candidate_by_key = {value.key: value for value in eligible}
@@ -574,8 +776,8 @@ def _collision_cut_proposal(
     cut_index = 0
     while maximum_cuts == 0 or cut_index < maximum_cuts:
         joins = tuple(candidate_by_key[key].match for key in sorted(remaining))
-        _, members = _component_partition(patches, joins)
-        collision: tuple[int, Int3, int, int] | None = None
+        component_by_patch, members = _component_partition(patches, joins)
+        collision: tuple[str, int, Int3 | None, int, int, float] | None = None
         for component_id, member_ids in sorted(
             members.items(), reverse=reverse
         ):
@@ -594,11 +796,37 @@ def _collision_cut_proposal(
                 cell, values = duplicate
                 if reverse:
                     values = tuple(reversed(values))
-                collision = (component_id, cell, values[0], values[1])
+                collision = (
+                    "same-cell",
+                    component_id,
+                    cell,
+                    values[0],
+                    values[1],
+                    math.inf,
+                )
                 break
         if collision is None:
+            exclusion_values = (
+                tuple(reversed(layer_exclusions))
+                if reverse
+                else layer_exclusions
+            )
+            for exclusion in exclusion_values:
+                source, target = exclusion.pair
+                component_id = component_by_patch[source]
+                if component_by_patch[target] == component_id:
+                    collision = (
+                        "layer-exclusion",
+                        component_id,
+                        None,
+                        source,
+                        target,
+                        exclusion.severity,
+                    )
+                    break
+        if collision is None:
             break
-        component_id, cell, source, target = collision
+        kind, component_id, cell, source, target, severity = collision
         member_ids = members[component_id]
         member_set = set(member_ids)
         internal = tuple(
@@ -615,16 +843,22 @@ def _collision_cut_proposal(
             target,
         )
         if not cut:
-            raise RuntimeError("same-cell collision has no separating sheet cut")
+            raise RuntimeError("sheet graph conflict has no separating cut")
         remaining.difference_update(cut)
         removed.update(cut)
         cut_capacity += capacity
         cut_records.append(
             {
                 "cut": cut_index + 1,
+                "kind": kind,
                 "componentPatches": len(member_ids),
-                "cellXYZ": list(cell),
+                "cellXYZ": list(cell) if cell is not None else None,
                 "separatedPatchIds": [source, target],
+                "exclusionSeverity": (
+                    round(float(severity), 6)
+                    if math.isfinite(severity)
+                    else None
+                ),
                 "removedJoins": len(cut),
                 "capacity": round(capacity, 6),
             }
@@ -638,6 +872,10 @@ def _collision_cut_proposal(
         patches,
         repaired_joins,
         candidate_priorities={key: priorities[key] for key in remaining},
+        incompatible_patch_pairs=frozenset(
+            value.pair for value in layer_exclusions
+        ),
+        stack_rank_by_patch=stack_rank_by_patch,
     )
     safe_keys = frozenset(join_key(value) for value in safe_seed.joins)
     completed = select_surface_joins(
@@ -645,6 +883,10 @@ def _collision_cut_proposal(
         tuple(value.match for value in eligible),
         fixed_join_keys=safe_keys,
         candidate_priorities=priorities,
+        incompatible_patch_pairs=frozenset(
+            value.pair for value in layer_exclusions
+        ),
+        stack_rank_by_patch=stack_rank_by_patch,
     )
     _, members = _component_partition(
         patches,
@@ -654,14 +896,32 @@ def _collision_cut_proposal(
     for member_ids in members.values():
         counts = Counter(patch_by_id[value].cell_xyz for value in member_ids)
         collision_groups += sum(value > 1 for value in counts.values())
+    component_by_patch = {
+        patch_id: component_id
+        for component_id, member_ids in members.items()
+        for patch_id in member_ids
+    }
+    remaining_layer_conflicts = sum(
+        component_by_patch[value.first_patch_id]
+        == component_by_patch[value.second_patch_id]
+        for value in layer_exclusions
+    )
     return completed, {
         "cutOrder": "reverse" if reverse else "forward",
         "startingFaceOptimalJoins": len(face_optimal_keys),
         "cutIterations": len(cut_records),
-        "cutLimitReached": collision_groups > 0,
+        "cutLimitReached": (
+            collision_groups > 0 or remaining_layer_conflicts > 0
+        ),
         "remainingCollisionGroupsBeforeValidation": collision_groups,
+        "remainingLayerExclusionsBeforeValidation": (
+            remaining_layer_conflicts
+        ),
         "removedJoinCount": len(removed),
         "removedJoinCapacity": round(cut_capacity, 6),
+        "cutsByKind": dict(
+            sorted(Counter(value["kind"] for value in cut_records).items())
+        ),
         "topologySafeSeedJoins": len(safe_seed.joins),
         "completedJoins": len(completed.joins),
         "cuts": cut_records[:32],
@@ -673,14 +933,28 @@ def _block_record(
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     unmatched_cost: float,
     unmatched_trace_penalty: float = 0.0,
+    layer_repulsion_penalties: Mapping[tuple[int, int], float] | None = None,
 ) -> dict[str, Any]:
     benefit = sum(candidate_by_key[join_key(value)].benefit for value in block.joins)
+    partition_benefit = sum(
+        candidate_by_key[join_key(value)].objective_benefit
+        for value in block.joins
+    )
     interior_endpoints = 2 * len(block.joins) + len(block.unresolved_interior_traces)
+    component_by_patch = dict(block.component_by_patch)
+    layer_repulsion = sum(
+        penalty
+        for (first, second), penalty in (
+            layer_repulsion_penalties or {}
+        ).items()
+        if component_by_patch[first] == component_by_patch[second]
+    )
     topology_objective = (
         benefit
+        - layer_repulsion
         - unmatched_trace_penalty * len(block.unresolved_interior_traces)
     )
-    objective_cost = unmatched_cost * interior_endpoints - benefit
+    objective_cost = unmatched_cost * interior_endpoints - benefit + layer_repulsion
     components = component_statistics(block, maximum_records=8)
     return {
         "patches": len(block.patches),
@@ -696,6 +970,8 @@ def _block_record(
             2 * len(block.joins) / max(interior_endpoints, 1), 6
         ),
         "totalJoinBenefit": round(float(benefit), 6),
+        "totalPartitionBenefit": round(float(partition_benefit), 6),
+        "totalLayerRepulsion": round(float(layer_repulsion), 6),
         "topologyObjective": round(float(topology_objective), 6),
         "objectiveCostWithoutConstant": round(float(objective_cost), 6),
         "deferredJoinsByReason": dict(
@@ -760,16 +1036,30 @@ def _selection_record(
     unmatched_cost: float,
     interior_endpoint_count: int,
     unmatched_trace_penalty: float = 0.0,
+    layer_repulsion_penalties: Mapping[tuple[int, int], float] | None = None,
 ) -> dict[str, Any]:
     benefit = sum(
         candidate_by_key[join_key(value)].benefit for value in selection.joins
     )
-    _, members = _component_partition(patches, selection.joins)
+    partition_benefit = sum(
+        candidate_by_key[join_key(value)].objective_benefit
+        for value in selection.joins
+    )
+    component_by_patch, members = _component_partition(patches, selection.joins)
+    layer_repulsion = sum(
+        penalty
+        for (first, second), penalty in (
+            layer_repulsion_penalties or {}
+        ).items()
+        if component_by_patch[first] == component_by_patch[second]
+    )
     sizes = np.asarray([len(value) for value in members.values()], dtype=np.int64)
     unresolved = interior_endpoint_count - 2 * len(selection.joins)
     if unresolved < 0:
         raise RuntimeError("sheet selection retained more traces than physically exist")
-    topology_objective = benefit - unmatched_trace_penalty * unresolved
+    topology_objective = (
+        benefit - layer_repulsion - unmatched_trace_penalty * unresolved
+    )
     thresholds = (8, 16, 32, 64, 128, 256, 512)
     return {
         "patches": len(patches),
@@ -781,9 +1071,16 @@ def _selection_record(
             2 * len(selection.joins) / max(interior_endpoint_count, 1), 6
         ),
         "totalJoinBenefit": round(float(benefit), 6),
+        "totalPartitionBenefit": round(float(partition_benefit), 6),
+        "totalLayerRepulsion": round(float(layer_repulsion), 6),
         "topologyObjective": round(float(topology_objective), 6),
         "objectiveCostWithoutConstant": round(
-            float(unmatched_cost * interior_endpoint_count - benefit), 6
+            float(
+                unmatched_cost * interior_endpoint_count
+                - benefit
+                + layer_repulsion
+            ),
+            6,
         ),
         "deferredJoinsByReason": dict(
             sorted(
@@ -807,13 +1104,25 @@ def _selection_quality(
     patches: tuple[ClippedPatch, ...],
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     unmatched_trace_penalty: float = 0.0,
+    layer_repulsion_penalties: Mapping[tuple[int, int], float] | None = None,
 ) -> tuple[float, float, int, int, int]:
     benefit = sum(
         candidate_by_key[join_key(value)].benefit for value in selection.joins
     )
-    _, members = _component_partition(patches, selection.joins)
+    component_by_patch, members = _component_partition(patches, selection.joins)
+    layer_repulsion = sum(
+        penalty
+        for (first, second), penalty in (
+            layer_repulsion_penalties or {}
+        ).items()
+        if component_by_patch[first] == component_by_patch[second]
+    )
     largest = max((len(value) for value in members.values()), default=0)
-    adjusted = benefit + 2.0 * unmatched_trace_penalty * len(selection.joins)
+    adjusted = (
+        benefit
+        - layer_repulsion
+        + 2.0 * unmatched_trace_penalty * len(selection.joins)
+    )
     return adjusted, benefit, len(selection.joins), -len(members), largest
 
 
@@ -823,6 +1132,9 @@ def _exchange_sheet_neighborhoods(
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     initial: SurfaceJoinSelection,
     settings: SheetStitchingSettings,
+    incompatible_patch_pairs: frozenset[tuple[int, int]] = frozenset(),
+    stack_rank_by_patch: Mapping[int, int] | None = None,
+    layer_repulsion_penalties: Mapping[tuple[int, int], float] | None = None,
 ) -> tuple[SurfaceJoinSelection, tuple[dict[str, Any], ...], dict[str, Any]]:
     """Improve a graph by reopening complete current sheet components.
 
@@ -861,7 +1173,7 @@ def _exchange_sheet_neighborhoods(
                 if trace in selected_by_trace
             }
             displaced_benefit = sum(
-                value.benefit + retained_join_reward
+                value.objective_benefit + retained_join_reward
                 for value in displaced.values()
             )
             first_component = component_by_patch[candidate.match.first_patch_id]
@@ -872,12 +1184,12 @@ def _exchange_sheet_neighborhoods(
             )
             opportunities.append(
                 (
-                    candidate.benefit
+                    candidate.objective_benefit
                     + retained_join_reward
                     - displaced_benefit,
                     len(displaced),
                     bridge,
-                    candidate.benefit,
+                    candidate.objective_benefit,
                     active_size,
                     candidate.key,
                     candidate,
@@ -969,7 +1281,8 @@ def _exchange_sheet_neighborhoods(
             universe.update({value.key: value.match for value in internal})
             fixed = frozenset(join_key(value) for value in outside)
             priorities = {
-                key: candidate_by_key[key].benefit + retained_join_reward
+                key: candidate_by_key[key].objective_benefit
+                + retained_join_reward
                 for key in universe
             }
             maximum_priority = max(priorities.values(), default=0.0)
@@ -979,6 +1292,8 @@ def _exchange_sheet_neighborhoods(
                 tuple(universe.values()),
                 fixed_join_keys=fixed,
                 candidate_priorities=priorities,
+                incompatible_patch_pairs=incompatible_patch_pairs,
+                stack_rank_by_patch=stack_rank_by_patch,
             )
             attempted_this_round += 1
             attempted_count += 1
@@ -987,12 +1302,14 @@ def _exchange_sheet_neighborhoods(
                 block.patches,
                 candidate_by_key,
                 settings.unmatched_trace_penalty,
+                layer_repulsion_penalties,
             )
             after_quality = _selection_quality(
                 proposal,
                 block.patches,
                 candidate_by_key,
                 settings.unmatched_trace_penalty,
+                layer_repulsion_penalties,
             )
             focal_retained = focal.key in {
                 join_key(value) for value in proposal.joins
@@ -1010,6 +1327,9 @@ def _exchange_sheet_neighborhoods(
                     "faceAnchorXYZ": list(focal.match.face.anchor_xyz),
                     "family": focal.family,
                     "benefit": round(focal.benefit, 6),
+                    "partitionBenefit": round(
+                        focal.objective_benefit, 6
+                    ),
                     "occupiedReplacementPressure": round(pressure, 6),
                 },
                 "activeComponents": len(active_components),
@@ -1087,6 +1407,8 @@ def _curvature_refine_selection(
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     initial: SurfaceJoinSelection,
     settings: SheetStitchingSettings,
+    incompatible_patch_pairs: frozenset[tuple[int, int]] = frozenset(),
+    stack_rank_by_patch: Mapping[int, int] | None = None,
 ) -> tuple[
     SurfaceJoinSelection,
     SheetCurvatureAnalysis,
@@ -1160,7 +1482,7 @@ def _curvature_refine_selection(
                 pressure = analysis_by_key[candidate.key].pressure
                 curvature_excess = max(pressure - 1.0, 0.0)
                 preservation = max(
-                    candidate.benefit + retained_join_reward,
+                    candidate.objective_benefit + retained_join_reward,
                     1.0e-6,
                 )
                 capacities[candidate.key] = preservation / (
@@ -1225,7 +1547,7 @@ def _curvature_refine_selection(
             direct_pressure = direct_degrees / max(direct_limit, 1.0e-6)
             curvature_excess = max(direct_pressure - 1.0, 0.0)
             priorities[key] = (
-                max(candidate.benefit + retained_join_reward, 1.0e-6)
+                max(candidate.objective_benefit + retained_join_reward, 1.0e-6)
                 / (
                     1.0
                     + settings.curvature_cut_penalty_weight
@@ -1237,6 +1559,8 @@ def _curvature_refine_selection(
             tuple(universe.values()),
             fixed_join_keys=safe_keys,
             candidate_priorities=priorities,
+            incompatible_patch_pairs=incompatible_patch_pairs,
+            stack_rank_by_patch=stack_rank_by_patch,
         )
         cut_analysis = _analyze_selection_curvature(
             block.patches,
@@ -1353,6 +1677,182 @@ def _gap_census(
     return dict(sorted(result.items()))
 
 
+def _compile_layer_partition_constraints(
+    block: SurfaceBlock,
+    settings: SheetStitchingSettings,
+) -> tuple[tuple[LayerExclusion, ...], float, dict[str, Any]]:
+    if not settings.layer_partition_enabled:
+        return tuple(), 0.0, {"enabled": False}
+    configured_limit = settings.layer_exclusion_maximum_normal_angle_degrees
+    calibration_record: dict[str, Any]
+    if configured_limit > 0.0:
+        normal_limit = configured_limit
+        calibration_record = {
+            "source": "configured",
+            "maximumNormalAngleDegrees": round(normal_limit, 6),
+        }
+    else:
+        curvature = _analyze_selection_curvature(
+            block.patches,
+            SurfaceJoinSelection(tuple(block.joins), tuple()),
+            settings,
+        )
+        if curvature.calibration_sufficient:
+            normal_limit = curvature.direct_scale.upper_limit_degrees
+            source = "robust retained-join calibration"
+        else:
+            normal_limit = 30.0
+            source = "insufficient-calibration fallback"
+        calibration_record = {
+            "source": source,
+            "maximumNormalAngleDegrees": round(normal_limit, 6),
+            "calibrationSufficient": curvature.calibration_sufficient,
+            "directBendScale": curvature.direct_scale.record(),
+        }
+    exclusions = enumerate_layer_exclusions(
+        block.patches,
+        cell_size_xyz=block.grid.cell_size_xyz,
+        maximum_parallel_normal_angle_degrees=normal_limit,
+        proximity_radius_cells=(
+            settings.layer_exclusion_proximity_radius_cells
+        ),
+        minimum_overlap_fraction=(
+            settings.layer_exclusion_minimum_overlap_fraction
+        ),
+        minimum_normal_separation_cells=(
+            settings.layer_exclusion_minimum_normal_separation_cells
+        ),
+    )
+    return exclusions, normal_limit, {
+        "enabled": True,
+        "normalCalibration": calibration_record,
+        "candidateExclusions": len(exclusions),
+        "sameCellExclusions": sum(
+            value.cell_delta_xyz == (0, 0, 0) for value in exclusions
+        ),
+        "crossCellExclusions": sum(
+            value.cell_delta_xyz != (0, 0, 0) for value in exclusions
+        ),
+    }
+
+
+def _compile_signed_layer_repulsions(
+    block: SurfaceBlock,
+    settings: SheetStitchingSettings,
+    maximum_parallel_normal_angle_degrees: float,
+    automatic_scale: float,
+) -> tuple[
+    tuple[LayerExclusion, ...],
+    dict[tuple[int, int], float],
+    dict[str, Any],
+]:
+    if not (
+        settings.layer_partition_enabled
+        and settings.signed_partition_enabled
+    ):
+        return tuple(), {}, {"enabled": False}
+    repulsions = enumerate_layer_exclusions(
+        block.patches,
+        cell_size_xyz=block.grid.cell_size_xyz,
+        maximum_parallel_normal_angle_degrees=(
+            maximum_parallel_normal_angle_degrees
+        ),
+        proximity_radius_cells=(
+            settings.layer_exclusion_proximity_radius_cells
+        ),
+        minimum_overlap_fraction=(
+            settings.layer_repulsion_minimum_overlap_fraction
+        ),
+        minimum_normal_separation_cells=(
+            settings.layer_repulsion_minimum_normal_separation_cells
+        ),
+    )
+    scale = settings.layer_repulsion_scale or automatic_scale
+    penalties = {
+        value.pair: scale * value.severity for value in repulsions
+    }
+    return repulsions, penalties, {
+        "enabled": True,
+        "semantics": (
+            "soft lifted evidence that two nodes occupy distinct local layers"
+        ),
+        "repulsions": len(repulsions),
+        "scale": round(scale, 6),
+        "scaleSource": (
+            "configured"
+            if settings.layer_repulsion_scale > 0.0
+            else "one unmatched-trace negative log likelihood"
+        ),
+        "minimumOverlapFraction": (
+            settings.layer_repulsion_minimum_overlap_fraction
+        ),
+        "minimumNormalSeparationCells": (
+            settings.layer_repulsion_minimum_normal_separation_cells
+        ),
+        "totalPenalty": round(sum(penalties.values()), 6),
+    }
+
+
+def _signed_partition_proposal(
+    block: SurfaceBlock,
+    candidates: tuple[SheetJoinCandidate, ...],
+    layer_repulsion_penalties: Mapping[tuple[int, int], float],
+    incompatible_patch_pairs: frozenset[tuple[int, int]],
+) -> tuple[SurfaceJoinSelection, SignedPartition, dict[str, Any]]:
+    by_cell: dict[Int3, list[int]] = defaultdict(list)
+    for patch in block.patches:
+        by_cell[patch.cell_xyz].append(patch.patch_id)
+    same_cell_pairs = tuple(
+        (first, second)
+        for values in by_cell.values()
+        for index, first in enumerate(values)
+        for second in values[index + 1 :]
+    )
+    hard_pairs = tuple(same_cell_pairs) + tuple(incompatible_patch_pairs)
+    partition = signed_graph_partition(
+        (value.patch_id for value in block.patches),
+        (
+            SignedEdge(
+                value.match.first_patch_id,
+                value.match.second_patch_id,
+                value.benefit,
+            )
+            for value in candidates
+        ),
+        (
+            SignedEdge(first, second, penalty)
+            for (first, second), penalty in layer_repulsion_penalties.items()
+        ),
+        hard_separate_pairs=hard_pairs,
+    )
+    allowed = tuple(
+        value
+        for value in candidates
+        if partition.component_by_node[value.match.first_patch_id]
+        == partition.component_by_node[value.match.second_patch_id]
+    )
+    selection = select_surface_joins(
+        block.patches,
+        (value.match for value in allowed),
+        candidate_priorities={value.key: value.benefit for value in allowed},
+        incompatible_patch_pairs=incompatible_patch_pairs,
+    )
+    return selection, partition, {
+        **partition.record(),
+        "sameCellHardSeparations": len(same_cell_pairs),
+        "liftedLayerHardSeparations": len(incompatible_patch_pairs),
+        "allowedContinuationCandidates": len(allowed),
+        "topologySafeJoins": len(selection.joins),
+        "topologyDeferredByReason": dict(
+            sorted(
+                Counter(
+                    value.reason for value in selection.deferred_joins
+                ).items()
+            )
+        ),
+    }
+
+
 def restitch_sheet_graph(
     block: SurfaceBlock,
     catalog: SheetJoinCatalog,
@@ -1363,34 +1863,112 @@ def restitch_sheet_graph(
     """Rebuild and then non-monotonically exchange whole sheet neighborhoods."""
 
     resolved = settings or SheetStitchingSettings()
+    face_partition_statistics: dict[str, Any] = {"enabled": False}
+    if resolved.layer_partition_enabled:
+        catalog, face_partition_statistics = contextualize_sheet_join_catalog(
+            catalog
+        )
     by_key = catalog.by_key()
-    eligible = tuple(
+    raw_eligible = tuple(
         value
         for value in catalog.candidates
         if value.benefit > resolved.minimum_join_benefit
     )
+    eligible = tuple(
+        value
+        for value in catalog.candidates
+        if value.objective_benefit > resolved.minimum_join_benefit
+    )
     if not eligible:
         raise ValueError("sheet join catalog contains no positive-benefit candidates")
+    (
+        layer_exclusions,
+        layer_normal_limit,
+        layer_partition_statistics,
+    ) = _compile_layer_partition_constraints(block, resolved)
+    incompatible_patch_pairs = frozenset(
+        value.pair for value in layer_exclusions
+    )
+    (
+        layer_repulsions,
+        layer_repulsion_penalties,
+        signed_partition_statistics,
+    ) = _compile_signed_layer_repulsions(
+        block,
+        resolved,
+        layer_normal_limit,
+        policy.strict_settings.unmatched_negative_log_likelihood,
+    )
+    stack_rank_by_patch: Mapping[int, int] | None = None
+    if resolved.layer_partition_enabled and resolved.stack_transport_enabled:
+        _, stack_rank_by_patch = patch_stack_ranks(block.patches)
     degree: Counter[TraceKey] = Counter(
         trace for value in eligible for trace in value.trace_keys
     )
     retained_join_reward = 2.0 * resolved.unmatched_trace_penalty
     face_optimal = _face_optimal_candidate_keys(eligible, retained_join_reward)
     priority_span = max(
-        (value.benefit + retained_join_reward for value in eligible),
+        (value.objective_benefit + retained_join_reward for value in eligible),
         default=1.0,
     )
     interior_endpoint_count = (
         2 * len(block.joins) + len(block.unresolved_interior_traces)
     )
     proposals: list[tuple[SurfaceJoinSelection, dict[str, Any]]] = []
-    declared = SurfaceJoinSelection(tuple(block.joins), tuple())
+    if signed_partition_statistics["enabled"]:
+        (
+            signed_selection,
+            _,
+            signed_proposal_statistics,
+        ) = _signed_partition_proposal(
+            block,
+            raw_eligible,
+            layer_repulsion_penalties,
+            incompatible_patch_pairs,
+        )
+        proposals.append(
+            (
+                signed_selection,
+                {
+                    "proposalIndex": -3,
+                    "proposal": "signed lifted component partition",
+                    "proposalDiagnostics": signed_proposal_statistics,
+                    **_selection_record(
+                        block.patches,
+                        signed_selection,
+                        by_key,
+                        policy.strict_settings.unmatched_negative_log_likelihood,
+                        interior_endpoint_count,
+                        resolved.unmatched_trace_penalty,
+                        layer_repulsion_penalties,
+                    ),
+                },
+            )
+        )
+    if incompatible_patch_pairs or stack_rank_by_patch is not None:
+        declared = select_surface_joins(
+            block.patches,
+            block.joins,
+            candidate_priorities={
+                join_key(value): by_key[join_key(value)].objective_benefit
+                + retained_join_reward
+                for value in block.joins
+            },
+            incompatible_patch_pairs=incompatible_patch_pairs,
+            stack_rank_by_patch=stack_rank_by_patch,
+        )
+        declared_name = (
+            "declared-input + lifted layer and stack-transport constraints"
+        )
+    else:
+        declared = SurfaceJoinSelection(tuple(block.joins), tuple())
+        declared_name = "declared-topology-safe-input"
     proposals.append(
         (
             declared,
             {
                 "proposalIndex": -1,
-                "proposal": "declared-topology-safe-input",
+                "proposal": declared_name,
                 **_selection_record(
                     block.patches,
                     declared,
@@ -1398,13 +1976,15 @@ def restitch_sheet_graph(
                     policy.strict_settings.unmatched_negative_log_likelihood,
                     interior_endpoint_count,
                     resolved.unmatched_trace_penalty,
+                    layer_repulsion_penalties,
                 ),
             },
         )
     )
     if resolved.collision_cut_enabled:
         objective_priorities = {
-            value.key: value.benefit + retained_join_reward for value in eligible
+            value.key: value.objective_benefit + retained_join_reward
+            for value in eligible
         }
         if resolved.collision_cut_order == "forward":
             cut_orders = (False,)
@@ -1420,6 +2000,8 @@ def restitch_sheet_graph(
                 objective_priorities,
                 maximum_cuts=resolved.collision_cut_limit,
                 reverse=reverse,
+                layer_exclusions=layer_exclusions,
+                stack_rank_by_patch=stack_rank_by_patch,
             )
             order_name = "reverse" if reverse else "forward"
             proposals.append(
@@ -1439,6 +2021,7 @@ def restitch_sheet_graph(
                             policy.strict_settings.unmatched_negative_log_likelihood,
                             interior_endpoint_count,
                             resolved.unmatched_trace_penalty,
+                            layer_repulsion_penalties,
                         ),
                     },
                 )
@@ -1446,7 +2029,9 @@ def restitch_sheet_graph(
     for restart in range(resolved.restart_count):
         priorities: dict[JoinKey, float] = {}
         for candidate in eligible:
-            objective_benefit = candidate.benefit + retained_join_reward
+            objective_benefit = (
+                candidate.objective_benefit + retained_join_reward
+            )
             if restart == 0:
                 priority = objective_benefit
                 proposal = "join-benefit"
@@ -1491,6 +2076,8 @@ def restitch_sheet_graph(
             block.patches,
             (value.match for value in eligible),
             candidate_priorities=priorities,
+            incompatible_patch_pairs=incompatible_patch_pairs,
+            stack_rank_by_patch=stack_rank_by_patch,
         )
         record = {
             "proposalIndex": restart,
@@ -1502,6 +2089,7 @@ def restitch_sheet_graph(
                 policy.strict_settings.unmatched_negative_log_likelihood,
                 interior_endpoint_count,
                 resolved.unmatched_trace_penalty,
+                layer_repulsion_penalties,
             ),
         }
         proposals.append((selection, record))
@@ -1510,6 +2098,7 @@ def restitch_sheet_graph(
         by_key,
         policy.strict_settings.unmatched_negative_log_likelihood,
         resolved.unmatched_trace_penalty,
+        layer_repulsion_penalties,
     )
     best_selection, best_record = min(
         proposals,
@@ -1520,12 +2109,23 @@ def restitch_sheet_graph(
             int(value[1]["proposalIndex"]),
         ),
     )
+    refinement_candidates = (
+        raw_eligible
+        if best_record["proposal"] == "signed lifted component partition"
+        else eligible
+    )
+    refinement_incompatible_pairs = (
+        incompatible_patch_pairs
+    )
     exchanged, exchange_records, exchange_statistics = _exchange_sheet_neighborhoods(
         block,
-        eligible,
+        refinement_candidates,
         by_key,
         best_selection,
         resolved,
+        refinement_incompatible_pairs,
+        stack_rank_by_patch,
+        layer_repulsion_penalties,
     )
     exchanged_record = {
         "proposalIndex": int(best_record["proposalIndex"]),
@@ -1537,6 +2137,7 @@ def restitch_sheet_graph(
             policy.strict_settings.unmatched_negative_log_likelihood,
             interior_endpoint_count,
             resolved.unmatched_trace_penalty,
+            layer_repulsion_penalties,
         ),
     }
     if resolved.curvature_refinement_enabled:
@@ -1547,10 +2148,12 @@ def restitch_sheet_graph(
             curvature_statistics,
         ) = _curvature_refine_selection(
             block,
-            eligible,
+            refinement_candidates,
             by_key,
             exchanged,
             resolved,
+            refinement_incompatible_pairs,
+            stack_rank_by_patch,
         )
         final_selection = refined
         final_record = {
@@ -1566,6 +2169,7 @@ def restitch_sheet_graph(
                 policy.strict_settings.unmatched_negative_log_likelihood,
                 interior_endpoint_count,
                 resolved.unmatched_trace_penalty,
+                layer_repulsion_penalties,
             ),
         }
         curvature_summary = {
@@ -1586,6 +2190,66 @@ def restitch_sheet_graph(
         block.patches,
         final_selection.joins,
     )
+    if resolved.layer_partition_enabled:
+        before_lamination = analyze_sheet_lamination(
+            block.patches,
+            block.joins,
+            cell_size_xyz=block.grid.cell_size_xyz,
+            maximum_parallel_normal_angle_degrees=layer_normal_limit,
+            proximity_radius_cells=(
+                resolved.layer_exclusion_proximity_radius_cells
+            ),
+            minimum_overlap_fraction=(
+                resolved.layer_exclusion_minimum_overlap_fraction
+            ),
+            minimum_normal_separation_cells=(
+                resolved.layer_exclusion_minimum_normal_separation_cells
+            ),
+            exclusions=layer_exclusions,
+        )
+        after_lamination = analyze_sheet_lamination(
+            block.patches,
+            final_selection.joins,
+            cell_size_xyz=block.grid.cell_size_xyz,
+            maximum_parallel_normal_angle_degrees=layer_normal_limit,
+            proximity_radius_cells=(
+                resolved.layer_exclusion_proximity_radius_cells
+            ),
+            minimum_overlap_fraction=(
+                resolved.layer_exclusion_minimum_overlap_fraction
+            ),
+            minimum_normal_separation_cells=(
+                resolved.layer_exclusion_minimum_normal_separation_cells
+            ),
+            exclusions=layer_exclusions,
+        )
+        layer_partition_summary = {
+            **layer_partition_statistics,
+            "before": before_lamination.record(),
+            "after": after_lamination.record(),
+        }
+    else:
+        layer_partition_summary = layer_partition_statistics
+    stack_transport_summary = {
+        "enabled": stack_rank_by_patch is not None,
+        "rankSemantics": (
+            "height-ordered selected Acus sheetlets within each cell"
+            if stack_rank_by_patch is not None
+            else None
+        ),
+        "inputJoinsRejectedForNonzeroHolonomy": sum(
+            value.reason == "stack-transport-cycle"
+            for value in declared.deferred_joins
+        ),
+        "acceptedGraphNonzeroHolonomy": (
+            0 if stack_rank_by_patch is not None else None
+        ),
+        "constraint": (
+            "all sheet components share one integer cell gauge"
+            if stack_rank_by_patch is not None
+            else None
+        ),
+    }
     summary = {
         "baseline": {
             **baseline,
@@ -1602,6 +2266,10 @@ def restitch_sheet_graph(
             "trials": list(exchange_records),
         },
         "sheetCurvatureRefinement": curvature_summary,
+        "orderedFacePartition": face_partition_statistics,
+        "stackTransport": stack_transport_summary,
+        "signedLayerRepulsion": signed_partition_statistics,
+        "sheetletLayerPartition": layer_partition_summary,
         "delta": {
             key: round(float(final_record[key]) - float(baseline[key]), 6)
             for key in (
@@ -1611,6 +2279,8 @@ def restitch_sheet_graph(
                 "unresolvedInteriorTraceEndpoints",
                 "retainedInteriorTraceFraction",
                 "totalJoinBenefit",
+                "totalPartitionBenefit",
+                "totalLayerRepulsion",
                 "topologyObjective",
                 "objectiveCostWithoutConstant",
             )
@@ -1618,8 +2288,12 @@ def restitch_sheet_graph(
     }
     return SheetRestitchResult(
         best_block,
+        catalog,
         summary,
         tuple(value for _, value in proposals),
+        layer_exclusions,
+        layer_repulsions,
+        layer_repulsion_penalties,
     )
 
 
@@ -1662,6 +2336,25 @@ def _write_catalog(
             ),
             benefit=np.asarray(
                 [value.benefit for value in catalog.candidates], dtype=np.float32
+            ),
+            faceProbability=np.asarray(
+                [value.face_probability for value in catalog.candidates],
+                dtype=np.float32,
+            ),
+            faceRegret=np.asarray(
+                [value.face_regret for value in catalog.candidates],
+                dtype=np.float32,
+            ),
+            partitionBenefit=np.asarray(
+                [
+                    (
+                        value.partition_benefit
+                        if value.partition_benefit is not None
+                        else math.nan
+                    )
+                    for value in catalog.candidates
+                ],
+                dtype=np.float32,
             ),
             currentlyRetained=np.asarray(
                 [value.currently_retained for value in catalog.candidates],
@@ -1721,6 +2414,14 @@ def _write_join_selection(
                 [by_key[join_key(value)].benefit for value in joins],
                 dtype=np.float32,
             ),
+            catalogPartitionBenefit=np.asarray(
+                [by_key[join_key(value)].objective_benefit for value in joins],
+                dtype=np.float32,
+            ),
+            faceProbability=np.asarray(
+                [by_key[join_key(value)].face_probability for value in joins],
+                dtype=np.float32,
+            ),
         )
     temporary.replace(path)
     return {
@@ -1728,6 +2429,207 @@ def _write_join_selection(
         "bytes": path.stat().st_size,
         "sha256": sha256_file(path),
     }
+
+
+def _write_typed_sheetlet_graph(
+    output: Path,
+    block: SurfaceBlock,
+    catalog: SheetJoinCatalog,
+    exclusions: tuple[LayerExclusion, ...],
+    repulsions: tuple[LayerExclusion, ...],
+    repulsion_penalties: Mapping[tuple[int, int], float],
+    *,
+    identity_sha256: str,
+) -> dict[str, Any]:
+    """Persist fixed active nodes plus attractive and repulsive typed edges."""
+
+    path = output / f"{SHEETLET_GRAPH_STEM}.npz"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    patches = tuple(sorted(block.patches, key=lambda value: value.patch_id))
+    candidates = catalog.candidates
+    fiber_values = np.full((len(patches), 3), np.nan, dtype=np.float32)
+    for index, patch in enumerate(patches):
+        if patch.estimate.fiber_xyz is not None:
+            fiber_values[index] = np.asarray(
+                patch.estimate.fiber_xyz, dtype=np.float32
+            )
+    with temporary.open("wb") as handle:
+        np.savez_compressed(
+            handle,
+            nodePatchId=np.asarray(
+                [value.patch_id for value in patches], dtype=np.uint64
+            ),
+            nodeCellXYZ=np.asarray(
+                [value.cell_xyz for value in patches], dtype=np.int32
+            ).reshape(len(patches), 3),
+            nodeNormalXYZ=np.asarray(
+                [value.estimate.normal_xyz for value in patches],
+                dtype=np.float32,
+            ).reshape(len(patches), 3),
+            nodeFiberXYZ=fiber_values,
+            nodeHeight=np.asarray(
+                [value.estimate.height_from_cell_center for value in patches],
+                dtype=np.float32,
+            ),
+            nodeConfidence=np.asarray(
+                [value.estimate.confidence for value in patches],
+                dtype=np.float32,
+            ),
+            continuationFirstPatchId=np.asarray(
+                [value.match.first_patch_id for value in candidates],
+                dtype=np.uint64,
+            ),
+            continuationSecondPatchId=np.asarray(
+                [value.match.second_patch_id for value in candidates],
+                dtype=np.uint64,
+            ),
+            continuationFaceAxis=np.asarray(
+                [value.match.face.axis for value in candidates], dtype=np.int8
+            ),
+            continuationFaceAnchorXYZ=np.asarray(
+                [value.match.face.anchor_xyz for value in candidates],
+                dtype=np.int32,
+            ).reshape(len(candidates), 3),
+            continuationFamily=np.asarray(
+                [value.family == "quarter-turn" for value in candidates],
+                dtype=np.uint8,
+            ),
+            continuationBenefit=np.asarray(
+                [value.benefit for value in candidates], dtype=np.float32
+            ),
+            continuationPartitionBenefit=np.asarray(
+                [value.objective_benefit for value in candidates],
+                dtype=np.float32,
+            ),
+            continuationFaceProbability=np.asarray(
+                [value.face_probability for value in candidates],
+                dtype=np.float32,
+            ),
+            continuationFaceRegret=np.asarray(
+                [value.face_regret for value in candidates],
+                dtype=np.float32,
+            ),
+            continuationNegativeLogLikelihood=np.asarray(
+                [
+                    value.match.negative_log_likelihood
+                    for value in candidates
+                ],
+                dtype=np.float32,
+            ),
+            continuationNormalAngleDegrees=np.asarray(
+                [
+                    math.degrees(value.match.normal_angle_radians)
+                    for value in candidates
+                ],
+                dtype=np.float32,
+            ),
+            continuationFiberAngleDegrees=np.asarray(
+                [
+                    (
+                        math.degrees(value.match.fiber_angle_radians)
+                        if value.match.fiber_angle_radians is not None
+                        else math.nan
+                    )
+                    for value in candidates
+                ],
+                dtype=np.float32,
+            ),
+            exclusionFirstPatchId=np.asarray(
+                [value.first_patch_id for value in exclusions], dtype=np.uint64
+            ),
+            exclusionSecondPatchId=np.asarray(
+                [value.second_patch_id for value in exclusions], dtype=np.uint64
+            ),
+            exclusionReferenceNormalXYZ=np.asarray(
+                [value.reference_normal_xyz for value in exclusions],
+                dtype=np.float32,
+            ).reshape(len(exclusions), 3),
+            exclusionCellDeltaXYZ=np.asarray(
+                [value.cell_delta_xyz for value in exclusions], dtype=np.int16
+            ).reshape(len(exclusions), 3),
+            exclusionOverlapFraction=np.asarray(
+                [value.overlap_fraction for value in exclusions],
+                dtype=np.float32,
+            ),
+            exclusionNormalSeparationCells=np.asarray(
+                [value.normal_separation_cells for value in exclusions],
+                dtype=np.float32,
+            ),
+            exclusionNormalAngleDegrees=np.asarray(
+                [value.normal_angle_degrees for value in exclusions],
+                dtype=np.float32,
+            ),
+            exclusionFiberAngleDegrees=np.asarray(
+                [
+                    (
+                        value.fiber_angle_degrees
+                        if value.fiber_angle_degrees is not None
+                        else math.nan
+                    )
+                    for value in exclusions
+                ],
+                dtype=np.float32,
+            ),
+            exclusionSeverity=np.asarray(
+                [value.severity for value in exclusions], dtype=np.float32
+            ),
+            repulsionFirstPatchId=np.asarray(
+                [value.first_patch_id for value in repulsions], dtype=np.uint64
+            ),
+            repulsionSecondPatchId=np.asarray(
+                [value.second_patch_id for value in repulsions], dtype=np.uint64
+            ),
+            repulsionCellDeltaXYZ=np.asarray(
+                [value.cell_delta_xyz for value in repulsions], dtype=np.int16
+            ).reshape(len(repulsions), 3),
+            repulsionOverlapFraction=np.asarray(
+                [value.overlap_fraction for value in repulsions],
+                dtype=np.float32,
+            ),
+            repulsionNormalSeparationCells=np.asarray(
+                [value.normal_separation_cells for value in repulsions],
+                dtype=np.float32,
+            ),
+            repulsionWeight=np.asarray(
+                [repulsion_penalties[value.pair] for value in repulsions],
+                dtype=np.float32,
+            ),
+        )
+    temporary.replace(path)
+    manifest = {
+        "schema": SHEETLET_GRAPH_SCHEMA,
+        "version": SHEETLET_GRAPH_VERSION,
+        "state": "complete",
+        "identitySha256": identity_sha256,
+        "nodeSemantics": "fixed active Acus sheetlet candidate",
+        "edgeTypes": {
+            "continuation": (
+                "attractive shared-face same-surface hypothesis with "
+                "raw pair likelihood and exact ordered-stack marginal"
+            ),
+            "exclusion": (
+                "repulsive lifted pair that cannot share one local surface "
+                "chart"
+            ),
+            "repulsion": (
+                "soft lifted distinct-layer evidence charged once when both "
+                "nodes enter one component"
+            ),
+        },
+        "counts": {
+            "nodes": len(patches),
+            "continuationEdges": len(candidates),
+            "exclusionEdges": len(exclusions),
+            "repulsionEdges": len(repulsions),
+        },
+        "data": {
+            "path": path.name,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        },
+    }
+    atomic_json(output / f"{SHEETLET_GRAPH_STEM}.json", manifest)
+    return manifest
 
 
 def run_block_sheet_restitching(
@@ -1776,6 +2678,10 @@ def run_block_sheet_restitching(
             for name in (
                 "sheet_stitching.py",
                 "sheet_curvature.py",
+                "sheet_lamination.py",
+                "sheet_stack.py",
+                "sheet_signed_graph.py",
+                "sheet_transport.py",
                 "block.py",
                 "matching.py",
                 "surface_graph.py",
@@ -1807,11 +2713,6 @@ def run_block_sheet_restitching(
         policy,
         settings=resolved,
     )
-    catalog_manifest = _write_catalog(
-        output,
-        catalog,
-        identity_sha256=identity_sha256,
-    )
     cataloged = time.monotonic()
     manifest["state"] = "solving"
     atomic_json(manifest_path, manifest)
@@ -1822,7 +2723,23 @@ def run_block_sheet_restitching(
         settings=resolved,
     )
     solved = time.monotonic()
-    selection = _write_join_selection(output, result.block, catalog.by_key())
+    catalog_manifest = _write_catalog(
+        output,
+        result.catalog,
+        identity_sha256=identity_sha256,
+    )
+    typed_graph_manifest = _write_typed_sheetlet_graph(
+        output,
+        block,
+        result.catalog,
+        result.layer_exclusions,
+        result.layer_repulsions,
+        result.layer_repulsion_penalties,
+        identity_sha256=identity_sha256,
+    )
+    selection = _write_join_selection(
+        output, result.block, result.catalog.by_key()
+    )
     for name in ("selected-patches-v1.json", "selected-patches-v1.npz"):
         source_path = materialized / name
         target_path = output / name
@@ -1837,6 +2754,7 @@ def run_block_sheet_restitching(
             "catalog, dense collision-cut segmentation, exact topology "
             "validation, whole-sheet neighborhood exchanges, and optional "
             "axial curvature-aware hinge refinement"
+            ", and optional lifted layer-exclusion partitioning"
         ),
         provenance={
             "inputRoot": str(materialized),
@@ -1861,14 +2779,18 @@ def run_block_sheet_restitching(
                 "exact per-face alignment, minimum-cost segmentation of dense "
                 "same-cell collision components, whole-block deterministic "
                 "proposals, non-monotone whole-sheet neighborhood exchanges, "
-                "and optional robust curvature cuts with exact open-trace refill"
+                "optional robust curvature cuts with exact open-trace refill, "
+                "exact ordered-face marginalization, and optional lifted "
+                "attractive/repulsive graph partitioning"
             ),
             "hardConstraints": [
                 "one join per patch trace",
                 "order-preserving face correspondences",
+                "path-independent integer transport of the full cell stack",
                 "one patch per sheet component per cell",
                 "crossing-feature consistency",
                 "orientable polygon parity",
+                "optional transitive layer-exclusion pairs",
             ],
             "mutatesAcusGeometry": False,
             "materializesGraph": True,
@@ -1879,6 +2801,11 @@ def run_block_sheet_restitching(
         "artifacts": {
             "candidateManifest": f"{SHEET_JOIN_CATALOG_STEM}.json",
             "candidateData": catalog_manifest["data"],
+            "typedSheetletGraph": {
+                "manifest": f"{SHEETLET_GRAPH_STEM}.json",
+                "data": typed_graph_manifest["data"],
+                "counts": typed_graph_manifest["counts"],
+            },
             "selectedJoins": selection,
             "selectedPatches": {
                 "manifest": "selected-patches-v1.json",
