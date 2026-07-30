@@ -24,6 +24,15 @@ from .boundary_reselection import (
 )
 from .cluster_reselection import run_boundary_cluster_reselection
 from .cluster_materialization import run_cluster_materialization
+from .cell_refinement import (
+    CellRefinementSettings,
+    run_cell_refinement_diagnostic,
+)
+from .cell_refinement_variant import run_cell_refinement_materialization
+from .cell_refinement_targets import (
+    CellRefinementTargetSettings,
+    run_cell_refinement_target_ranking,
+)
 from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
@@ -42,6 +51,26 @@ from .selection import configuration_options
 from .sheet_packets import (
     DualAxisPacketSettings,
     run_dual_axis_packet_connectivity,
+)
+from .sheet_evidence import (
+    SheetEvidenceInput,
+    SheetEvidenceSettings,
+    compile_block_sheet_evidence,
+)
+from .sheet_correspondence import catalog_block_sheet_correspondences
+from .sheet_factors import SheetFactorSettings, compile_sheet_configuration_factors
+from .sheet_configuration_solver import (
+    SheetConfigurationSolverSettings,
+    run_sheet_configuration_initialization,
+)
+from .sheet_graph_solver import replay_joint_sheet_graph
+from .sheet_topology_refinement import (
+    SheetTopologyRefinementSettings,
+    run_sheet_topology_refinement,
+)
+from .sheet_stitching import (
+    SheetStitchingSettings,
+    run_block_sheet_restitching,
 )
 from .saturation import SheetSaturationSettings, run_sheet_saturation_audit
 from .saturation_reselection import (
@@ -573,6 +602,230 @@ def _materialize_boundary_cluster(args: argparse.Namespace) -> None:
         args.output,
         boundary_roots=args.boundary,
         force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _diagnose_cell_refinement(args: argparse.Namespace) -> None:
+    summary = run_cell_refinement_diagnostic(
+        args.cluster,
+        args.materialized,
+        args.output,
+        cell_xyz=tuple(args.cell),
+        component_id=args.component_id,
+        neighborhood_radius_cells=args.neighborhood_radius,
+        settings=CellRefinementSettings(
+            unary_scale=args.unary_scale,
+            pairwise_scale=args.pairwise_scale,
+            pairwise_reward_normalization=args.pairwise_reward_normalization,
+            unmatched_trace_penalty=args.unmatched_trace_penalty,
+            coverage_reward_scale=args.coverage_reward_scale,
+            minimum_oracle_coverage_fraction=(
+                args.minimum_oracle_coverage_fraction
+            ),
+            maximum_cell_utilization_drop=args.maximum_cell_utilization_drop,
+            minimum_evidence_mass_for_coverage_floor=(
+                args.minimum_evidence_mass_for_coverage_floor
+            ),
+            maximum_sweeps=args.maximum_sweeps,
+            maximum_pair_sweeps=args.maximum_pair_sweeps,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _materialize_cell_refinement(args: argparse.Namespace) -> None:
+    summary = run_cell_refinement_materialization(
+        args.cluster,
+        args.materialized,
+        args.diagnostic,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _rank_cell_refinement_targets(args: argparse.Namespace) -> None:
+    summary = run_cell_refinement_target_ranking(
+        args.cluster,
+        args.materialized,
+        args.output,
+        settings=CellRefinementTargetSettings(
+            neighborhood_radius_cells=args.neighborhood_radius,
+            maximum_targets=args.maximum_targets,
+            minimum_recoverable_evidence_mass=(
+                args.minimum_recoverable_evidence_mass
+            ),
+            minimum_incident_open_trace_endpoints=(
+                args.minimum_incident_open_trace_endpoints
+            ),
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _restitch_block_sheets(args: argparse.Namespace) -> None:
+    summary = run_block_sheet_restitching(
+        args.cluster,
+        args.materialized,
+        args.output,
+        settings=SheetStitchingSettings(
+            minimum_join_benefit=args.minimum_join_benefit,
+            quarter_turn_penalty=args.quarter_turn_penalty,
+            restart_count=args.restarts,
+            priority_jitter_fraction=args.priority_jitter_fraction,
+            exchange_round_count=args.exchange_rounds,
+            exchange_trials_per_round=args.exchange_trials_per_round,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _compile_sheet_evidence(args: argparse.Namespace) -> None:
+    inputs = tuple(
+        SheetEvidenceInput(
+            Path(value[0]),
+            tuple(int(coordinate) for coordinate in value[1:]),
+        )
+        for value in args.input
+    )
+    summary = compile_block_sheet_evidence(
+        inputs,
+        args.output,
+        settings=SheetEvidenceSettings(
+            clipping_tolerance_scale=args.clipping_tolerance_scale,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _catalog_sheet_correspondences(args: argparse.Namespace) -> None:
+    last_report = -1
+
+    def progress(completed: int, total: int) -> None:
+        nonlocal last_report
+        bucket = completed // 500
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(f"mode correspondences {completed:,}/{total:,}", flush=True)
+
+    summary = catalog_block_sheet_correspondences(
+        args.evidence,
+        args.cluster,
+        args.output,
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _compile_sheet_factors(args: argparse.Namespace) -> None:
+    last_report = -1
+
+    def progress(completed: int, total: int) -> None:
+        nonlocal last_report
+        bucket = completed // 500
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(f"configuration factors {completed:,}/{total:,}", flush=True)
+
+    summary = compile_sheet_configuration_factors(
+        args.evidence,
+        args.correspondences,
+        args.cluster,
+        args.output,
+        settings=SheetFactorSettings(
+            quarter_turn_penalty=args.quarter_turn_penalty,
+        ),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _initialize_sheet_configurations(args: argparse.Namespace) -> None:
+    summary = run_sheet_configuration_initialization(
+        args.evidence,
+        args.factors,
+        args.output,
+        initial_root=args.initial,
+        settings=SheetConfigurationSolverSettings(
+            unary_scale=args.unary_scale,
+            pairwise_scale=args.pairwise_scale,
+            coverage_reward_scale=args.coverage_reward_scale,
+            unmatched_trace_penalty=args.unmatched_trace_penalty,
+            pairwise_normalization=args.pairwise_normalization,
+            maximum_sweeps=args.maximum_sweeps,
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _replay_joint_sheet_graph(args: argparse.Namespace) -> None:
+    last_report = -1
+
+    def progress(completed: int, total: int) -> None:
+        nonlocal last_report
+        bucket = completed // 5000
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(f"active correspondences {completed:,}/{total:,}", flush=True)
+
+    summary = replay_joint_sheet_graph(
+        args.evidence,
+        args.correspondences,
+        args.configurations,
+        args.cluster,
+        args.output,
+        stitching_settings=SheetStitchingSettings(
+            minimum_join_benefit=args.minimum_join_benefit,
+            quarter_turn_penalty=args.quarter_turn_penalty,
+            restart_count=args.restarts,
+            priority_jitter_fraction=args.priority_jitter_fraction,
+            exchange_round_count=args.exchange_rounds,
+            exchange_trials_per_round=args.exchange_trials_per_round,
+        ),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _refine_sheet_topology(args: argparse.Namespace) -> None:
+    def progress(round_index: int, completed: int, total: int, label: str) -> None:
+        print(
+            f"topology round {round_index} · trial {completed:,}/{total:,} · {label}",
+            flush=True,
+        )
+
+    summary = run_sheet_topology_refinement(
+        args.evidence,
+        args.correspondences,
+        args.factors,
+        args.configurations,
+        args.graph,
+        args.cluster,
+        args.output,
+        settings=SheetTopologyRefinementSettings(
+            maximum_rounds=args.maximum_rounds,
+            maximum_trials_per_round=args.maximum_trials_per_round,
+            maximum_seed_moves=args.maximum_seed_moves,
+            alternatives_per_pressure_cell=(
+                args.alternatives_per_pressure_cell
+            ),
+            relaxation_radius=args.relaxation_radius,
+            relaxation_sweeps=args.relaxation_sweeps,
+            minimum_objective_gain=args.minimum_objective_gain,
+            minimum_join_benefit=args.minimum_join_benefit,
+            quarter_turn_penalty=args.quarter_turn_penalty,
+        ),
+        force=args.force,
+        progress=progress,
     )
     print(json.dumps(summary, indent=2))
 
@@ -1576,6 +1829,288 @@ def main() -> None:
     )
     cluster_materialization.add_argument("--force", action="store_true")
     cluster_materialization.set_defaults(handler=_materialize_boundary_cluster)
+    cell_refinement = subparsers.add_parser(
+        "diagnose-cell-refinement",
+        description=(
+            "Trace one materialized cell from Acus evidence through retained "
+            "physical candidates and face topology, then run bounded single-cell "
+            "and adjacent-pair refinement rounds without mutating the graph."
+        ),
+    )
+    cell_refinement.add_argument("--cluster", type=Path, required=True)
+    cell_refinement.add_argument("--materialized", type=Path, required=True)
+    cell_refinement.add_argument("--output", type=Path, required=True)
+    cell_refinement.add_argument("--cell", nargs=3, type=int, required=True)
+    cell_refinement.add_argument("--component-id", type=int)
+    cell_refinement.add_argument("--neighborhood-radius", type=int, default=1)
+    cell_refinement.add_argument("--unary-scale", type=float, default=1.0)
+    cell_refinement.add_argument("--pairwise-scale", type=float, default=0.2)
+    cell_refinement.add_argument(
+        "--pairwise-reward-normalization",
+        choices=("none", "trace-mean"),
+        default="trace-mean",
+    )
+    cell_refinement.add_argument(
+        "--unmatched-trace-penalty",
+        type=float,
+        help=(
+            "continuation cost per unmatched trace; defaults to pairwise scale "
+            "times the matcher unmatched likelihood"
+        ),
+    )
+    cell_refinement.add_argument(
+        "--coverage-reward-scale", type=float, default=0.5
+    )
+    cell_refinement.add_argument(
+        "--minimum-oracle-coverage-fraction", type=float, default=0.5
+    )
+    cell_refinement.add_argument(
+        "--maximum-cell-utilization-drop", type=float, default=0.05
+    )
+    cell_refinement.add_argument(
+        "--minimum-evidence-mass-for-coverage-floor", type=float, default=1.0
+    )
+    cell_refinement.add_argument("--maximum-sweeps", type=int, default=4)
+    cell_refinement.add_argument("--maximum-pair-sweeps", type=int, default=2)
+    cell_refinement.add_argument("--force", action="store_true")
+    cell_refinement.set_defaults(handler=_diagnose_cell_refinement)
+    cell_refinement_materialization = subparsers.add_parser(
+        "materialize-cell-refinement",
+        description=(
+            "Apply the accepted topology-safe changes from a cell diagnostic "
+            "and write a complete, reloadable retained-graph variant."
+        ),
+    )
+    cell_refinement_materialization.add_argument(
+        "--cluster", type=Path, required=True
+    )
+    cell_refinement_materialization.add_argument(
+        "--materialized", type=Path, required=True
+    )
+    cell_refinement_materialization.add_argument(
+        "--diagnostic", type=Path, required=True
+    )
+    cell_refinement_materialization.add_argument(
+        "--output", type=Path, required=True
+    )
+    cell_refinement_materialization.add_argument("--force", action="store_true")
+    cell_refinement_materialization.set_defaults(
+        handler=_materialize_cell_refinement
+    )
+    cell_refinement_targets = subparsers.add_parser(
+        "rank-cell-refinement-targets",
+        description=(
+            "Rank spatially separated refinement neighborhoods using independent "
+            "recoverable-Acus-evidence and unresolved-topology signals."
+        ),
+    )
+    cell_refinement_targets.add_argument("--cluster", type=Path, required=True)
+    cell_refinement_targets.add_argument(
+        "--materialized", type=Path, required=True
+    )
+    cell_refinement_targets.add_argument("--output", type=Path, required=True)
+    cell_refinement_targets.add_argument(
+        "--neighborhood-radius", type=int, default=1
+    )
+    cell_refinement_targets.add_argument("--maximum-targets", type=int, default=128)
+    cell_refinement_targets.add_argument(
+        "--minimum-recoverable-evidence-mass", type=float, default=1.0e-6
+    )
+    cell_refinement_targets.add_argument(
+        "--minimum-incident-open-trace-endpoints", type=int, default=1
+    )
+    cell_refinement_targets.add_argument("--force", action="store_true")
+    cell_refinement_targets.set_defaults(handler=_rank_cell_refinement_targets)
+    sheet_restitch = subparsers.add_parser(
+        "restitch-block-sheets",
+        description=(
+            "Enumerate every pair-gated selected-patch correspondence and "
+            "rebuild the complete sheet graph from multiple whole-block "
+            "topology-constrained proposals."
+        ),
+    )
+    sheet_restitch.add_argument("--cluster", type=Path, required=True)
+    sheet_restitch.add_argument("--materialized", type=Path, required=True)
+    sheet_restitch.add_argument("--output", type=Path, required=True)
+    sheet_restitch.add_argument(
+        "--minimum-join-benefit", type=float, default=0.0
+    )
+    sheet_restitch.add_argument(
+        "--quarter-turn-penalty", type=float, default=0.75
+    )
+    sheet_restitch.add_argument("--restarts", type=int, default=12)
+    sheet_restitch.add_argument(
+        "--priority-jitter-fraction", type=float, default=0.35
+    )
+    sheet_restitch.add_argument("--exchange-rounds", type=int, default=2)
+    sheet_restitch.add_argument(
+        "--exchange-trials-per-round", type=int, default=24
+    )
+    sheet_restitch.add_argument("--force", action="store_true")
+    sheet_restitch.set_defaults(handler=_restitch_block_sheets)
+    sheet_evidence = subparsers.add_parser(
+        "compile-sheet-evidence",
+        description=(
+            "Compile complete source-referenced Acus mode banks and physical "
+            "within-cell stack alternatives into one immutable block-level "
+            "sheet inference artifact. Each --input is ROOT OFFSET_X OFFSET_Y "
+            "OFFSET_Z in the output block grid."
+        ),
+    )
+    sheet_evidence.add_argument(
+        "--input",
+        nargs=4,
+        action="append",
+        required=True,
+        metavar=("ROOT", "OFFSET_X", "OFFSET_Y", "OFFSET_Z"),
+    )
+    sheet_evidence.add_argument("--output", type=Path, required=True)
+    sheet_evidence.add_argument(
+        "--clipping-tolerance-scale", type=float, default=1.0e-8
+    )
+    sheet_evidence.add_argument("--force", action="store_true")
+    sheet_evidence.set_defaults(handler=_compile_sheet_evidence)
+    sheet_correspondences = subparsers.add_parser(
+        "catalog-sheet-correspondences",
+        description=(
+            "Enumerate every pair-gated shared-face edge between immutable "
+            "Acus mode nodes without selecting configurations or alignments."
+        ),
+    )
+    sheet_correspondences.add_argument("--evidence", type=Path, required=True)
+    sheet_correspondences.add_argument("--cluster", type=Path, required=True)
+    sheet_correspondences.add_argument("--output", type=Path, required=True)
+    sheet_correspondences.add_argument("--force", action="store_true")
+    sheet_correspondences.set_defaults(handler=_catalog_sheet_correspondences)
+    sheet_factors = subparsers.add_parser(
+        "compile-sheet-factors",
+        description=(
+            "Compile exact order-preserving face factors for every neighboring "
+            "pair of physical Acus stack configurations."
+        ),
+    )
+    sheet_factors.add_argument("--evidence", type=Path, required=True)
+    sheet_factors.add_argument("--correspondences", type=Path, required=True)
+    sheet_factors.add_argument("--cluster", type=Path, required=True)
+    sheet_factors.add_argument("--output", type=Path, required=True)
+    sheet_factors.add_argument(
+        "--quarter-turn-penalty", type=float, default=0.75
+    )
+    sheet_factors.add_argument("--force", action="store_true")
+    sheet_factors.set_defaults(handler=_compile_sheet_factors)
+    sheet_configuration = subparsers.add_parser(
+        "initialize-sheet-configurations",
+        description=(
+            "Optimize the complete unary-plus-face factor graph as a reversible "
+            "configuration initialization. This is not a globally valid sheet "
+            "graph until topology replay."
+        ),
+    )
+    sheet_configuration.add_argument("--evidence", type=Path, required=True)
+    sheet_configuration.add_argument("--factors", type=Path, required=True)
+    sheet_configuration.add_argument("--initial", type=Path)
+    sheet_configuration.add_argument("--output", type=Path, required=True)
+    sheet_configuration.add_argument("--unary-scale", type=float, default=1.0)
+    sheet_configuration.add_argument("--pairwise-scale", type=float, default=0.2)
+    sheet_configuration.add_argument(
+        "--coverage-reward-scale", type=float, default=0.0
+    )
+    sheet_configuration.add_argument(
+        "--unmatched-trace-penalty", type=float, default=0.0
+    )
+    sheet_configuration.add_argument(
+        "--pairwise-normalization",
+        choices=("none", "trace-mean"),
+        default="none",
+    )
+    sheet_configuration.add_argument("--maximum-sweeps", type=int, default=12)
+    sheet_configuration.add_argument("--force", action="store_true")
+    sheet_configuration.set_defaults(handler=_initialize_sheet_configurations)
+    joint_sheet_graph = subparsers.add_parser(
+        "replay-joint-sheet-graph",
+        description=(
+            "Activate a complete physical stack selection, rebuild all available "
+            "mode edges, and enforce global sheet topology before materializing "
+            "a standard retained graph."
+        ),
+    )
+    joint_sheet_graph.add_argument("--evidence", type=Path, required=True)
+    joint_sheet_graph.add_argument("--correspondences", type=Path, required=True)
+    joint_sheet_graph.add_argument("--configurations", type=Path, required=True)
+    joint_sheet_graph.add_argument("--cluster", type=Path, required=True)
+    joint_sheet_graph.add_argument("--output", type=Path, required=True)
+    joint_sheet_graph.add_argument(
+        "--minimum-join-benefit", type=float, default=0.0
+    )
+    joint_sheet_graph.add_argument(
+        "--quarter-turn-penalty", type=float, default=0.75
+    )
+    joint_sheet_graph.add_argument("--restarts", type=int, default=4)
+    joint_sheet_graph.add_argument(
+        "--priority-jitter-fraction", type=float, default=0.35
+    )
+    joint_sheet_graph.add_argument("--exchange-rounds", type=int, default=2)
+    joint_sheet_graph.add_argument(
+        "--exchange-trials-per-round", type=int, default=24
+    )
+    joint_sheet_graph.add_argument("--force", action="store_true")
+    joint_sheet_graph.set_defaults(handler=_replay_joint_sheet_graph)
+    sheet_topology_refinement = subparsers.add_parser(
+        "refine-sheet-topology",
+        description=(
+            "Reopen complete Acus stack configurations in pressure-ranked "
+            "sheet neighborhoods and accept changes only against the exact "
+            "globally retained topology-safe graph."
+        ),
+    )
+    sheet_topology_refinement.add_argument(
+        "--evidence", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument(
+        "--correspondences", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument(
+        "--factors", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument(
+        "--configurations", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument("--graph", type=Path, required=True)
+    sheet_topology_refinement.add_argument(
+        "--cluster", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument(
+        "--output", type=Path, required=True
+    )
+    sheet_topology_refinement.add_argument(
+        "--maximum-rounds", type=int, default=2
+    )
+    sheet_topology_refinement.add_argument(
+        "--maximum-trials-per-round", type=int, default=36
+    )
+    sheet_topology_refinement.add_argument(
+        "--maximum-seed-moves", type=int, default=48
+    )
+    sheet_topology_refinement.add_argument(
+        "--alternatives-per-pressure-cell", type=int, default=3
+    )
+    sheet_topology_refinement.add_argument(
+        "--relaxation-radius", type=int, default=1
+    )
+    sheet_topology_refinement.add_argument(
+        "--relaxation-sweeps", type=int, default=3
+    )
+    sheet_topology_refinement.add_argument(
+        "--minimum-objective-gain", type=float, default=1.0e-6
+    )
+    sheet_topology_refinement.add_argument(
+        "--minimum-join-benefit", type=float, default=0.0
+    )
+    sheet_topology_refinement.add_argument(
+        "--quarter-turn-penalty", type=float, default=0.75
+    )
+    sheet_topology_refinement.add_argument("--force", action="store_true")
+    sheet_topology_refinement.set_defaults(handler=_refine_sheet_topology)
     selected_subblock = subparsers.add_parser(
         "extract-selected-subblock",
         description=(

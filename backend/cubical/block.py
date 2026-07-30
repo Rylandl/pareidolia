@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 
@@ -12,6 +12,7 @@ from .matching import (
     TraceMatch,
     TraceMatchSettings,
     align_face_patches,
+    face_patch_ranks,
     match_face_traces,
 )
 from .topology import Float3, GridEdge, GridFace, GridSpec, Int3, cell_face
@@ -92,6 +93,14 @@ class ComponentSummary:
 class DeferredJoin:
     match: TraceMatch
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceJoinSelection:
+    """A topology-safe retained edge set before mesh welding/materialization."""
+
+    joins: tuple[TraceMatch, ...]
+    deferred_joins: tuple[DeferredJoin, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +220,9 @@ def _select_consistent_joins(
     patches: tuple[ClippedPatch, ...],
     candidates: tuple[TraceMatch, ...],
     fixed_join_keys: frozenset[tuple[int, int, int, Int3]] = frozenset(),
+    candidate_priorities: Mapping[
+        tuple[int, int, int, Int3], float
+    ] | None = None,
 ) -> tuple[tuple[TraceMatch, ...], tuple[DeferredJoin, ...]]:
     patch_by_id = {value.patch_id: value for value in patches}
     patch_set = _DisjointSet(patch_by_id)
@@ -230,6 +242,46 @@ def _select_consistent_joins(
     crossing_owners: dict[object, dict[int, GridEdge]] = {
         value: {value[0]: value[1]} for value in observations
     }
+    patches_by_cell: dict[Int3, list[ClippedPatch]] = defaultdict(list)
+    for patch in patches:
+        patches_by_cell[patch.cell_xyz].append(patch)
+    used_traces: set[tuple[int, GridFace]] = set()
+    retained_face_ranks: dict[GridFace, list[tuple[int, int]]] = defaultdict(list)
+    face_rank_cache: dict[GridFace, tuple[dict[int, int], dict[int, int]]] = {}
+
+    def key(match: TraceMatch) -> tuple[int, int, int, Int3]:
+        return (
+            match.first_patch_id,
+            match.second_patch_id,
+            match.face.axis,
+            match.face.anchor_xyz,
+        )
+
+    def match_ranks(match: TraceMatch) -> tuple[int, int]:
+        face = match.face
+        if face not in face_rank_cache:
+            lower, upper = face.adjacent_cells()
+            lower_ranks, upper_ranks, _ = face_patch_ranks(
+                patches_by_cell.get(lower, ()),
+                patches_by_cell.get(upper, ()),
+                face,
+            )
+            face_rank_cache[face] = lower_ranks, upper_ranks
+        lower_ranks, upper_ranks = face_rank_cache[face]
+        first_cell = patch_by_id[match.first_patch_id].cell_xyz
+        second_cell = patch_by_id[match.second_patch_id].cell_xyz
+        lower, upper = face.adjacent_cells()
+        if first_cell == lower and second_cell == upper:
+            return (
+                lower_ranks[match.first_patch_id],
+                upper_ranks[match.second_patch_id],
+            )
+        if second_cell == lower and first_cell == upper:
+            return (
+                lower_ranks[match.second_patch_id],
+                upper_ranks[match.first_patch_id],
+            )
+        raise ValueError("join patches do not occupy opposite sides of its face")
 
     def crossing_pairs(match: TraceMatch) -> list[tuple[object, object]]:
         return [
@@ -294,15 +346,13 @@ def _select_consistent_joins(
         candidates,
         key=lambda value: (
             0
-            if (
-                value.first_patch_id,
-                value.second_patch_id,
-                value.face.axis,
-                value.face.anchor_xyz,
-            )
-            in fixed_join_keys
+            if key(value) in fixed_join_keys
             else 1,
-            -value.score,
+            -(
+                candidate_priorities.get(key(value), value.score)
+                if candidate_priorities is not None
+                else value.score
+            ),
             value.negative_log_likelihood,
             value.face.axis,
             value.face.anchor_xyz,
@@ -313,6 +363,20 @@ def _select_consistent_joins(
     for match in ordered:
         if not match.accepted:
             deferred.append(DeferredJoin(match, "pair-gate"))
+            continue
+        trace_keys = (
+            (match.first_patch_id, match.face),
+            (match.second_patch_id, match.face),
+        )
+        if any(value in used_traces for value in trace_keys):
+            deferred.append(DeferredJoin(match, "trace-occupancy"))
+            continue
+        first_rank, second_rank = match_ranks(match)
+        if any(
+            (first_rank - retained_first) * (second_rank - retained_second) < 0
+            for retained_first, retained_second in retained_face_ranks[match.face]
+        ):
+            deferred.append(DeferredJoin(match, "face-order-crossing"))
             continue
         first_root = patch_set.find(match.first_patch_id)
         second_root = patch_set.find(match.second_patch_id)
@@ -342,6 +406,8 @@ def _select_consistent_joins(
             cells = component_cells.pop(first_root) | component_cells.pop(second_root)
             patch_set.union(first_root, second_root)
             component_cells[patch_set.find(first_root)] = cells
+        used_traces.update(trace_keys)
+        retained_face_ranks[match.face].append((first_rank, second_rank))
         retained.append(match)
     retained.sort(
         key=lambda value: (
@@ -391,6 +457,9 @@ def _summarize_block(
     candidate_joins: Iterable[TraceMatch],
     *,
     fixed_join_keys: frozenset[tuple[int, int, int, Int3]] = frozenset(),
+    candidate_priorities: Mapping[
+        tuple[int, int, int, Int3], float
+    ] | None = None,
 ) -> SurfaceBlock:
     patch_values, patch_by_id = _patch_catalog(grid, bounds, patches)
     candidate_values = tuple(
@@ -405,7 +474,10 @@ def _summarize_block(
         )
     )
     join_values, deferred_values = _select_consistent_joins(
-        patch_values, candidate_values, fixed_join_keys
+        patch_values,
+        candidate_values,
+        fixed_join_keys,
+        candidate_priorities,
     )
     patch_set = _DisjointSet(patch_by_id)
     crossing_observations = [
@@ -617,6 +689,155 @@ def assemble_surface_block(
             )
             joins.extend(alignment.matches)
     return _summarize_block(grid, bounds, patch_values, joins)
+
+
+def assemble_surface_block_from_candidates(
+    grid: GridSpec,
+    bounds: BlockBounds,
+    patches: Iterable[ClippedPatch],
+    candidates: Iterable[TraceMatch],
+    *,
+    candidate_priorities: Mapping[
+        tuple[int, int, int, Int3], float
+    ] | None = None,
+) -> SurfaceBlock:
+    """Select a complete sheet graph from an explicit join universe.
+
+    Unlike :func:`assemble_surface_block`, callers may supply alternative
+    correspondences for the same face trace. Selection enforces trace
+    occupancy and order in addition to component-cell uniqueness, crossing
+    topology, and orientability. ``candidate_priorities`` changes only the
+    deterministic greedy proposal order; all hard constraints remain exact.
+    """
+
+    values = tuple(candidates)
+    keys = tuple(
+        (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        for value in values
+    )
+    if len(set(keys)) != len(keys):
+        raise ValueError("sheet join candidate universe contains duplicates")
+    if candidate_priorities is not None:
+        unknown = set(candidate_priorities) - set(keys)
+        if unknown:
+            raise ValueError(
+                "sheet join priorities reference absent candidates: "
+                f"{sorted(unknown)[:2]}"
+            )
+        if any(not math.isfinite(float(value)) for value in candidate_priorities.values()):
+            raise ValueError("sheet join priorities must be finite")
+    return _summarize_block(
+        grid,
+        bounds,
+        patches,
+        values,
+        candidate_priorities=candidate_priorities,
+    )
+
+
+def select_surface_joins(
+    patches: Iterable[ClippedPatch],
+    candidates: Iterable[TraceMatch],
+    *,
+    fixed_join_keys: frozenset[
+        tuple[int, int, int, Int3]
+    ] = frozenset(),
+    candidate_priorities: Mapping[
+        tuple[int, int, int, Int3], float
+    ] | None = None,
+) -> SurfaceJoinSelection:
+    """Select a complete topology-safe edge set without welding its geometry.
+
+    This is the inexpensive inference boundary used by sheet-level solvers.
+    Candidate order may vary between proposals, while trace occupancy, face
+    order, component/cell uniqueness, crossing consistency, and orientability
+    remain exact. ``fixed_join_keys`` are replayed first and must all survive.
+    """
+
+    patch_values = tuple(patches)
+    patch_ids = {value.patch_id for value in patch_values}
+    if len(patch_ids) != len(patch_values):
+        raise ValueError("sheet join selection requires unique patch IDs")
+    candidate_values = tuple(candidates)
+    keys = tuple(
+        (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        for value in candidate_values
+    )
+    key_set = set(keys)
+    if len(key_set) != len(keys):
+        raise ValueError("sheet join candidate universe contains duplicates")
+    missing_patches = {
+        patch_id
+        for value in candidate_values
+        for patch_id in (value.first_patch_id, value.second_patch_id)
+        if patch_id not in patch_ids
+    }
+    if missing_patches:
+        raise ValueError(
+            "sheet joins reference absent patches: "
+            f"{sorted(missing_patches)[:2]}"
+        )
+    missing_fixed = set(fixed_join_keys) - key_set
+    if missing_fixed:
+        raise ValueError(
+            "fixed sheet joins are absent from the candidate universe: "
+            f"{sorted(missing_fixed)[:2]}"
+        )
+    if candidate_priorities is not None:
+        unknown = set(candidate_priorities) - key_set
+        if unknown:
+            raise ValueError(
+                "sheet join priorities reference absent candidates: "
+                f"{sorted(unknown)[:2]}"
+            )
+        if any(
+            not math.isfinite(float(value))
+            for value in candidate_priorities.values()
+        ):
+            raise ValueError("sheet join priorities must be finite")
+    retained, deferred = _select_consistent_joins(
+        patch_values,
+        candidate_values,
+        fixed_join_keys,
+        candidate_priorities,
+    )
+    retained_keys = {
+        (
+            value.first_patch_id,
+            value.second_patch_id,
+            value.face.axis,
+            value.face.anchor_xyz,
+        )
+        for value in retained
+    }
+    rejected_fixed = set(fixed_join_keys) - retained_keys
+    if rejected_fixed:
+        reasons = Counter(
+            value.reason
+            for value in deferred
+            if (
+                value.match.first_patch_id,
+                value.match.second_patch_id,
+                value.match.face.axis,
+                value.match.face.anchor_xyz,
+            )
+            in rejected_fixed
+        )
+        raise ValueError(
+            "fixed sheet joins became infeasible: "
+            f"{dict(sorted(reasons.items()))}"
+        )
+    return SurfaceJoinSelection(retained, deferred)
 
 
 def rebuild_surface_block(

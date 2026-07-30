@@ -146,6 +146,18 @@ class FrozenTopologySeed:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenTopologyCut:
+    """Compressed immutable topology outside an arbitrary mutable patch set."""
+
+    seed: FrozenTopologySeed
+    frozen_patch_ids: tuple[int, ...]
+    frozen_join_keys: frozenset[JoinKey]
+    component_by_patch: tuple[tuple[int, int], ...]
+    component_patch_counts: tuple[tuple[int, int], ...]
+    anchor_patch_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TopologySelection:
     joins: tuple[TraceMatch, ...]
     deferred_joins: tuple[DeferredJoin, ...]
@@ -331,6 +343,164 @@ def _crossing_pairs(match: TraceMatch) -> tuple[tuple[Observation, Observation],
             (match.second_patch_id, value.second_edge),
         )
         for value in match.endpoint_agreements
+    )
+
+
+def freeze_topology_outside_patches(
+    patches: Iterable[ClippedPatch],
+    joins: Iterable[TraceMatch],
+    mutable_patch_ids: Iterable[int],
+    anchor_observations: Iterable[Observation],
+) -> FrozenTopologyCut:
+    """Collapse an immutable retained graph around an arbitrary local cut.
+
+    Only frozen patches and crossing observations that can interact with the
+    mutable region remain explicit anchors. Component occupancy, relative
+    orientation, crossing ownership, and detached component count summarize
+    the rest exactly for :func:`select_joins_with_frozen_topology`.
+    """
+
+    patch_values = tuple(patches)
+    patch_by_id = {value.patch_id: value for value in patch_values}
+    if len(patch_by_id) != len(patch_values):
+        raise ValueError("frozen topology cut requires unique patch IDs")
+    mutable = {int(value) for value in mutable_patch_ids}
+    unknown_mutable = mutable - set(patch_by_id)
+    if unknown_mutable:
+        raise ValueError(
+            "frozen topology cut references absent mutable patches: "
+            f"{sorted(unknown_mutable)[:2]}"
+        )
+    frozen_ids = set(patch_by_id) - mutable
+    join_values = tuple(joins)
+    frozen_joins = tuple(
+        value
+        for value in join_values
+        if value.first_patch_id in frozen_ids
+        and value.second_patch_id in frozen_ids
+    )
+    frozen_join_keys = frozenset(_join_key(value) for value in frozen_joins)
+
+    anchors = tuple(sorted(set(anchor_observations)))
+    anchor_set = set(anchors)
+    for patch_id, edge in anchors:
+        if patch_id not in frozen_ids:
+            raise ValueError("topology-cut anchor must belong to a frozen patch")
+        if edge not in {value.edge for value in patch_by_id[patch_id].vertices}:
+            raise ValueError("topology-cut anchor edge is absent from its patch")
+    anchor_patch_ids = {value[0] for value in anchors}
+
+    component_set = _DisjointSet(frozen_ids)
+    orientation_set = _ParityDisjointSet(frozen_ids)
+    for join in frozen_joins:
+        component_set.union(join.first_patch_id, join.second_patch_id)
+        orientation_set.union(
+            join.first_patch_id,
+            join.second_patch_id,
+            join_orientation_xor(patch_by_id, join),
+        )
+    component_members: dict[Hashable, list[int]] = defaultdict(list)
+    for patch_id in frozen_ids:
+        component_members[component_set.find(patch_id)].append(patch_id)
+    ordered_members = tuple(
+        tuple(sorted(values))
+        for values in sorted(
+            component_members.values(), key=lambda values: min(values)
+        )
+    )
+    component_by_patch = {
+        patch_id: min(values)
+        for values in ordered_members
+        for patch_id in values
+    }
+    participating = {
+        component_by_patch[patch_id] for patch_id in anchor_patch_ids
+    }
+    component_seeds: list[ComponentSeed] = []
+    for values in ordered_members:
+        component_id = min(values)
+        if component_id not in participating:
+            continue
+        component_anchors = tuple(
+            sorted(anchor_patch_ids & set(values))
+        )
+        representative = component_anchors[0]
+        _, representative_parity = orientation_set.find(representative)
+        parity = tuple(
+            orientation_set.find(value)[1] ^ representative_parity
+            for value in component_anchors
+        )
+        component_seeds.append(
+            ComponentSeed(
+                component_id,
+                len(values),
+                tuple(
+                    sorted({patch_by_id[value].cell_xyz for value in values})
+                ),
+                component_anchors,
+                parity,
+            )
+        )
+
+    observations = tuple(
+        (patch_id, vertex.edge)
+        for patch_id in frozen_ids
+        for vertex in patch_by_id[patch_id].vertices
+    )
+    crossing_set = _DisjointSet(observations)
+    for join in frozen_joins:
+        for first, second in _crossing_pairs(join):
+            crossing_set.union(first, second)
+    crossing_members: dict[Hashable, list[Observation]] = defaultdict(list)
+    for observation in observations:
+        crossing_members[crossing_set.find(observation)].append(observation)
+    referenced_roots = {
+        crossing_set.find(value) for value in anchors
+    }
+    crossing_seeds: list[CrossingSeed] = []
+    for root in sorted(
+        referenced_roots,
+        key=lambda value: min(crossing_members[value]),
+    ):
+        all_observations = tuple(sorted(crossing_members[root]))
+        feature: Feature = all_observations[0][1]
+        owners: dict[int, GridEdge] = {}
+        for patch_id, edge in all_observations:
+            combined = _combine_features(feature, edge)
+            if combined is None:
+                raise ValueError(
+                    "retained frozen topology has no common crossing feature"
+                )
+            feature = combined
+            if patch_id in owners and owners[patch_id] != edge:
+                raise ValueError(
+                    "retained crossing assigns one patch to multiple cube edges"
+                )
+            owners[patch_id] = edge
+        local_observations = tuple(
+            value for value in all_observations if value in anchor_set
+        )
+        crossing_seeds.append(
+            CrossingSeed(
+                ("frozen-crossing", min(all_observations)),
+                feature,
+                local_observations,
+                tuple(sorted(owners.items())),
+            )
+        )
+
+    seed = FrozenTopologySeed(
+        tuple(component_seeds),
+        tuple(crossing_seeds),
+        len(ordered_members) - len(participating),
+    )
+    return FrozenTopologyCut(
+        seed,
+        tuple(sorted(frozen_ids)),
+        frozen_join_keys,
+        tuple(sorted(component_by_patch.items())),
+        tuple((min(values), len(values)) for values in ordered_members),
+        tuple(sorted(anchor_patch_ids)),
     )
 
 

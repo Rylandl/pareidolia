@@ -13,6 +13,42 @@ from .stratigraphy import ConfigurationTable
 from .topology import GridSpec, Int3, cell_face
 
 
+PAIRWISE_REWARD_NORMALIZATIONS = frozenset(("none", "trace-mean"))
+
+
+def pairwise_reward_energy(
+    relative_negative_log_likelihood: float,
+    first_trace_count: int,
+    second_trace_count: int,
+    *,
+    pairwise_scale: float,
+    normalization: str = "none",
+) -> float:
+    """Convert one face-alignment improvement into a continuity energy.
+
+    ``none`` preserves the original additive likelihood reward.  It lets a
+    configuration earn proportionally more prior reward merely by placing
+    more traces on a face.  ``trace-mean`` instead uses the mean improvement
+    per participating trace, so layer-stack size and continuity quality are
+    separated.  The latter is useful during evidence-utilization refinement,
+    where a dense but unsupported stack must not overwhelm local evidence.
+    """
+
+    if normalization not in PAIRWISE_REWARD_NORMALIZATIONS:
+        raise ValueError(
+            "pairwise reward normalization must be one of "
+            f"{sorted(PAIRWISE_REWARD_NORMALIZATIONS)}"
+        )
+    if not math.isfinite(pairwise_scale) or pairwise_scale <= 0.0:
+        raise ValueError("pairwise scale must be finite and positive")
+    if first_trace_count < 0 or second_trace_count < 0:
+        raise ValueError("face trace counts must be nonnegative")
+    relative = min(float(relative_negative_log_likelihood), 0.0)
+    if normalization == "trace-mean":
+        relative /= max(first_trace_count + second_trace_count, 1)
+    return pairwise_scale * relative
+
+
 @dataclass(frozen=True, slots=True)
 class ConfigurationOption:
     option_id: int
@@ -122,6 +158,7 @@ def optimize_configurations(
     matching_settings: TraceMatchSettings | None = None,
     unary_scale: float = 1.0,
     pairwise_scale: float = 0.35,
+    pairwise_reward_normalization: str = "none",
     interior_unmatched_trace_penalty: float = 0.0,
     maximum_sweeps: int = 12,
     initial_configuration_indices: Mapping[Int3, tuple[int, int]] | None = None,
@@ -139,6 +176,11 @@ def optimize_configurations(
 
     if unary_scale <= 0.0 or pairwise_scale <= 0.0 or maximum_sweeps <= 0:
         raise ValueError("selection scales and maximum sweeps must be positive")
+    if pairwise_reward_normalization not in PAIRWISE_REWARD_NORMALIZATIONS:
+        raise ValueError(
+            "pairwise reward normalization must be one of "
+            f"{sorted(PAIRWISE_REWARD_NORMALIZATIONS)}"
+        )
     if (
         not math.isfinite(interior_unmatched_trace_penalty)
         or interior_unmatched_trace_penalty < 0.0
@@ -231,7 +273,13 @@ def optimize_configurations(
             except ValueError:
                 relative = 0.0
                 unmatched = lower_traces + upper_traces
-        reward = pairwise_scale * min(float(relative), 0.0)
+        reward = pairwise_reward_energy(
+            relative,
+            lower_traces,
+            upper_traces,
+            pairwise_scale=pairwise_scale,
+            normalization=pairwise_reward_normalization,
+        )
         continuation = (
             interior_unmatched_trace_penalty * unmatched
             if lower.patches and upper.patches

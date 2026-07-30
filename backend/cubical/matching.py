@@ -321,6 +321,54 @@ def _face_order_axis(
     return canonical_axis(eigenvectors[:, -1])
 
 
+def face_patch_ranks(
+    first_patches: Iterable[ClippedPatch],
+    second_patches: Iterable[ClippedPatch],
+    face: GridFace,
+) -> tuple[dict[int, int], dict[int, int], tuple[float, float, float] | None]:
+    """Return the canonical trace order on both sides of one grid face.
+
+    A sheet-level solver may consider more than the single optimal alignment
+    returned by :func:`align_face_patches`.  These ranks are the invariant it
+    must preserve when combining those alternative pair correspondences.
+    """
+
+    first_values = [
+        (trace, patch.estimate)
+        for patch in first_patches
+        if (trace := patch.trace_on(face)) is not None
+    ]
+    second_values = [
+        (trace, patch.estimate)
+        for patch in second_patches
+        if (trace := patch.trace_on(face)) is not None
+    ]
+    if not first_values and not second_values:
+        return {}, {}, None
+    order_axis = _face_order_axis(first_values + second_values, face)
+
+    def ranks(
+        values: list[tuple[FaceTrace, PlaneEstimate]],
+    ) -> dict[int, int]:
+        ordered = sorted(
+            values,
+            key=lambda value: (
+                float(np.dot(value[0].midpoint_xyz, order_axis)),
+                value[0].patch_id,
+            ),
+        )
+        return {
+            trace.patch_id: index
+            for index, (trace, _) in enumerate(ordered)
+        }
+
+    return (
+        ranks(first_values),
+        ranks(second_values),
+        tuple(float(value) for value in order_axis),
+    )
+
+
 def align_face_patches(
     first_patches: Iterable[ClippedPatch],
     second_patches: Iterable[ClippedPatch],

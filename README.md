@@ -149,6 +149,146 @@ size distribution is also close to the unsplit consistency reference (largest
 automatically consumes this retained graph and emits both diagnostic grid
 overlays and clean native-CT PNGs.
 
+`diagnose-cell-refinement` reopens that materialized result at a single cell
+without rerunning Acus. It maps the cell back to its immutable full physical
+candidate bank, reports evidence, face, and retained-topology utilization as
+separate quantities, and ranks all local stacks with a trace-count-normalized
+continuity objective. Refinement is conservative and staged: single-cell and
+adjacent-pair proposals must remain inside an evidence-coverage envelope; each
+replacement is then replayed against a graph with every exterior join frozen;
+topology-positive support cells are accepted first; and the focal cell is
+retried only while every frozen exterior component remains connected, open
+endpoints and component count do not increase, and collision safety plus
+orientability hold. If individually safe supports conflict as a batch, a
+deterministic exact-replay pass grows a maximal collision-safe subset and
+revisits blocked additions after the context changes. A final exact replay also
+admits the coordinated net-change set when individually unsafe replacements
+become safe together and improve more evidence than the staged result.
+Retained-trace fraction remains
+diagnostic rather than a gate because legitimate removal of unsupported layers
+changes its denominator.
+Repeated annealing trials reuse an exact compressed certificate of the immutable
+exterior graph: component occupancy, orientation parity, crossing ownership,
+and detached components are frozen once for each active-cell cut. Only the
+candidate patches and joins touching that cut are replayed. This is not a
+weaker acceptance path—the final materializer independently reconstructs the
+complete graph and requires its audit summary to match byte-for-byte before it
+writes a new variant.
+The command writes a hashed diagnostic/proposal artifact but does not mutate
+the selected surface graph:
+
+```bash
+python3 -m backend.cubical diagnose-cell-refinement \
+  --cluster /path/to/cluster-reselection-v2 \
+  --materialized /path/to/cluster-materialized-v2 \
+  --cell 5 4 4 --component-id 10 \
+  --output /path/to/cell-refinement-c5-4-4-v1
+```
+
+An accepted annealing round can then be promoted to a complete graph variant.
+`materialize-cell-refinement` preserves every exterior patch and retained join,
+replays only the accepted cells, and writes a full per-cell configuration
+ledger bound by hash to the new patch and surface-graph artifacts. The output
+is therefore a valid `--materialized` input for another diagnostic round:
+
+```bash
+python3 -m backend.cubical materialize-cell-refinement \
+  --cluster /path/to/cluster-reselection-v2 \
+  --materialized /path/to/cluster-materialized-v2 \
+  --diagnostic /path/to/cell-refinement-c5-4-4-v1 \
+  --output /path/to/cell-refinement-variant-r1
+```
+
+`rank-cell-refinement-targets` provides the next-pass work queue. It ranks
+cells by the geometric mean of two empirical percentiles—candidate-bank Acus
+mass still recoverable and unresolved trace endpoints touching the cell—and
+also emits a spatially separated ranking whose radius-one neighborhoods do not
+overlap:
+
+```bash
+python3 -m backend.cubical rank-cell-refinement-targets \
+  --cluster /path/to/cluster-reselection-v2 \
+  --materialized /path/to/cell-refinement-variant-r1 \
+  --output /path/to/refinement-targets-r2
+```
+
+The replacement for repeated cell-by-cell repair is an immutable block sheet
+contract. `compile-sheet-evidence` deduplicates every retained full-Acus mode,
+clips its cubical polygon once, and records every physical within-cell stack as
+a hyperedge over stable mode IDs. Acus does not run during later sheet solves:
+
+```bash
+python3 -m backend.cubical compile-sheet-evidence \
+  --input /path/to/block-x0-y0-saturation-v1 0 0 0 \
+  --input /path/to/block-x1-y0-saturation-v1 8 0 0 \
+  --output /path/to/block-sheet-evidence-v1
+```
+
+For an already selected geometry, `restitch-block-sheets` keeps every
+pair-gated face alternative, solves exact order-preserving face assignments,
+and performs topology-safe whole-sheet neighborhood exchanges. It writes a
+standard selected-patch and retained-surface-graph root that can be flattened
+or merged by the existing commands:
+
+```bash
+python3 -m backend.cubical restitch-block-sheets \
+  --cluster /path/to/cluster-reselection-v2 \
+  --materialized /path/to/materialized-block \
+  --output /path/to/restitch-result
+```
+
+The architecture and joint configuration/sheet solver are detailed
+in [`docs/design/block-sheet-reconstruction.md`](docs/design/block-sheet-reconstruction.md).
+The implemented continuation compiles the complete all-mode edge and stack-pair
+factor banks, optimizes a reversible configuration initialization, and then
+requires global topology replay:
+
+```bash
+python3 -m backend.cubical catalog-sheet-correspondences \
+  --evidence /path/to/block-sheet-evidence-v1 \
+  --cluster /path/to/cluster-reselection-v2 \
+  --output /path/to/mode-correspondences-v1
+python3 -m backend.cubical compile-sheet-factors \
+  --evidence /path/to/block-sheet-evidence-v1 \
+  --correspondences /path/to/mode-correspondences-v1 \
+  --cluster /path/to/cluster-reselection-v2 \
+  --output /path/to/configuration-factors-v1
+python3 -m backend.cubical initialize-sheet-configurations \
+  --evidence /path/to/block-sheet-evidence-v1 \
+  --factors /path/to/configuration-factors-v1 \
+  --initial /path/to/current-materialized-graph \
+  --output /path/to/configuration-initialization-v1
+python3 -m backend.cubical replay-joint-sheet-graph \
+  --evidence /path/to/block-sheet-evidence-v1 \
+  --correspondences /path/to/mode-correspondences-v1 \
+  --configurations /path/to/configuration-initialization-v1 \
+  --cluster /path/to/cluster-reselection-v2 \
+  --output /path/to/joint-sheet-graph-v1
+```
+
+`refine-sheet-topology` is the nonlocal outer loop. It ranks configurations by
+recoverable incompatible gaps and topology pressure, exchanges complete Acus
+stacks, reopens every current sheet component touched by those stacks, and
+freezes the untouched exterior. Every proposal is accepted only after exact
+whole-block collision, face-order, crossing, and orientability replay:
+
+```bash
+python3 -m backend.cubical refine-sheet-topology \
+  --evidence /path/to/block-sheet-evidence-v1 \
+  --correspondences /path/to/mode-correspondences-v1 \
+  --factors /path/to/configuration-factors-v1 \
+  --configurations /path/to/configuration-initialization-v1 \
+  --graph /path/to/joint-sheet-graph-v1 \
+  --cluster /path/to/cluster-reselection-v2 \
+  --output /path/to/sheet-topology-refinement-v1
+```
+
+The refinement root is both an auditable configuration selection and a normal
+`selected-patches-v1`/`surface-graph-v1` root. Supplying it to
+`replay-joint-sheet-graph` seeds the full multi-restart solve with the already
+validated graph, so later whole-sheet exchange can improve its likelihood but
+cannot discard it merely because another deterministic restart was weaker.
+
 Assembly now carries an explicit polygon-orientation parity state, preventing
 unsigned local normals from closing a globally contradictory surface loop.
 `refine-join-continuity` then scores every retained face using fixed-depth

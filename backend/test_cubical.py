@@ -14,6 +14,7 @@ from backend.cubical.block import (
     augment_surface_block,
     assemble_surface_hierarchy,
     assemble_surface_block,
+    assemble_surface_block_from_candidates,
     extend_surface_block_joins,
     merge_surface_blocks,
     rebuild_surface_block,
@@ -30,13 +31,20 @@ from backend.cubical.boundary_merge import (
 from backend.cubical.boundary_reselection import run_boundary_band_reselection
 from backend.cubical.cluster_reselection import run_boundary_cluster_reselection
 from backend.cubical.cluster_materialization import run_cluster_materialization
+from backend.cubical.cell_refinement import CellRefinementSettings
+from backend.cubical.cell_refinement_targets import (
+    _percentile_ranks,
+    _spatially_separated,
+)
 from backend.cubical.boundary_topology import (
     build_frozen_face_states,
     build_frozen_region_states,
     compatible_face_masks,
     face_mask,
+    freeze_topology_outside_patches,
     read_frozen_face_state,
     read_frozen_region_state,
+    select_joins_with_frozen_topology,
     write_frozen_region_artifact,
     write_frozen_topology_artifact,
 )
@@ -78,8 +86,30 @@ from backend.cubical.saturation_selection import (
     reweight_saturation_candidates,
 )
 from backend.cubical.sheet_packets import run_dual_axis_packet_connectivity
+from backend.cubical.sheet_evidence import (
+    SheetEvidenceInput,
+    compile_block_sheet_evidence,
+    read_block_sheet_evidence,
+)
+from backend.cubical.sheet_correspondence import enumerate_mode_correspondences
+from backend.cubical.sheet_factors import _ordered_alignment_factor
+from backend.cubical.sheet_stitching import (
+    SheetMatchingPolicy,
+    SheetStitchingSettings,
+    enumerate_sheet_join_catalog,
+    restitch_sheet_graph,
+)
+from backend.cubical.sheet_topology_refinement import (
+    SheetTopologyEvaluation,
+    choose_improving_topology_evaluation,
+    frozen_exterior_join_keys,
+)
 from backend.cubical.surface_graph import read_surface_graph
-from backend.cubical.selection import ConfigurationOption, optimize_configurations
+from backend.cubical.selection import (
+    ConfigurationOption,
+    optimize_configurations,
+    pairwise_reward_energy,
+)
 from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
     StratigraphicContinuitySettings,
@@ -2213,6 +2243,68 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(len(sparse.selected_options), 2)
         self.assertGreater(sparse.pairwise_evaluation_count, 0)
 
+    def test_trace_mean_pairwise_reward_separates_quality_from_stack_size(
+        self,
+    ) -> None:
+        raw_one = pairwise_reward_energy(
+            -12.0,
+            1,
+            1,
+            pairwise_scale=0.2,
+            normalization="none",
+        )
+        raw_three = pairwise_reward_energy(
+            -36.0,
+            3,
+            3,
+            pairwise_scale=0.2,
+            normalization="none",
+        )
+        mean_one = pairwise_reward_energy(
+            -12.0,
+            1,
+            1,
+            pairwise_scale=0.2,
+            normalization="trace-mean",
+        )
+        mean_three = pairwise_reward_energy(
+            -36.0,
+            3,
+            3,
+            pairwise_scale=0.2,
+            normalization="trace-mean",
+        )
+        self.assertAlmostEqual(raw_three, 3.0 * raw_one)
+        self.assertAlmostEqual(mean_three, mean_one)
+        settings = CellRefinementSettings(pairwise_scale=0.2)
+        self.assertAlmostEqual(
+            settings.resolved_unmatched_trace_penalty(TraceMatchSettings()),
+            1.4,
+        )
+
+    def test_cell_refinement_target_ranks_preserve_ties_and_separate_cubes(
+        self,
+    ) -> None:
+        np.testing.assert_allclose(
+            _percentile_ranks(np.asarray((0.0, 0.0, 2.0, 4.0))),
+            np.asarray((0.25, 0.25, 0.625, 0.875)),
+        )
+        records = [
+            {"cellXYZ": [0, 0, 0]},
+            {"cellXYZ": [2, 0, 0]},
+            {"cellXYZ": [3, 0, 0]},
+            {"cellXYZ": [6, 0, 0]},
+        ]
+        separated = _spatially_separated(
+            records,
+            radius_cells=1,
+            maximum_targets=3,
+        )
+        self.assertEqual(
+            [value["cellXYZ"] for value in separated],
+            [[0, 0, 0], [3, 0, 0], [6, 0, 0]],
+        )
+
     def test_frozen_face_topology_round_trip_preserves_anchor_certificates(
         self,
     ) -> None:
@@ -2278,6 +2370,374 @@ class CubicalGeometryTests(unittest.TestCase):
                 path, expected_region.face_mask
             )
         self.assertEqual(restored_region, expected_region)
+
+    def test_arbitrary_frozen_cut_replays_local_joins_exactly(self) -> None:
+        grid = GridSpec((4, 1, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+            for x in range(4)
+        )
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        mutable_patch_ids = {2}
+        local_joins = tuple(
+            value
+            for value in block.joins
+            if value.first_patch_id in mutable_patch_ids
+            or value.second_patch_id in mutable_patch_ids
+        )
+        anchor_observations = {
+            (patch_id, edge)
+            for join in local_joins
+            for agreement in join.endpoint_agreements
+            for patch_id, edge in (
+                (join.first_patch_id, agreement.first_edge),
+                (join.second_patch_id, agreement.second_edge),
+            )
+            if patch_id not in mutable_patch_ids
+        }
+        cut = freeze_topology_outside_patches(
+            patches,
+            block.joins,
+            mutable_patch_ids,
+            anchor_observations,
+        )
+        local_patch_ids = {*cut.anchor_patch_ids, *mutable_patch_ids}
+        selection = select_joins_with_frozen_topology(
+            tuple(
+                value for value in patches if value.patch_id in local_patch_ids
+            ),
+            local_joins,
+            cut.seed,
+        )
+
+        self.assertEqual(selection.joins, local_joins)
+        self.assertFalse(selection.deferred_joins)
+        self.assertEqual(selection.component_count, len(block.components))
+        self.assertEqual(cut.seed.detached_component_count, 0)
+        self.assertEqual(len(cut.frozen_join_keys), 1)
+
+    def test_sheet_catalog_preserves_alternative_face_correspondences(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        patches = (
+            self._horizontal_patch(
+                grid, (0, 0, 0), -0.2, 1, height_std=0.2
+            ),
+            self._horizontal_patch(
+                grid, (0, 0, 0), 0.2, 2, height_std=0.2
+            ),
+            self._horizontal_patch(
+                grid, (1, 0, 0), -0.2, 3, height_std=0.2
+            ),
+            self._horizontal_patch(
+                grid, (1, 0, 0), 0.2, 4, height_std=0.2
+            ),
+        )
+        bounds = BlockBounds((0, 0, 0), grid.shape_cells_xyz)
+        baseline = assemble_surface_block(grid, bounds, patches)
+        policy = SheetMatchingPolicy(
+            TraceMatchSettings(
+                maximum_endpoint_z=10.0,
+                maximum_reduced_chi_square=100.0,
+            ),
+            False,
+            15.0,
+            15.0,
+        )
+        settings = SheetStitchingSettings(restart_count=3)
+        catalog = enumerate_sheet_join_catalog(
+            baseline,
+            policy,
+            settings=settings,
+        )
+        self.assertEqual(len(catalog.candidates), 4)
+
+        crossing_priority = {
+            value.key: (
+                10.0
+                if (value.match.first_patch_id, value.match.second_patch_id)
+                in ((1, 4), (2, 3))
+                else 1.0
+            )
+            for value in catalog.candidates
+        }
+        crossed = assemble_surface_block_from_candidates(
+            grid,
+            bounds,
+            patches,
+            (value.match for value in catalog.candidates),
+            candidate_priorities=crossing_priority,
+        )
+        self.assertEqual(len(crossed.joins), 1)
+        self.assertIn(
+            "face-order-crossing",
+            {value.reason for value in crossed.deferred_joins},
+        )
+        self.assertIn(
+            "trace-occupancy",
+            {value.reason for value in crossed.deferred_joins},
+        )
+
+        result = restitch_sheet_graph(
+            baseline,
+            catalog,
+            policy,
+            settings=settings,
+        )
+        self.assertEqual(len(result.block.joins), 2)
+        self.assertEqual(len(result.block.components), 2)
+        self.assertEqual(
+            result.summary["delta"]["unresolvedInteriorTraceEndpoints"],
+            0.0,
+        )
+        self.assertGreaterEqual(
+            result.summary["best"]["totalJoinBenefit"],
+            result.summary["baseline"]["totalJoinBenefit"],
+        )
+
+    def test_sheet_factor_uses_exact_noncrossing_augmenting_alignment(self) -> None:
+        benefit, matched, quarter = _ordered_alignment_factor(
+            (1, 2),
+            (3, 4),
+            {
+                (1, 3): (5.0, False),
+                (2, 4): (6.0, True),
+                (1, 4): (10.0, False),
+                (2, 3): (10.0, False),
+            },
+        )
+        self.assertEqual(benefit, 11.0)
+        self.assertEqual(matched, 2)
+        self.assertEqual(quarter, 1)
+
+    def test_sheet_topology_acceptance_uses_evidence_objective_not_size(self) -> None:
+        def evaluation(
+            objective: float,
+            components: tuple[tuple[int, tuple[int, ...]], ...],
+            proposal: str,
+        ) -> SheetTopologyEvaluation:
+            patch_count = sum(len(values) for _, values in components)
+            return SheetTopologyEvaluation(
+                (0,),
+                tuple(),
+                tuple(),
+                objective,
+                objective,
+                0.0,
+                0.0,
+                0,
+                tuple(
+                    (patch_id, component_id)
+                    for component_id, values in components
+                    for patch_id in values
+                ),
+                components,
+                patch_count,
+                0,
+                0,
+                0,
+                proposal,
+                0,
+            )
+
+        current = evaluation(10.0, ((1, (1,)), (2, (2,))), "current")
+        larger_but_weaker = evaluation(9.9, ((1, (1, 2)),), "size-only")
+        tied_larger = evaluation(10.0, ((1, (1, 2)),), "tie-size-only")
+        supported = evaluation(10.2, ((1, (1,)), (2, (2,))), "supported")
+
+        self.assertIs(
+            choose_improving_topology_evaluation(
+                current, (larger_but_weaker, tied_larger, supported)
+            ),
+            supported,
+        )
+        self.assertIsNone(
+            choose_improving_topology_evaluation(
+                current, (larger_but_weaker, tied_larger)
+            )
+        )
+        self.assertIsNone(
+            choose_improving_topology_evaluation(
+                current, (supported,), minimum_objective_gain=0.25
+            )
+        )
+
+    def test_sheet_topology_reopens_one_component_and_freezes_the_other(
+        self,
+    ) -> None:
+        grid = GridSpec((3, 1, 1))
+        patches = tuple(
+            self._horizontal_patch(
+                grid,
+                (x, 0, 0),
+                height,
+                1 + 2 * x + layer,
+            )
+            for x in range(3)
+            for layer, height in enumerate((-0.25, 0.25))
+        )
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        component_by_patch = dict(block.component_by_patch)
+        mutable_component = component_by_patch[1]
+        mutable_patch_ids = {
+            patch_id
+            for patch_id, component_id in block.component_by_patch
+            if component_id == mutable_component
+        }
+        fixed = frozen_exterior_join_keys(
+            block.joins,
+            {value.patch_id for value in patches},
+            mutable_patch_ids,
+        )
+
+        self.assertEqual(len(block.components), 2)
+        self.assertEqual(len(block.joins), 4)
+        self.assertEqual(len(fixed), 2)
+        self.assertTrue(
+            all(
+                first not in mutable_patch_ids and second not in mutable_patch_ids
+                for first, second, _, _ in fixed
+            )
+        )
+
+    def test_sheet_evidence_deduplicates_modes_and_preserves_stack_hyperedges(
+        self,
+    ) -> None:
+        grid = GridSpec((2, 1, 1), origin_xyz=(10.0, 20.0, 30.0))
+        cells = np.asarray(((0, 0, 0), (1, 0, 0)), dtype=np.int32)
+        table = ConfigurationTable(
+            cells,
+            np.asarray((0, 2, 4), dtype=np.uint64),
+            np.asarray((0, 1, 0, 1), dtype=np.uint16),
+            np.asarray((0.0, -1.0, 0.0, -0.5), dtype=np.float32),
+            np.asarray((0, -1, 0, 0), dtype=np.int8),
+            np.asarray((0, 1, 1, 2, 3), dtype=np.uint64),
+            np.tile((0.0, 0.0, 1.0), (3, 1)).astype(np.float32),
+            np.asarray((0.0, 0.0, 0.2), dtype=np.float32),
+            np.tile(
+                (0.001, 0.0, 0.0, 0.001, 0.0, 0.001),
+                (3, 1),
+            ).astype(np.float32),
+            np.tile((1.0, 0.0, 0.0), (3, 1)).astype(np.float32),
+            np.full(3, math.radians(2.0), dtype=np.float32),
+            np.ones(3, dtype=np.float32),
+            np.asarray((2.0, 3.0, 4.0), dtype=np.float32),
+            np.ones(3, dtype=np.float32),
+            np.ones(3, dtype=np.float32),
+        )
+        table.validate()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw"
+            candidate = root / "candidate"
+            mode_bank = root / "mode-bank"
+            output = root / "sheet-evidence"
+            current_patches = tuple(
+                self._horizontal_patch(grid, tuple(cell), 0.0, index + 1)
+                for index, cell in enumerate(cells.tolist())
+            )
+            write_patch_shard(
+                raw / "selected-patches-v1",
+                PatchTable.from_patches(grid, current_patches),
+            )
+            mode_bank.mkdir(parents=True)
+            (mode_bank / "mode-bank.json").write_text(
+                json.dumps(
+                    {
+                        "identity": {
+                            "identitySha256": "synthetic-mode-bank-identity"
+                        }
+                    }
+                )
+            )
+            candidate.mkdir(parents=True)
+            data_path = candidate / "saturation-configurations-v1.npz"
+            metadata = {
+                name: np.asarray((1.0, 0.0, 1.5, 1.0), dtype=np.float32)
+                for name in (
+                    "evidenceLogScore",
+                    "physicalLogScore",
+                    "totalLogScore",
+                    "coveredEvidenceMass",
+                    "totalEvidenceMass",
+                )
+            }
+            metadata["isCurrent"] = np.asarray((1, 0, 1, 0), dtype=np.uint8)
+            with data_path.open("wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    **table.arrays(),
+                    **metadata,
+                    sourceShardIndex=np.zeros(4, dtype=np.int16),
+                    sourceModeOffset=table.layer_offset,
+                    sourceModeIndex=np.asarray((0, 1, 2), dtype=np.int32),
+                    shardNames=np.asarray(("x0000-y0000-z0000",)),
+                )
+            data_sha = sha256_file(data_path)
+            (candidate / "saturation-configurations-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.cubical-saturation-configurations",
+                        "version": 1,
+                        "identitySha256": "synthetic-saturation-identity",
+                        "data": {
+                            "path": data_path.name,
+                            "bytes": data_path.stat().st_size,
+                            "sha256": data_sha,
+                        },
+                    }
+                )
+            )
+            (candidate / "variant.json").write_text(
+                json.dumps(
+                    {
+                        "state": "complete",
+                        "inputRoot": str(raw),
+                        "modeBankRoot": str(mode_bank),
+                    }
+                )
+            )
+
+            summary = compile_block_sheet_evidence(
+                (SheetEvidenceInput(candidate),),
+                output,
+            )
+            restored = read_block_sheet_evidence(output)
+
+        self.assertEqual(summary["statistics"]["ownedCells"], 2)
+        self.assertEqual(summary["statistics"]["uniqueAcusModes"], 3)
+        self.assertEqual(summary["statistics"]["physicalConfigurations"], 4)
+        self.assertEqual(restored.mode_count, 3)
+        self.assertEqual(restored.configuration_count, 4)
+        self.assertEqual(restored.mode_patches.patch_count, 3)
+        np.testing.assert_array_equal(
+            np.diff(restored.arrays["configurationModeOffset"]),
+            (1, 0, 1, 1),
+        )
+        correspondences = enumerate_mode_correspondences(
+            restored,
+            SheetMatchingPolicy(
+                TraceMatchSettings(
+                    maximum_endpoint_z=10.0,
+                    maximum_reduced_chi_square=100.0,
+                ),
+                False,
+                15.0,
+                15.0,
+            ),
+        )
+        self.assertEqual(len(correspondences.candidates), 2)
+        self.assertEqual(
+            sum(value.currently_active_endpoints for value in correspondences.candidates),
+            1,
+        )
 
     def test_noisy_synthetic_stack_remains_pure_and_connected(self) -> None:
         grid = GridSpec((8, 8, 5))
