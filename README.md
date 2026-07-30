@@ -226,9 +226,10 @@ python3 -m backend.cubical compile-sheet-evidence \
 
 For an already selected geometry, `restitch-block-sheets` keeps every
 pair-gated face alternative, solves exact order-preserving face assignments,
-and performs topology-safe whole-sheet neighborhood exchanges. It writes a
-standard selected-patch and retained-surface-graph root that can be flattened
-or merged by the existing commands:
+segments the dense face graph with minimum-cost same-cell collision cuts, and
+performs topology-safe whole-sheet neighborhood exchanges. It writes a standard
+selected-patch and retained-surface-graph root that can be flattened or merged
+by the existing commands:
 
 ```bash
 python3 -m backend.cubical restitch-block-sheets \
@@ -236,6 +237,20 @@ python3 -m backend.cubical restitch-block-sheets \
   --materialized /path/to/materialized-block \
   --output /path/to/restitch-result
 ```
+
+The collision cut runs to physical completion by default; an operational cap
+can be supplied with `--collision-cut-limit`, and `--collision-cut-order both`
+persists a deterministic forward/reverse sensitivity comparison. On the owned
+12 x 12 x 10 audit core, whole-block belief propagation, coverage-preserving
+configuration scoring, completed collision cuts, and four sheet-exchange rounds
+raise structural-evidence coverage from 65.42% to 66.86%. The default pure
+likelihood solve retains 5,692 rather than 5,633 joins, reduces open endpoints
+from 6,590 to 6,424, lowers the local-to-global topology tax from 967 to 932,
+and raises raw correspondence benefit. An explicit two-unit open-endpoint prior
+gives the Pareto variant with 5,709 joins, 6,390 open endpoints, 404 rather than
+418 components, and a 915-join topology tax for a 0.044% raw-benefit trade.
+`audit-sheet-core` writes the complete reusable
+evidence/configuration/topology failure decomposition.
 
 The architecture and joint configuration/sheet solver are detailed
 in [`docs/design/block-sheet-reconstruction.md`](docs/design/block-sheet-reconstruction.md).

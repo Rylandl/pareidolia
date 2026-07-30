@@ -5,7 +5,7 @@ import json
 import math
 import shutil
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -43,6 +43,7 @@ SHEET_RESTITCH_VERSION = 1
 
 JoinKey = tuple[int, int, int, Int3]
 TraceKey = tuple[int, GridFace]
+COLLISION_CUT_ORDERS = frozenset(("forward", "reverse", "both"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,16 +94,25 @@ class SheetMatchingPolicy:
 class SheetStitchingSettings:
     minimum_join_benefit: float = 0.0
     quarter_turn_penalty: float = 0.75
+    unmatched_trace_penalty: float = 0.0
     restart_count: int = 12
     priority_jitter_fraction: float = 0.35
     exchange_round_count: int = 2
     exchange_trials_per_round: int = 24
+    collision_cut_enabled: bool = True
+    collision_cut_limit: int = 0
+    collision_cut_order: str = "forward"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.minimum_join_benefit):
             raise ValueError("minimum join benefit must be finite")
         if not math.isfinite(self.quarter_turn_penalty) or self.quarter_turn_penalty < 0:
             raise ValueError("quarter-turn penalty must be finite and nonnegative")
+        if (
+            not math.isfinite(self.unmatched_trace_penalty)
+            or self.unmatched_trace_penalty < 0.0
+        ):
+            raise ValueError("unmatched trace penalty must be finite and nonnegative")
         if self.restart_count < 2:
             raise ValueError("sheet stitching requires at least two global proposals")
         if (
@@ -114,6 +124,13 @@ class SheetStitchingSettings:
             raise ValueError("exchange round count must be nonnegative")
         if self.exchange_trials_per_round < 0:
             raise ValueError("exchange trial count must be nonnegative")
+        if self.collision_cut_limit < 0:
+            raise ValueError("collision-cut limit must be nonnegative")
+        if self.collision_cut_order not in COLLISION_CUT_ORDERS:
+            raise ValueError(
+                "collision-cut order must be one of "
+                f"{sorted(COLLISION_CUT_ORDERS)}"
+            )
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -347,6 +364,7 @@ def _stable_jitter(key: JoinKey, restart: int) -> float:
 
 def _face_optimal_candidate_keys(
     candidates: tuple[SheetJoinCandidate, ...],
+    retained_join_reward: float = 0.0,
 ) -> frozenset[JoinKey]:
     """Solve every face's weighted order-preserving trace matching exactly."""
 
@@ -399,7 +417,8 @@ def _face_optimal_candidate_keys(
                 if candidate is not None:
                     diagonal = (
                         float(scores[first_index - 1, second_index - 1])
-                        + candidate.benefit,
+                        + candidate.benefit
+                        + retained_join_reward,
                         int(counts[first_index - 1, second_index - 1]) + 1,
                         (*paths[first_index - 1][second_index - 1], candidate.key),
                     )
@@ -411,13 +430,228 @@ def _face_optimal_candidate_keys(
     return frozenset(selected)
 
 
+def _minimum_undirected_join_cut(
+    member_patch_ids: tuple[int, ...],
+    candidates: tuple[SheetJoinCandidate, ...],
+    capacities: Mapping[JoinKey, float],
+    source_patch_id: int,
+    target_patch_id: int,
+) -> tuple[frozenset[JoinKey], float]:
+    """Return one deterministic minimum-capacity cut in a sheet component."""
+
+    patch_ids = tuple(sorted(member_patch_ids))
+    index_by_patch = {patch_id: index for index, patch_id in enumerate(patch_ids)}
+    source = index_by_patch[source_patch_id]
+    target = index_by_patch[target_patch_id]
+    # Residual edge records are mutable [target, reverse-index, capacity].
+    adjacency: list[list[list[float | int]]] = [[] for _ in patch_ids]
+
+    def add_directed(first: int, second: int, capacity: float) -> None:
+        forward: list[float | int] = [second, len(adjacency[second]), capacity]
+        reverse: list[float | int] = [first, len(adjacency[first]), 0.0]
+        adjacency[first].append(forward)
+        adjacency[second].append(reverse)
+
+    for candidate in candidates:
+        first = index_by_patch[candidate.match.first_patch_id]
+        second = index_by_patch[candidate.match.second_patch_id]
+        capacity = max(float(capacities[candidate.key]), 1.0e-9)
+        # Two directed arcs give an undirected edge its capacity in either cut
+        # direction while retaining ordinary residual reverse arcs.
+        add_directed(first, second, capacity)
+        add_directed(second, first, capacity)
+
+    epsilon = 1.0e-12
+    while True:
+        level = [-1] * len(patch_ids)
+        level[source] = 0
+        queue: deque[int] = deque((source,))
+        while queue:
+            first = queue.popleft()
+            for edge in adjacency[first]:
+                second = int(edge[0])
+                if float(edge[2]) > epsilon and level[second] < 0:
+                    level[second] = level[first] + 1
+                    queue.append(second)
+        if level[target] < 0:
+            break
+        cursor = [0] * len(patch_ids)
+
+        def send(first: int, available: float) -> float:
+            if first == target:
+                return available
+            while cursor[first] < len(adjacency[first]):
+                edge = adjacency[first][cursor[first]]
+                second = int(edge[0])
+                capacity = float(edge[2])
+                if capacity > epsilon and level[second] == level[first] + 1:
+                    pushed = send(second, min(available, capacity))
+                    if pushed > epsilon:
+                        edge[2] = capacity - pushed
+                        reverse = adjacency[second][int(edge[1])]
+                        reverse[2] = float(reverse[2]) + pushed
+                        return pushed
+                cursor[first] += 1
+            return 0.0
+
+        while send(source, math.inf) > epsilon:
+            pass
+
+    reachable = {source}
+    queue = deque((source,))
+    while queue:
+        first = queue.popleft()
+        for edge in adjacency[first]:
+            second = int(edge[0])
+            if float(edge[2]) > epsilon and second not in reachable:
+                reachable.add(second)
+                queue.append(second)
+    cut = frozenset(
+        candidate.key
+        for candidate in candidates
+        if (
+            index_by_patch[candidate.match.first_patch_id] in reachable
+        ) != (
+            index_by_patch[candidate.match.second_patch_id] in reachable
+        )
+    )
+    return cut, sum(float(capacities[key]) for key in cut)
+
+
+def _collision_cut_proposal(
+    patches: tuple[ClippedPatch, ...],
+    eligible: tuple[SheetJoinCandidate, ...],
+    face_optimal_keys: frozenset[JoinKey],
+    priorities: Mapping[JoinKey, float],
+    *,
+    maximum_cuts: int,
+    reverse: bool = False,
+) -> tuple[SurfaceJoinSelection, dict[str, Any]]:
+    """Segment dense face-optimal sheets with minimum same-cell collision cuts.
+
+    Greedy construction commits to early edges before it knows which dense
+    sheet they create. This proposal reverses that order: begin with every
+    independently optimal face edge, then separate duplicate layers in a cell
+    by the least-cost sheet cut. The ordinary exact validator remains the final
+    authority for crossing, parity, ordering, occupancy, and any residual
+    component collision.
+    """
+
+    candidate_by_key = {value.key: value for value in eligible}
+    patch_by_id = {value.patch_id: value for value in patches}
+    remaining = set(face_optimal_keys)
+    removed: set[JoinKey] = set()
+    cut_capacity = 0.0
+    cut_records: list[dict[str, Any]] = []
+    cut_index = 0
+    while maximum_cuts == 0 or cut_index < maximum_cuts:
+        joins = tuple(candidate_by_key[key].match for key in sorted(remaining))
+        _, members = _component_partition(patches, joins)
+        collision: tuple[int, Int3, int, int] | None = None
+        for component_id, member_ids in sorted(
+            members.items(), reverse=reverse
+        ):
+            by_cell: dict[Int3, list[int]] = defaultdict(list)
+            for patch_id in member_ids:
+                by_cell[patch_by_id[patch_id].cell_xyz].append(patch_id)
+            duplicate = next(
+                (
+                    (cell, tuple(sorted(values)))
+                    for cell, values in sorted(by_cell.items(), reverse=reverse)
+                    if len(values) > 1
+                ),
+                None,
+            )
+            if duplicate is not None:
+                cell, values = duplicate
+                if reverse:
+                    values = tuple(reversed(values))
+                collision = (component_id, cell, values[0], values[1])
+                break
+        if collision is None:
+            break
+        component_id, cell, source, target = collision
+        member_ids = members[component_id]
+        member_set = set(member_ids)
+        internal = tuple(
+            candidate_by_key[key]
+            for key in sorted(remaining)
+            if candidate_by_key[key].match.first_patch_id in member_set
+            and candidate_by_key[key].match.second_patch_id in member_set
+        )
+        cut, capacity = _minimum_undirected_join_cut(
+            member_ids,
+            internal,
+            priorities,
+            source,
+            target,
+        )
+        if not cut:
+            raise RuntimeError("same-cell collision has no separating sheet cut")
+        remaining.difference_update(cut)
+        removed.update(cut)
+        cut_capacity += capacity
+        cut_records.append(
+            {
+                "cut": cut_index + 1,
+                "componentPatches": len(member_ids),
+                "cellXYZ": list(cell),
+                "separatedPatchIds": [source, target],
+                "removedJoins": len(cut),
+                "capacity": round(capacity, 6),
+            }
+        )
+        cut_index += 1
+
+    repaired_joins = tuple(
+        candidate_by_key[key].match for key in sorted(remaining)
+    )
+    safe_seed = select_surface_joins(
+        patches,
+        repaired_joins,
+        candidate_priorities={key: priorities[key] for key in remaining},
+    )
+    safe_keys = frozenset(join_key(value) for value in safe_seed.joins)
+    completed = select_surface_joins(
+        patches,
+        tuple(value.match for value in eligible),
+        fixed_join_keys=safe_keys,
+        candidate_priorities=priorities,
+    )
+    _, members = _component_partition(
+        patches,
+        tuple(candidate_by_key[key].match for key in sorted(remaining)),
+    )
+    collision_groups = 0
+    for member_ids in members.values():
+        counts = Counter(patch_by_id[value].cell_xyz for value in member_ids)
+        collision_groups += sum(value > 1 for value in counts.values())
+    return completed, {
+        "cutOrder": "reverse" if reverse else "forward",
+        "startingFaceOptimalJoins": len(face_optimal_keys),
+        "cutIterations": len(cut_records),
+        "cutLimitReached": collision_groups > 0,
+        "remainingCollisionGroupsBeforeValidation": collision_groups,
+        "removedJoinCount": len(removed),
+        "removedJoinCapacity": round(cut_capacity, 6),
+        "topologySafeSeedJoins": len(safe_seed.joins),
+        "completedJoins": len(completed.joins),
+        "cuts": cut_records[:32],
+    }
+
+
 def _block_record(
     block: SurfaceBlock,
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     unmatched_cost: float,
+    unmatched_trace_penalty: float = 0.0,
 ) -> dict[str, Any]:
     benefit = sum(candidate_by_key[join_key(value)].benefit for value in block.joins)
     interior_endpoints = 2 * len(block.joins) + len(block.unresolved_interior_traces)
+    topology_objective = (
+        benefit
+        - unmatched_trace_penalty * len(block.unresolved_interior_traces)
+    )
     objective_cost = unmatched_cost * interior_endpoints - benefit
     components = component_statistics(block, maximum_records=8)
     return {
@@ -434,6 +668,7 @@ def _block_record(
             2 * len(block.joins) / max(interior_endpoints, 1), 6
         ),
         "totalJoinBenefit": round(float(benefit), 6),
+        "topologyObjective": round(float(topology_objective), 6),
         "objectiveCostWithoutConstant": round(float(objective_cost), 6),
         "deferredJoinsByReason": dict(
             sorted(Counter(value.reason for value in block.deferred_joins).items())
@@ -496,6 +731,7 @@ def _selection_record(
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
     unmatched_cost: float,
     interior_endpoint_count: int,
+    unmatched_trace_penalty: float = 0.0,
 ) -> dict[str, Any]:
     benefit = sum(
         candidate_by_key[join_key(value)].benefit for value in selection.joins
@@ -505,6 +741,7 @@ def _selection_record(
     unresolved = interior_endpoint_count - 2 * len(selection.joins)
     if unresolved < 0:
         raise RuntimeError("sheet selection retained more traces than physically exist")
+    topology_objective = benefit - unmatched_trace_penalty * unresolved
     thresholds = (8, 16, 32, 64, 128, 256, 512)
     return {
         "patches": len(patches),
@@ -516,6 +753,7 @@ def _selection_record(
             2 * len(selection.joins) / max(interior_endpoint_count, 1), 6
         ),
         "totalJoinBenefit": round(float(benefit), 6),
+        "topologyObjective": round(float(topology_objective), 6),
         "objectiveCostWithoutConstant": round(
             float(unmatched_cost * interior_endpoint_count - benefit), 6
         ),
@@ -540,13 +778,15 @@ def _selection_quality(
     selection: SurfaceJoinSelection,
     patches: tuple[ClippedPatch, ...],
     candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
-) -> tuple[float, int, int, int]:
+    unmatched_trace_penalty: float = 0.0,
+) -> tuple[float, float, int, int, int]:
     benefit = sum(
         candidate_by_key[join_key(value)].benefit for value in selection.joins
     )
     _, members = _component_partition(patches, selection.joins)
     largest = max((len(value) for value in members.values()), default=0)
-    return benefit, len(selection.joins), -len(members), largest
+    adjusted = benefit + 2.0 * unmatched_trace_penalty * len(selection.joins)
+    return adjusted, benefit, len(selection.joins), -len(members), largest
 
 
 def _exchange_sheet_neighborhoods(
@@ -570,6 +810,7 @@ def _exchange_sheet_neighborhoods(
     accepted_count = 0
     attempted_count = 0
     skipped_duplicate_neighborhoods = 0
+    retained_join_reward = 2.0 * settings.unmatched_trace_penalty
     for round_index in range(settings.exchange_round_count):
         selected_keys = {join_key(value) for value in current.joins}
         component_by_patch, members = _component_partition(
@@ -592,7 +833,8 @@ def _exchange_sheet_neighborhoods(
                 if trace in selected_by_trace
             }
             displaced_benefit = sum(
-                value.benefit for value in displaced.values()
+                value.benefit + retained_join_reward
+                for value in displaced.values()
             )
             first_component = component_by_patch[candidate.match.first_patch_id]
             second_component = component_by_patch[candidate.match.second_patch_id]
@@ -602,7 +844,9 @@ def _exchange_sheet_neighborhoods(
             )
             opportunities.append(
                 (
-                    candidate.benefit - displaced_benefit,
+                    candidate.benefit
+                    + retained_join_reward
+                    - displaced_benefit,
                     len(displaced),
                     bridge,
                     candidate.benefit,
@@ -697,7 +941,8 @@ def _exchange_sheet_neighborhoods(
             universe.update({value.key: value.match for value in internal})
             fixed = frozenset(join_key(value) for value in outside)
             priorities = {
-                key: candidate_by_key[key].benefit for key in universe
+                key: candidate_by_key[key].benefit + retained_join_reward
+                for key in universe
             }
             maximum_priority = max(priorities.values(), default=0.0)
             priorities[focal.key] = maximum_priority + abs(maximum_priority) + 1.0
@@ -710,10 +955,16 @@ def _exchange_sheet_neighborhoods(
             attempted_this_round += 1
             attempted_count += 1
             before_quality = _selection_quality(
-                current, block.patches, candidate_by_key
+                current,
+                block.patches,
+                candidate_by_key,
+                settings.unmatched_trace_penalty,
             )
             after_quality = _selection_quality(
-                proposal, block.patches, candidate_by_key
+                proposal,
+                block.patches,
+                candidate_by_key,
+                settings.unmatched_trace_penalty,
             )
             focal_retained = focal.key in {
                 join_key(value) for value in proposal.joins
@@ -740,7 +991,10 @@ def _exchange_sheet_neighborhoods(
                 "focalRetained": focal_retained,
                 "removedJoins": len(before_keys - after_keys),
                 "addedJoins": len(after_keys - before_keys),
-                "benefitDelta": round(after_quality[0] - before_quality[0], 6),
+                "benefitDelta": round(after_quality[1] - before_quality[1], 6),
+                "topologyObjectiveDelta": round(
+                    after_quality[0] - before_quality[0], 6
+                ),
                 "accepted": accepted,
             }
             records.append(record)
@@ -755,7 +1009,7 @@ def _exchange_sheet_neighborhoods(
                 "summary": True,
                 "attempted": attempted_this_round,
                 "accepted": accepted_this_round,
-                "benefitGain": round(round_gain, 6),
+                "topologyObjectiveGain": round(round_gain, 6),
             }
         )
         if accepted_this_round == 0:
@@ -844,8 +1098,12 @@ def restitch_sheet_graph(
     degree: Counter[TraceKey] = Counter(
         trace for value in eligible for trace in value.trace_keys
     )
-    face_optimal = _face_optimal_candidate_keys(eligible)
-    priority_span = max((value.benefit for value in eligible), default=1.0)
+    retained_join_reward = 2.0 * resolved.unmatched_trace_penalty
+    face_optimal = _face_optimal_candidate_keys(eligible, retained_join_reward)
+    priority_span = max(
+        (value.benefit + retained_join_reward for value in eligible),
+        default=1.0,
+    )
     interior_endpoint_count = (
         2 * len(block.joins) + len(block.unresolved_interior_traces)
     )
@@ -863,29 +1121,90 @@ def restitch_sheet_graph(
                     by_key,
                     policy.strict_settings.unmatched_negative_log_likelihood,
                     interior_endpoint_count,
+                    resolved.unmatched_trace_penalty,
                 ),
             },
         )
     )
+    if resolved.collision_cut_enabled:
+        objective_priorities = {
+            value.key: value.benefit + retained_join_reward for value in eligible
+        }
+        if resolved.collision_cut_order == "forward":
+            cut_orders = (False,)
+        elif resolved.collision_cut_order == "reverse":
+            cut_orders = (True,)
+        else:
+            cut_orders = (False, True)
+        for order_index, reverse in enumerate(cut_orders):
+            cut_selection, cut_diagnostics = _collision_cut_proposal(
+                block.patches,
+                eligible,
+                face_optimal,
+                objective_priorities,
+                maximum_cuts=resolved.collision_cut_limit,
+                reverse=reverse,
+            )
+            order_name = "reverse" if reverse else "forward"
+            proposals.append(
+                (
+                    cut_selection,
+                    {
+                        "proposalIndex": -2 - order_index,
+                        "proposal": (
+                            "dense-face-alignment + minimum collision cuts "
+                            f"({order_name})"
+                        ),
+                        "proposalDiagnostics": cut_diagnostics,
+                        **_selection_record(
+                            block.patches,
+                            cut_selection,
+                            by_key,
+                            policy.strict_settings.unmatched_negative_log_likelihood,
+                            interior_endpoint_count,
+                            resolved.unmatched_trace_penalty,
+                        ),
+                    },
+                )
+            )
     for restart in range(resolved.restart_count):
         priorities: dict[JoinKey, float] = {}
         for candidate in eligible:
+            objective_benefit = candidate.benefit + retained_join_reward
             if restart == 0:
-                priority = candidate.benefit
+                priority = objective_benefit
                 proposal = "join-benefit"
             elif restart == 1:
-                priority = candidate.benefit + (
+                priority = objective_benefit + (
                     2.0 * priority_span if candidate.key in face_optimal else 0.0
                 )
                 proposal = "exact-face-alignment"
             elif restart == 2:
                 first, second = candidate.trace_keys
-                priority = candidate.benefit / math.sqrt(
+                priority = objective_benefit / math.sqrt(
                     max(degree[first] * degree[second], 1)
                 )
                 proposal = "opportunity-normalized"
+            elif restart == 3:
+                first, second = candidate.trace_keys
+                conflict_pressure = max(degree[first] + degree[second] - 1, 1)
+                priority = objective_benefit / conflict_pressure
+                proposal = "endpoint-scarcity-normalized"
+            elif restart == 4:
+                first, second = candidate.trace_keys
+                conflict_pressure = max(degree[first] * degree[second], 1)
+                # This proposal deliberately makes scarce trace resources the
+                # primary order and likelihood only the deterministic tie-break.
+                # It exposes cardinality solutions that strongest-first greedy
+                # selection cannot reach; exact objective scoring still decides
+                # whether the proposal survives.
+                priority = (
+                    1.0 / conflict_pressure
+                    + 1.0e-3 * objective_benefit / max(priority_span, 1.0e-12)
+                )
+                proposal = "scarce-traces-first"
             else:
-                priority = candidate.benefit * (
+                priority = objective_benefit * (
                     1.0
                     + resolved.priority_jitter_fraction
                     * _stable_jitter(candidate.key, restart)
@@ -906,6 +1225,7 @@ def restitch_sheet_graph(
                 by_key,
                 policy.strict_settings.unmatched_negative_log_likelihood,
                 interior_endpoint_count,
+                resolved.unmatched_trace_penalty,
             ),
         }
         proposals.append((selection, record))
@@ -913,11 +1233,12 @@ def restitch_sheet_graph(
         block,
         by_key,
         policy.strict_settings.unmatched_negative_log_likelihood,
+        resolved.unmatched_trace_penalty,
     )
     best_selection, best_record = min(
         proposals,
         key=lambda value: (
-            -float(value[1]["totalJoinBenefit"]),
+            -float(value[1]["topologyObjective"]),
             -int(value[1]["retainedJoins"]),
             int(value[1]["components"]),
             int(value[1]["proposalIndex"]),
@@ -939,6 +1260,7 @@ def restitch_sheet_graph(
             by_key,
             policy.strict_settings.unmatched_negative_log_likelihood,
             interior_endpoint_count,
+            resolved.unmatched_trace_penalty,
         ),
     }
     best_block = surface_block_from_retained_joins(
@@ -970,6 +1292,7 @@ def restitch_sheet_graph(
                 "unresolvedInteriorTraceEndpoints",
                 "retainedInteriorTraceFraction",
                 "totalJoinBenefit",
+                "topologyObjective",
                 "objectiveCostWithoutConstant",
             )
         },
@@ -1191,8 +1514,8 @@ def run_block_sheet_restitching(
         result.block,
         semantics=(
             "fixed Acus patch geometry with complete face correspondence "
-            "catalog, exact face alignment, and topology-safe whole-sheet "
-            "neighborhood exchanges"
+            "catalog, dense collision-cut segmentation, exact topology "
+            "validation, and whole-sheet neighborhood exchanges"
         ),
         provenance={
             "inputRoot": str(materialized),
@@ -1214,8 +1537,9 @@ def run_block_sheet_restitching(
                 "alternatives outside the locally optimal face alignment"
             ),
             "optimization": (
-                "exact per-face alignment, whole-block deterministic proposals, "
-                "and non-monotone whole-sheet neighborhood exchanges"
+                "exact per-face alignment, minimum-cost segmentation of dense "
+                "same-cell collision components, whole-block deterministic "
+                "proposals, and non-monotone whole-sheet neighborhood exchanges"
             ),
             "hardConstraints": [
                 "one join per patch trace",

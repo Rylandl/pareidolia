@@ -30,6 +30,9 @@ class SheetConfigurationSolverSettings:
     unmatched_trace_penalty: float = 0.0
     pairwise_normalization: str = "none"
     maximum_sweeps: int = 12
+    belief_propagation_iterations: int = 0
+    belief_propagation_damping: float = 0.5
+    belief_propagation_tolerance: float = 1.0e-4
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.unary_scale) or self.unary_scale <= 0.0:
@@ -53,6 +56,18 @@ class SheetConfigurationSolverSettings:
             )
         if self.maximum_sweeps <= 0:
             raise ValueError("maximum sweeps must be positive")
+        if self.belief_propagation_iterations < 0:
+            raise ValueError("belief-propagation iterations must be nonnegative")
+        if (
+            not math.isfinite(self.belief_propagation_damping)
+            or not 0.0 <= self.belief_propagation_damping < 1.0
+        ):
+            raise ValueError("belief-propagation damping must lie in [0, 1)")
+        if (
+            not math.isfinite(self.belief_propagation_tolerance)
+            or self.belief_propagation_tolerance <= 0.0
+        ):
+            raise ValueError("belief-propagation tolerance must be positive")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -246,6 +261,151 @@ def _unary_values(
     return values
 
 
+def _pair_value_matrices(
+    arrays: Mapping[str, np.ndarray],
+    settings: SheetConfigurationSolverSettings,
+) -> tuple[np.ndarray, ...]:
+    pair_offset = np.asarray(arrays["pairOffset"], dtype=np.uint64)
+    benefit = np.asarray(arrays["pairJoinBenefit"], dtype=np.float64)
+    matched = np.asarray(arrays["pairMatchedTraceCount"], dtype=np.float64)
+    unmatched = np.asarray(arrays["pairUnmatchedTraceCount"], dtype=np.float64)
+    result = []
+    for face_index, (first_count_value, second_count_value) in enumerate(
+        zip(arrays["firstConfigurationCount"], arrays["secondConfigurationCount"])
+    ):
+        first_count = int(first_count_value)
+        second_count = int(second_count_value)
+        low = int(pair_offset[face_index])
+        high = int(pair_offset[face_index + 1])
+        local_benefit = benefit[low:high].copy()
+        if settings.pairwise_normalization == "trace-mean":
+            local_benefit /= np.maximum(
+                2.0 * matched[low:high] + unmatched[low:high], 1.0
+            )
+        values = (
+            settings.pairwise_scale * local_benefit
+            - settings.unmatched_trace_penalty * unmatched[low:high]
+        )
+        result.append(values.reshape(first_count, second_count))
+    return tuple(result)
+
+
+def _max_sum_configuration_seed(
+    configuration_offset: np.ndarray,
+    factors: Mapping[str, np.ndarray],
+    unary: np.ndarray,
+    settings: SheetConfigurationSolverSettings,
+) -> tuple[tuple[int, ...], dict[str, Any]]:
+    """Decode a whole-block max-sum loopy-belief-propagation initialization."""
+
+    cell_count = len(configuration_offset) - 1
+    face_count = len(factors["firstCellIndex"])
+    pair_values = _pair_value_matrices(factors, settings)
+    first_to_second = [
+        np.zeros(int(factors["secondConfigurationCount"][face]), dtype=np.float64)
+        for face in range(face_count)
+    ]
+    second_to_first = [
+        np.zeros(int(factors["firstConfigurationCount"][face]), dtype=np.float64)
+        for face in range(face_count)
+    ]
+    iterations = 0
+    maximum_delta = math.inf
+    for iteration in range(settings.belief_propagation_iterations):
+        totals = [
+            np.asarray(unary[int(low) : int(high)], dtype=np.float64).copy()
+            for low, high in zip(configuration_offset[:-1], configuration_offset[1:])
+        ]
+        for face_index, (first_value, second_value) in enumerate(
+            zip(factors["firstCellIndex"], factors["secondCellIndex"])
+        ):
+            totals[int(first_value)] += second_to_first[face_index]
+            totals[int(second_value)] += first_to_second[face_index]
+        next_first_to_second: list[np.ndarray] = []
+        next_second_to_first: list[np.ndarray] = []
+        maximum_delta = 0.0
+        for face_index, (first_value, second_value) in enumerate(
+            zip(factors["firstCellIndex"], factors["secondCellIndex"])
+        ):
+            first = int(first_value)
+            second = int(second_value)
+            first_cavity = totals[first] - second_to_first[face_index]
+            second_cavity = totals[second] - first_to_second[face_index]
+            matrix = pair_values[face_index]
+            proposed_first_to_second = np.max(
+                first_cavity[:, np.newaxis] + matrix, axis=0
+            )
+            proposed_second_to_first = np.max(
+                matrix + second_cavity[np.newaxis, :], axis=1
+            )
+            if not (
+                np.all(np.isfinite(proposed_first_to_second))
+                and np.all(np.isfinite(proposed_second_to_first))
+            ):
+                raise RuntimeError("belief propagation produced a non-finite message")
+            proposed_first_to_second -= np.max(proposed_first_to_second)
+            proposed_second_to_first -= np.max(proposed_second_to_first)
+            updated_first_to_second = (
+                settings.belief_propagation_damping
+                * first_to_second[face_index]
+                + (1.0 - settings.belief_propagation_damping)
+                * proposed_first_to_second
+            )
+            updated_second_to_first = (
+                settings.belief_propagation_damping
+                * second_to_first[face_index]
+                + (1.0 - settings.belief_propagation_damping)
+                * proposed_second_to_first
+            )
+            maximum_delta = max(
+                maximum_delta,
+                float(
+                    np.max(
+                        np.abs(
+                            updated_first_to_second
+                            - first_to_second[face_index]
+                        )
+                    )
+                ),
+                float(
+                    np.max(
+                        np.abs(
+                            updated_second_to_first
+                            - second_to_first[face_index]
+                        )
+                    )
+                ),
+            )
+            next_first_to_second.append(updated_first_to_second)
+            next_second_to_first.append(updated_second_to_first)
+        first_to_second = next_first_to_second
+        second_to_first = next_second_to_first
+        iterations = iteration + 1
+        if maximum_delta <= settings.belief_propagation_tolerance:
+            break
+
+    beliefs = [
+        np.asarray(unary[int(low) : int(high)], dtype=np.float64).copy()
+        for low, high in zip(configuration_offset[:-1], configuration_offset[1:])
+    ]
+    for face_index, (first_value, second_value) in enumerate(
+        zip(factors["firstCellIndex"], factors["secondCellIndex"])
+    ):
+        beliefs[int(first_value)] += second_to_first[face_index]
+        beliefs[int(second_value)] += first_to_second[face_index]
+    selected = tuple(
+        int(configuration_offset[cell_index]) + int(np.argmax(beliefs[cell_index]))
+        for cell_index in range(cell_count)
+    )
+    return selected, {
+        "beliefPropagationIterations": iterations,
+        "beliefPropagationMaximumMessageDelta": round(maximum_delta, 6),
+        "beliefPropagationConverged": (
+            maximum_delta <= settings.belief_propagation_tolerance
+        ),
+    }
+
+
 def _selection_record(
     evidence: BlockSheetEvidence,
     factors: Mapping[str, np.ndarray],
@@ -316,12 +476,21 @@ def optimize_sheet_configurations(
         )
         for low, high in zip(config_offset[:-1], config_offset[1:])
     )
+    seeds: list[tuple[str, tuple[int, ...], dict[str, Any]]] = [
+        ("declared-initial", initial, {}),
+        ("unary-optimum", unary_initial, {}),
+    ]
+    if resolved.belief_propagation_iterations > 0:
+        message_seed, message_record = _max_sum_configuration_seed(
+            config_offset,
+            factors,
+            unary,
+            resolved,
+        )
+        seeds.append(("max-sum-belief-propagation", message_seed, message_record))
     proposals: list[SheetConfigurationSelection] = []
     records: list[dict[str, Any]] = []
-    for initialization, seed in (
-        ("declared-initial", initial),
-        ("unary-optimum", unary_initial),
-    ):
+    for initialization, seed, seed_record in seeds:
         selected = list(seed)
         changed = 0
         sweeps = 0
@@ -389,6 +558,7 @@ def optimize_sheet_configurations(
                 "pairwiseObjective": round(result.pairwise_objective, 6),
                 "matchedTraces": result.matched_trace_count,
                 "unmatchedTraceEndpoints": result.unmatched_trace_endpoint_count,
+                **seed_record,
             }
         )
     best = max(

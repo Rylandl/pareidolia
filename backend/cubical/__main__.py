@@ -63,6 +63,7 @@ from .sheet_configuration_solver import (
     SheetConfigurationSolverSettings,
     run_sheet_configuration_initialization,
 )
+from .sheet_core_audit import audit_sheet_core
 from .sheet_graph_solver import replay_joint_sheet_graph
 from .sheet_ownership import (
     crop_surface_graph_to_owned_block,
@@ -680,10 +681,14 @@ def _restitch_block_sheets(args: argparse.Namespace) -> None:
         settings=SheetStitchingSettings(
             minimum_join_benefit=args.minimum_join_benefit,
             quarter_turn_penalty=args.quarter_turn_penalty,
+            unmatched_trace_penalty=args.unmatched_trace_penalty,
             restart_count=args.restarts,
             priority_jitter_fraction=args.priority_jitter_fraction,
             exchange_round_count=args.exchange_rounds,
             exchange_trials_per_round=args.exchange_trials_per_round,
+            collision_cut_enabled=not args.no_collision_cut,
+            collision_cut_limit=args.collision_cut_limit,
+            collision_cut_order=args.collision_cut_order,
         ),
         force=args.force,
     )
@@ -766,6 +771,9 @@ def _initialize_sheet_configurations(args: argparse.Namespace) -> None:
             unmatched_trace_penalty=args.unmatched_trace_penalty,
             pairwise_normalization=args.pairwise_normalization,
             maximum_sweeps=args.maximum_sweeps,
+            belief_propagation_iterations=args.belief_propagation_iterations,
+            belief_propagation_damping=args.belief_propagation_damping,
+            belief_propagation_tolerance=args.belief_propagation_tolerance,
         ),
         force=args.force,
     )
@@ -791,10 +799,14 @@ def _replay_joint_sheet_graph(args: argparse.Namespace) -> None:
         stitching_settings=SheetStitchingSettings(
             minimum_join_benefit=args.minimum_join_benefit,
             quarter_turn_penalty=args.quarter_turn_penalty,
+            unmatched_trace_penalty=args.unmatched_trace_penalty,
             restart_count=args.restarts,
             priority_jitter_fraction=args.priority_jitter_fraction,
             exchange_round_count=args.exchange_rounds,
             exchange_trials_per_round=args.exchange_trials_per_round,
+            collision_cut_enabled=not args.no_collision_cut,
+            collision_cut_limit=args.collision_cut_limit,
+            collision_cut_order=args.collision_cut_order,
         ),
         force=args.force,
         progress=progress,
@@ -842,14 +854,21 @@ def _sheet_halo_experiment(args: argparse.Namespace) -> None:
             unmatched_trace_penalty=args.unmatched_trace_penalty,
             pairwise_normalization=args.pairwise_normalization,
             maximum_sweeps=args.maximum_sweeps,
+            belief_propagation_iterations=args.belief_propagation_iterations,
+            belief_propagation_damping=args.belief_propagation_damping,
+            belief_propagation_tolerance=args.belief_propagation_tolerance,
         ),
         stitching_settings=SheetStitchingSettings(
             minimum_join_benefit=args.minimum_join_benefit,
             quarter_turn_penalty=args.quarter_turn_penalty,
+            unmatched_trace_penalty=args.stitching_unmatched_trace_penalty,
             restart_count=args.restarts,
             priority_jitter_fraction=args.priority_jitter_fraction,
             exchange_round_count=args.exchange_rounds,
             exchange_trials_per_round=args.exchange_trials_per_round,
+            collision_cut_enabled=not args.no_collision_cut,
+            collision_cut_limit=args.collision_cut_limit,
+            collision_cut_order=args.collision_cut_order,
         ),
         force=args.force,
         progress=progress,
@@ -866,6 +885,21 @@ def _finalize_sheet_halo_experiment(args: argparse.Namespace) -> None:
         cluster_root=args.cluster,
         force=args.force,
         progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _audit_sheet_core(args: argparse.Namespace) -> None:
+    summary = audit_sheet_core(
+        args.evidence,
+        args.correspondences,
+        args.factors,
+        args.configurations,
+        args.graph,
+        args.output,
+        core_start_cell_xyz=tuple(args.core_start),
+        maximum_hotspots=args.maximum_hotspots,
+        force=args.force,
     )
     print(json.dumps(summary, indent=2))
 
@@ -2012,6 +2046,12 @@ def main() -> None:
     sheet_restitch.add_argument(
         "--quarter-turn-penalty", type=float, default=0.75
     )
+    sheet_restitch.add_argument(
+        "--unmatched-trace-penalty",
+        type=float,
+        default=0.0,
+        help="extra cost per open endpoint in raw correspondence-benefit units",
+    )
     sheet_restitch.add_argument("--restarts", type=int, default=12)
     sheet_restitch.add_argument(
         "--priority-jitter-fraction", type=float, default=0.35
@@ -2019,6 +2059,18 @@ def main() -> None:
     sheet_restitch.add_argument("--exchange-rounds", type=int, default=2)
     sheet_restitch.add_argument(
         "--exchange-trials-per-round", type=int, default=24
+    )
+    sheet_restitch.add_argument(
+        "--collision-cut-limit",
+        type=int,
+        default=0,
+        help="maximum dense collision cuts; zero runs to physical completion",
+    )
+    sheet_restitch.add_argument("--no-collision-cut", action="store_true")
+    sheet_restitch.add_argument(
+        "--collision-cut-order",
+        choices=("forward", "reverse", "both"),
+        default="forward",
     )
     sheet_restitch.add_argument("--force", action="store_true")
     sheet_restitch.set_defaults(handler=_restitch_block_sheets)
@@ -2090,7 +2142,10 @@ def main() -> None:
         "--coverage-reward-scale", type=float, default=0.0
     )
     sheet_configuration.add_argument(
-        "--unmatched-trace-penalty", type=float, default=0.0
+        "--unmatched-trace-penalty",
+        type=float,
+        default=0.0,
+        help="extra local-factor cost per unmatched face-trace endpoint",
     )
     sheet_configuration.add_argument(
         "--pairwise-normalization",
@@ -2098,6 +2153,15 @@ def main() -> None:
         default="none",
     )
     sheet_configuration.add_argument("--maximum-sweeps", type=int, default=12)
+    sheet_configuration.add_argument(
+        "--belief-propagation-iterations", type=int, default=0
+    )
+    sheet_configuration.add_argument(
+        "--belief-propagation-damping", type=float, default=0.5
+    )
+    sheet_configuration.add_argument(
+        "--belief-propagation-tolerance", type=float, default=1.0e-4
+    )
     sheet_configuration.add_argument("--force", action="store_true")
     sheet_configuration.set_defaults(handler=_initialize_sheet_configurations)
     joint_sheet_graph = subparsers.add_parser(
@@ -2119,6 +2183,12 @@ def main() -> None:
     joint_sheet_graph.add_argument(
         "--quarter-turn-penalty", type=float, default=0.75
     )
+    joint_sheet_graph.add_argument(
+        "--unmatched-trace-penalty",
+        type=float,
+        default=0.0,
+        help="extra cost per open endpoint in raw correspondence-benefit units",
+    )
     joint_sheet_graph.add_argument("--restarts", type=int, default=4)
     joint_sheet_graph.add_argument(
         "--priority-jitter-fraction", type=float, default=0.35
@@ -2126,6 +2196,18 @@ def main() -> None:
     joint_sheet_graph.add_argument("--exchange-rounds", type=int, default=2)
     joint_sheet_graph.add_argument(
         "--exchange-trials-per-round", type=int, default=24
+    )
+    joint_sheet_graph.add_argument(
+        "--collision-cut-limit",
+        type=int,
+        default=0,
+        help="maximum dense collision cuts; zero runs to physical completion",
+    )
+    joint_sheet_graph.add_argument("--no-collision-cut", action="store_true")
+    joint_sheet_graph.add_argument(
+        "--collision-cut-order",
+        choices=("forward", "reverse", "both"),
+        default="forward",
     )
     joint_sheet_graph.add_argument("--force", action="store_true")
     joint_sheet_graph.set_defaults(handler=_replay_joint_sheet_graph)
@@ -2187,15 +2269,35 @@ def main() -> None:
     sheet_halo.add_argument("--unary-scale", type=float, default=1.0)
     sheet_halo.add_argument("--pairwise-scale", type=float, default=0.2)
     sheet_halo.add_argument("--coverage-reward-scale", type=float, default=0.0)
-    sheet_halo.add_argument("--unmatched-trace-penalty", type=float, default=0.0)
+    sheet_halo.add_argument(
+        "--unmatched-trace-penalty",
+        type=float,
+        default=0.0,
+        help="extra local-factor cost per unmatched face-trace endpoint",
+    )
     sheet_halo.add_argument(
         "--pairwise-normalization",
         choices=("none", "trace-mean"),
         default="none",
     )
     sheet_halo.add_argument("--maximum-sweeps", type=int, default=12)
+    sheet_halo.add_argument(
+        "--belief-propagation-iterations", type=int, default=0
+    )
+    sheet_halo.add_argument(
+        "--belief-propagation-damping", type=float, default=0.5
+    )
+    sheet_halo.add_argument(
+        "--belief-propagation-tolerance", type=float, default=1.0e-4
+    )
     sheet_halo.add_argument("--minimum-join-benefit", type=float, default=0.0)
     sheet_halo.add_argument("--quarter-turn-penalty", type=float, default=0.75)
+    sheet_halo.add_argument(
+        "--stitching-unmatched-trace-penalty",
+        type=float,
+        default=0.0,
+        help="extra owned-graph cost per open endpoint in raw benefit units",
+    )
     sheet_halo.add_argument("--restarts", type=int, default=4)
     sheet_halo.add_argument(
         "--priority-jitter-fraction", type=float, default=0.35
@@ -2203,6 +2305,18 @@ def main() -> None:
     sheet_halo.add_argument("--exchange-rounds", type=int, default=2)
     sheet_halo.add_argument(
         "--exchange-trials-per-round", type=int, default=24
+    )
+    sheet_halo.add_argument(
+        "--collision-cut-limit",
+        type=int,
+        default=0,
+        help="maximum dense collision cuts; zero runs to physical completion",
+    )
+    sheet_halo.add_argument("--no-collision-cut", action="store_true")
+    sheet_halo.add_argument(
+        "--collision-cut-order",
+        choices=("forward", "reverse", "both"),
+        default="forward",
     )
     sheet_halo.add_argument("--force", action="store_true")
     sheet_halo.set_defaults(handler=_sheet_halo_experiment)
@@ -2224,6 +2338,30 @@ def main() -> None:
     )
     finalize_sheet_halo.add_argument("--force", action="store_true")
     finalize_sheet_halo.set_defaults(handler=_finalize_sheet_halo_experiment)
+    sheet_core_audit = subparsers.add_parser(
+        "audit-sheet-core",
+        description=(
+            "Classify every owned-core evidence deficit and unresolved interior "
+            "trace against the complete immutable Acus mode, physical-stack, "
+            "and correspondence banks."
+        ),
+    )
+    sheet_core_audit.add_argument("--evidence", type=Path, required=True)
+    sheet_core_audit.add_argument(
+        "--correspondences", type=Path, required=True
+    )
+    sheet_core_audit.add_argument("--factors", type=Path, required=True)
+    sheet_core_audit.add_argument(
+        "--configurations", type=Path, required=True
+    )
+    sheet_core_audit.add_argument("--graph", type=Path, required=True)
+    sheet_core_audit.add_argument(
+        "--core-start", nargs=3, type=int, required=True
+    )
+    sheet_core_audit.add_argument("--output", type=Path, required=True)
+    sheet_core_audit.add_argument("--maximum-hotspots", type=int, default=128)
+    sheet_core_audit.add_argument("--force", action="store_true")
+    sheet_core_audit.set_defaults(handler=_audit_sheet_core)
     sheet_topology_refinement = subparsers.add_parser(
         "refine-sheet-topology",
         description=(

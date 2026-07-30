@@ -99,14 +99,27 @@ The solver optimizes a retained edge set under exact constraints:
 - one consistent grid-edge/grid-vertex crossing feature; and
 - orientable polygon parity.
 
-The current fixed-geometry solver uses three non-monotone levels:
+The current fixed-geometry solver uses four non-monotone levels:
 
 1. exact weighted, order-preserving alignment on every complete shared face;
-2. deterministic whole-block proposals under the global constraints; and
-3. component-neighborhood exchange, which removes every internal join from the
+2. dense face-graph segmentation, which starts from every independently
+   optimal face edge and repeatedly makes a minimum-cost cut between two
+   patches from the same cell until every provisional sheet is physically
+   collision-free;
+3. deterministic whole-block proposals under the global constraints; and
+4. component-neighborhood exchange, which removes every internal join from the
    one or two current sheets touched by a focal alternative, reconstructs the
    induced graph against a fixed exterior, and accepts only an objective
    improvement.
+
+The dense segmentation reverses the strongest-first commitment that formerly
+made sheet identity depend on edge arrival order. Each cut is an undirected
+minimum cut weighted by correspondence evidence plus the configured open-trace
+cost. The cut sequence terminates without a dataset-specific iteration count:
+each cut permanently separates at least one previously connected same-cell
+pair. Crossing-feature, face-order, orientation-parity, and component/cell
+constraints are still replayed by the ordinary exact selector, and all safe
+alternatives are offered again after segmentation.
 
 Graph selection is separate from mesh welding. Thousands of candidate edge
 sets can therefore be evaluated without rebuilding vertices, boundary traces,
@@ -119,6 +132,41 @@ and from 58.81% to 62.35% retained interior traces while improving the explicit
 join-likelihood objective. This demonstrates real stitching headroom, but it
 also identifies the fixed-geometry floor: thousands of remaining endpoints
 have no compatible selected plane on the adjacent cell.
+
+### Owned-core utilization audit
+
+`audit-sheet-core` separates evidence-bank, configuration, local-face, and
+global-topology losses for one owned rectangular core. It uses stable mode and
+configuration IDs to compare an owned graph with its complete immutable Acus
+bank and records results by shell depth, cell, component, and hole class. An
+unresolved endpoint is distinguished as an occupied compatible alternative,
+an open compatible bridge, a same-component continuation, an inactive
+configuration alternative, a bank-incompatible plane, or a complete face miss.
+
+On the controlled 12 x 12 x 10 core, 80.15% of the 6,590 open endpoints already
+had a compatible continuation in the immutable bank; only 133 missed the
+target face entirely. The selected configurations retained 65.42% of
+structural evidence against a 72.98% per-cell physical-stack oracle. They
+permitted 6,600 local joins, but only 5,633 survived global topology—a 967-join
+topology tax. Thus the boundary halo was not the mechanism needed to repair
+core holes.
+
+Whole-block max-sum configuration messages plus a coverage reward raised owned
+evidence utilization to 66.86% and the local match count to 6,624. Under the
+default pure correspondence-likelihood objective, fully converged dense
+collision-cut segmentation followed by four whole-sheet exchange rounds
+retained 5,692 joins, reduced open endpoints to 6,424, and lowered the topology
+tax from 967 to 932. Raw retained correspondence benefit rose by 187. An
+explicit continuity-Pareto run charging two additional benefit units per open
+endpoint retained 5,709 joins, reduced open endpoints to 6,390, reduced
+components from 418 to 404, and lowered the topology tax to 915 while giving up
+only 27 raw benefit units (0.044%) relative to the pure optimum. The pure and
+continuity solutions' largest components were 170 and 191 cells, respectively,
+versus 212 before this refocus; component size remains an audit rather than an
+acceptance reward. Forward and reverse deterministic cut orders differed by
+only four retained joins before exchange; the higher-objective forward order
+remains the default, while both remain available as an explicit sensitivity
+audit.
 
 ## Joint configuration and sheet inference
 
@@ -182,9 +230,11 @@ python3 -m backend.cubical refine-sheet-topology \
   --output /data/block-sheet-topology-refinement-v1
 ```
 
-The initializer optimizes the complete unary-plus-face factor graph from both
-the declared state and the unary optimum. Its output is explicitly provisional:
-global topology replay is mandatory. On the pilot it changed 504/3,584 stacks,
+The initializer optimizes the complete unary-plus-face factor graph from the
+declared state, the unary optimum, and an optional synchronous max-sum loopy
+belief-propagation seed. Every seed receives the same deterministic ICM polish
+and is compared under the exact local factor objective. Its output is explicitly
+provisional: global topology replay is mandatory. On the pilot it changed 504/3,584 stacks,
 raised Acus coverage from 64.83% to 65.14%, and added 387 locally matchable face
 joins. After exact topology replay, the improvement remained real: 14,160 joins
 versus 13,994 for the best fixed-geometry graph, 808 versus 819 components, a

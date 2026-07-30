@@ -92,6 +92,10 @@ from backend.cubical.sheet_evidence import (
     read_block_sheet_evidence,
 )
 from backend.cubical.sheet_correspondence import enumerate_mode_correspondences
+from backend.cubical.sheet_configuration_solver import (
+    SheetConfigurationSolverSettings,
+    _max_sum_configuration_seed,
+)
 from backend.cubical.sheet_factors import _ordered_alignment_factor
 from backend.cubical.sheet_ownership import (
     crop_surface_graph_to_owned_block,
@@ -101,6 +105,7 @@ from backend.cubical.sheet_ownership import (
 from backend.cubical.sheet_stitching import (
     SheetMatchingPolicy,
     SheetStitchingSettings,
+    _minimum_undirected_join_cut,
     enumerate_sheet_join_catalog,
     restitch_sheet_graph,
 )
@@ -2572,6 +2577,15 @@ class CubicalGeometryTests(unittest.TestCase):
             settings=settings,
         )
         self.assertEqual(len(catalog.candidates), 4)
+        cut, capacity = _minimum_undirected_join_cut(
+            (1, 2, 3, 4),
+            catalog.candidates,
+            {value.key: 1.0 for value in catalog.candidates},
+            1,
+            2,
+        )
+        self.assertEqual(len(cut), 2)
+        self.assertEqual(capacity, 2.0)
 
         crossing_priority = {
             value.key: (
@@ -2630,6 +2644,33 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(benefit, 11.0)
         self.assertEqual(matched, 2)
         self.assertEqual(quarter, 1)
+
+    def test_sheet_configuration_belief_propagation_coordinates_cells(self) -> None:
+        factors = {
+            "firstCellIndex": np.asarray((0,), dtype=np.uint32),
+            "secondCellIndex": np.asarray((1,), dtype=np.uint32),
+            "firstConfigurationStart": np.asarray((0,), dtype=np.uint32),
+            "firstConfigurationCount": np.asarray((2,), dtype=np.uint16),
+            "secondConfigurationStart": np.asarray((2,), dtype=np.uint32),
+            "secondConfigurationCount": np.asarray((2,), dtype=np.uint16),
+            "pairOffset": np.asarray((0, 4), dtype=np.uint64),
+            "pairJoinBenefit": np.asarray((0.0, 0.0, 0.0, 10.0)),
+            "pairMatchedTraceCount": np.zeros(4, dtype=np.uint16),
+            "pairUnmatchedTraceCount": np.zeros(4, dtype=np.uint16),
+        }
+        selected, record = _max_sum_configuration_seed(
+            np.asarray((0, 2, 4), dtype=np.uint64),
+            factors,
+            np.asarray((3.0, 0.0, 3.0, 0.0)),
+            SheetConfigurationSolverSettings(
+                pairwise_scale=1.0,
+                belief_propagation_iterations=8,
+                belief_propagation_damping=0.0,
+            ),
+        )
+
+        self.assertEqual(selected, (1, 3))
+        self.assertTrue(record["beliefPropagationConverged"])
 
     def test_sheet_topology_acceptance_uses_evidence_objective_not_size(self) -> None:
         def evaluation(
