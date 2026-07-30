@@ -16,7 +16,13 @@ from .block import (
     assemble_surface_hierarchy,
     rebuild_surface_block,
 )
-from .contracts import RawAcusSettings, atomic_json, canonical_json_hash, sha256_file
+from .contracts import (
+    RawAcusSettings,
+    atomic_json,
+    canonical_json_hash,
+    resolve_pipeline_manifest,
+    sha256_file,
+)
 from .continuity import apply_join_continuity_refinement
 from .geometry import axial_angle_radians
 from .mode_bank import MODE_BANK_SCHEMA, load_mode_bank
@@ -884,6 +890,57 @@ def _write_fingerprint_artifact(
     return payload
 
 
+def read_patch_fingerprints(
+    prefix: str | Path,
+    *,
+    identity_sha256: str | None = None,
+    verify: bool = True,
+) -> PatchFingerprintTable:
+    """Load one complete fixed-width selected-patch fingerprint artifact."""
+
+    path = Path(prefix)
+    manifest_path = path.with_suffix(".json")
+    data_path = path.with_suffix(".npz")
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("schema") != FINGERPRINT_SCHEMA
+        or int(manifest.get("version", -1)) != FINGERPRINT_VERSION
+    ):
+        raise ValueError("fingerprint artifact schema/version mismatch")
+    if (
+        identity_sha256 is not None
+        and manifest.get("identitySha256") != identity_sha256
+    ):
+        raise ValueError("fingerprint artifact identity mismatch")
+    if verify and manifest.get("data", {}).get("sha256") != sha256_file(data_path):
+        raise ValueError("fingerprint artifact data hash mismatch")
+    with np.load(data_path) as values:
+        table = PatchFingerprintTable(
+            patch_id=values["patchId"].copy(),
+            anchor_valid=values["anchorValid"].copy(),
+            anchor_shard_index=values["anchorShardIndex"].copy(),
+            anchor_mode_index=values["anchorModeIndex"].copy(),
+            anchor_height_residual_voxels=values[
+                "anchorHeightResidualVoxels"
+            ].copy(),
+            anchor_normal_residual_degrees=values[
+                "anchorNormalResidualDegrees"
+            ].copy(),
+            anchor_fiber_residual_degrees=values[
+                "anchorFiberResidualDegrees"
+            ].copy(),
+            context_mode_count=values["contextModeCount"].copy(),
+            support_low_voxels=values["supportLowVoxels"].copy(),
+            support_high_voxels=values["supportHighVoxels"].copy(),
+            normal_xyz=values["normalXYZ"].copy(),
+            depth_offsets_voxels=values["depthOffsetsVoxels"].copy(),
+            density=values["density"].copy(),
+            orientation_moment=values["orientationMoment"].copy(),
+        )
+    table.validate()
+    return table
+
+
 def _optional_float(value: float | None) -> float:
     return float(value) if value is not None else math.nan
 
@@ -1005,17 +1062,7 @@ def _write_join_table(path: Path, records: list[dict[str, Any]]) -> None:
 
 
 def _resolve_pipeline(root: Path) -> tuple[Path, dict[str, Any]]:
-    pipeline_path = root / "pipeline.json"
-    if not pipeline_path.is_file():
-        variant_path = root / "variant.json"
-        if not variant_path.is_file():
-            raise ValueError("stratigraphic root has neither pipeline.json nor variant.json")
-        variant = json.loads(variant_path.read_text())
-        pipeline_path = Path(variant["inputRoot"]).resolve() / "pipeline.json"
-    pipeline = json.loads(pipeline_path.read_text())
-    if pipeline.get("state") != "complete":
-        raise ValueError("stratigraphic continuity requires a complete input pipeline")
-    return pipeline_path.parent, pipeline
+    return resolve_pipeline_manifest(root)
 
 
 def _identity(

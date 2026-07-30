@@ -21,6 +21,7 @@ from .contracts import (
     VolumeSource,
     atomic_json,
     canonical_json_hash,
+    resolve_pipeline_manifest,
     sha256_file,
 )
 from .geometry import ClippedPatch
@@ -100,16 +101,7 @@ def join_key(match: TraceMatch) -> JoinKey:
 
 
 def _resolve_source(root: Path) -> tuple[dict[str, Any], VolumeSource]:
-    pipeline_path = root / "pipeline.json"
-    if not pipeline_path.is_file():
-        variant_path = root / "variant.json"
-        if not variant_path.is_file():
-            raise ValueError("continuity root has neither pipeline.json nor variant.json")
-        variant = json.loads(variant_path.read_text())
-        pipeline_path = Path(variant["inputRoot"]).resolve() / "pipeline.json"
-    pipeline = json.loads(pipeline_path.read_text())
-    if pipeline.get("state") != "complete":
-        raise ValueError("native CT continuity requires a complete input pipeline")
+    _, pipeline = resolve_pipeline_manifest(root)
     source_values = pipeline["identity"]["source"]
     source = VolumeSource.open(
         source_values["path"], source_values.get("metadataPath")

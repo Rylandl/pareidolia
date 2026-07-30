@@ -14,6 +14,7 @@ from .contracts import RawAcusSettings, ReconstructionWindow
 from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
 from .continuity import JoinContinuitySettings, run_join_continuity_refinement
+from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
 from .export import write_block_obj, write_block_projection_png
 from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
@@ -23,6 +24,7 @@ from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
 from .selection import configuration_options
+from .saturation import SheetSaturationSettings, run_sheet_saturation_audit
 from .stratigraphic_continuity import (
     StratigraphicContinuitySettings,
     run_stratigraphic_continuity_refinement,
@@ -618,6 +620,77 @@ def _refine_stratigraphic_continuity(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _contextual_growth(args: argparse.Namespace) -> None:
+    settings = ContextualGrowthSettings(
+        minimum_support_faces=args.minimum_support_faces,
+        maximum_admission_robust_z=args.maximum_admission_robust_z,
+        maximum_modes_per_trace=args.maximum_modes_per_trace,
+        maximum_trials=args.maximum_trials,
+        leaf_shape_cells_xyz=tuple(args.leaf_shape),
+    )
+    last_discovery_report = -1
+    last_scoring_report = -1
+
+    def discovery_progress(completed: int, total: int) -> None:
+        nonlocal last_discovery_report
+        bucket = completed // 1000
+        if bucket != last_discovery_report or completed == total:
+            last_discovery_report = bucket
+            print(f"growth discovery {completed:,}/{total:,}", flush=True)
+
+    def scoring_progress(completed: int, total: int) -> None:
+        nonlocal last_scoring_report
+        bucket = completed // 500
+        if bucket != last_scoring_report or completed == total:
+            last_scoring_report = bucket
+            print(f"growth fingerprints {completed:,}/{total:,}", flush=True)
+
+    def trial_progress(completed: int, total: int, candidate_id: int) -> None:
+        print(
+            f"growth topology trial {completed:,}/{total:,} · candidate {candidate_id}",
+            flush=True,
+        )
+
+    summary = run_contextual_growth(
+        args.stratigraphic_refinement,
+        args.output,
+        settings=settings,
+        force=args.force,
+        discovery_progress=discovery_progress,
+        scoring_progress=scoring_progress,
+        trial_progress=trial_progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _sheet_saturation(args: argparse.Namespace) -> None:
+    settings = SheetSaturationSettings(
+        distance_radii_voxels=tuple(args.distance_radii),
+        joint_residual_limits=tuple(args.joint_residuals),
+        assignment_share_thresholds=tuple(args.assignment_shares),
+        primary_joint_residual_limit=args.primary_joint_residual,
+        primary_confident_share=args.primary_confident_share,
+        cell_overview_scale=args.overview_scale,
+    )
+    last_report = -1
+
+    def progress(completed: int, total: int) -> None:
+        nonlocal last_report
+        bucket = completed // 128
+        if bucket != last_report or completed == total:
+            last_report = bucket
+            print(f"sheet saturation {completed:,}/{total:,} cells", flush=True)
+
+    summary = run_sheet_saturation_audit(
+        args.root,
+        args.output,
+        settings=settings,
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _gap_repair_search(args: argparse.Namespace) -> None:
     root = Path(args.root)
     pipeline_manifest = json.loads((root / "pipeline.json").read_text())
@@ -1015,6 +1088,75 @@ def main() -> None:
     )
     refine_stratigraphy.add_argument("--force", action="store_true")
     refine_stratigraphy.set_defaults(handler=_refine_stratigraphic_continuity)
+    contextual_growth = subparsers.add_parser(
+        "contextual-grow",
+        description=(
+            "Add independently fitted full-bank modes only when two calibrated "
+            "open-face graph contexts and complete physical/topological validation agree."
+        ),
+    )
+    contextual_growth.add_argument(
+        "--stratigraphic-refinement", type=Path, required=True
+    )
+    contextual_growth.add_argument("--output", type=Path, required=True)
+    contextual_growth.add_argument(
+        "--minimum-support-faces", type=int, default=2
+    )
+    contextual_growth.add_argument(
+        "--maximum-admission-robust-z",
+        type=float,
+        default=1.0,
+        help="require both local and graph-context scores within this retained-join robust Z",
+    )
+    contextual_growth.add_argument(
+        "--maximum-modes-per-trace",
+        type=int,
+        default=0,
+        help="operational cap after geometric ranking; zero retains every match",
+    )
+    contextual_growth.add_argument(
+        "--maximum-trials",
+        type=int,
+        default=0,
+        help="operational cap after contextual ranking; zero validates every candidate",
+    )
+    contextual_growth.add_argument(
+        "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
+    )
+    contextual_growth.add_argument("--force", action="store_true")
+    contextual_growth.set_defaults(handler=_contextual_growth)
+    saturation = subparsers.add_parser(
+        "audit-sheet-saturation",
+        description=(
+            "Measure calibrated Acus structural-evidence coverage, assignment "
+            "ambiguity, and unexplained fiber evidence against selected layers."
+        ),
+    )
+    saturation.add_argument("--root", type=Path, required=True)
+    saturation.add_argument("--output", type=Path, required=True)
+    saturation.add_argument(
+        "--distance-radii",
+        nargs="+",
+        type=float,
+        default=(1.0, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0),
+    )
+    saturation.add_argument(
+        "--joint-residuals",
+        nargs="+",
+        type=float,
+        default=(1.0, 1.5, 2.0, 2.5, 3.0, 4.0),
+    )
+    saturation.add_argument(
+        "--assignment-shares",
+        nargs="+",
+        type=float,
+        default=(0.5, 0.67, 0.8, 0.9),
+    )
+    saturation.add_argument("--primary-joint-residual", type=float, default=2.5)
+    saturation.add_argument("--primary-confident-share", type=float, default=0.8)
+    saturation.add_argument("--overview-scale", type=int, default=24)
+    saturation.add_argument("--force", action="store_true")
+    saturation.set_defaults(handler=_sheet_saturation)
     gap_repair = subparsers.add_parser(
         "gap-repair-search",
         description=(

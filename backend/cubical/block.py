@@ -12,6 +12,7 @@ from .matching import (
     TraceMatch,
     TraceMatchSettings,
     align_face_patches,
+    match_face_traces,
 )
 from .topology import Float3, GridEdge, GridFace, GridSpec, Int3, cell_face
 
@@ -207,7 +208,9 @@ def _common_crossing_feature(edges: set[GridEdge]) -> object | None:
 
 
 def _select_consistent_joins(
-    patches: tuple[ClippedPatch, ...], candidates: tuple[TraceMatch, ...]
+    patches: tuple[ClippedPatch, ...],
+    candidates: tuple[TraceMatch, ...],
+    fixed_join_keys: frozenset[tuple[int, int, int, Int3]] = frozenset(),
 ) -> tuple[tuple[TraceMatch, ...], tuple[DeferredJoin, ...]]:
     patch_by_id = {value.patch_id: value for value in patches}
     patch_set = _DisjointSet(patch_by_id)
@@ -290,6 +293,15 @@ def _select_consistent_joins(
     ordered = sorted(
         candidates,
         key=lambda value: (
+            0
+            if (
+                value.first_patch_id,
+                value.second_patch_id,
+                value.face.axis,
+                value.face.anchor_xyz,
+            )
+            in fixed_join_keys
+            else 1,
             -value.score,
             value.negative_log_likelihood,
             value.face.axis,
@@ -377,6 +389,8 @@ def _summarize_block(
     bounds: BlockBounds,
     patches: Iterable[ClippedPatch],
     candidate_joins: Iterable[TraceMatch],
+    *,
+    fixed_join_keys: frozenset[tuple[int, int, int, Int3]] = frozenset(),
 ) -> SurfaceBlock:
     patch_values, patch_by_id = _patch_catalog(grid, bounds, patches)
     candidate_values = tuple(
@@ -391,7 +405,7 @@ def _summarize_block(
         )
     )
     join_values, deferred_values = _select_consistent_joins(
-        patch_values, candidate_values
+        patch_values, candidate_values, fixed_join_keys
     )
     patch_set = _DisjointSet(patch_by_id)
     crossing_observations = [
@@ -653,6 +667,86 @@ def rebuild_surface_block(
         block.patches,
         retained,
     )
+
+
+def augment_surface_block(
+    block: SurfaceBlock,
+    additions: Iterable[ClippedPatch],
+    settings: TraceMatchSettings | None = None,
+    *,
+    allowed_supports: set[tuple[int, int, GridFace]] | None = None,
+) -> SurfaceBlock:
+    """Add fitted patches by matching only currently unresolved face traces.
+
+    Existing joins are immutable inputs.  Each new polygon can consume at most
+    one unresolved neighbor trace on each of its faces; the complete retained
+    graph plus those local proposals is then passed through the same global
+    collision, crossing, and orientation selector used by full assembly.
+    """
+
+    resolved = settings or TraceMatchSettings()
+    current = block
+    existing_ids = {value.patch_id for value in current.patches}
+    for patch in additions:
+        if patch.patch_id in existing_ids:
+            raise ValueError(f"augmentation duplicates patch ID {patch.patch_id}")
+        if not current.bounds.contains_cell(patch.cell_xyz):
+            raise ValueError(f"augmentation patch {patch.patch_id} lies outside block")
+        patch_by_id = {value.patch_id: value for value in current.patches}
+        open_by_face: dict[GridFace, list[BoundaryTrace]] = defaultdict(list)
+        for boundary in current.unresolved_interior_traces:
+            open_by_face[boundary.trace.face].append(boundary)
+        proposed: list[TraceMatch] = []
+        for trace in patch.traces:
+            accepted: list[TraceMatch] = []
+            for boundary in open_by_face.get(trace.face, ()):
+                source = patch_by_id[boundary.patch_id]
+                if source.cell_xyz == patch.cell_xyz:
+                    continue
+                if allowed_supports is not None and (
+                    patch.patch_id,
+                    source.patch_id,
+                    trace.face,
+                ) not in allowed_supports:
+                    continue
+                match = match_face_traces(
+                    trace,
+                    patch.estimate,
+                    boundary.trace,
+                    source.estimate,
+                    resolved,
+                    grid=current.grid,
+                )
+                if match.accepted:
+                    accepted.append(match)
+            if accepted:
+                proposed.append(
+                    max(
+                        accepted,
+                        key=lambda value: (
+                            value.score,
+                            -value.negative_log_likelihood,
+                            -value.second_patch_id,
+                        ),
+                    )
+                )
+        current = _summarize_block(
+            current.grid,
+            current.bounds,
+            (*current.patches, patch),
+            (*current.joins, *proposed),
+            fixed_join_keys=frozenset(
+                (
+                    value.first_patch_id,
+                    value.second_patch_id,
+                    value.face.axis,
+                    value.face.anchor_xyz,
+                )
+                for value in current.joins
+            ),
+        )
+        existing_ids.add(patch.patch_id)
+    return current
 
 
 def _shared_block_face(

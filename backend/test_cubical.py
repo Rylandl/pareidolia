@@ -10,12 +10,17 @@ import numpy as np
 from backend.cubical.block import (
     BlockBounds,
     _ParityDisjointSet,
+    augment_surface_block,
     assemble_surface_hierarchy,
     assemble_surface_block,
     merge_surface_blocks,
     rebuild_surface_block,
 )
 from backend.cubical.continuity import score_join_continuity
+from backend.cubical.contextual_growth import (
+    ContextualGrowthSettings,
+    discover_contextual_growth_candidates,
+)
 from backend.cubical.geometry import (
     DegeneratePlaneIntersection,
     PlaneEstimate,
@@ -33,6 +38,7 @@ from backend.cubical.flatten import (
 )
 from backend.cubical.contracts import RawAcusSettings, VolumeSource
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
+from backend.cubical.saturation import classify_cell_structural_evidence
 from backend.cubical.selection import ConfigurationOption
 from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
@@ -86,6 +92,58 @@ class CubicalGeometryTests(unittest.TestCase):
         orientation.union(2, 3, False)
         self.assertTrue(orientation.compatible(1, 3, False))
         self.assertFalse(orientation.compatible(1, 3, True))
+
+    def test_structural_saturation_uses_unsigned_fiber_and_residual_gating(self) -> None:
+        assignment = classify_cell_structural_evidence(
+            np.asarray(
+                (
+                    (0.0, 0.0, 0.5),
+                    (0.0, 0.0, 7.0),
+                    (0.0, 0.0, 0.5),
+                ),
+                dtype=np.float32,
+            ),
+            np.asarray(
+                (
+                    (-1.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            cell_center_xyz=np.zeros(3, dtype=np.float32),
+            patch_normals_xyz=np.asarray(((0.0, 0.0, 1.0),), dtype=np.float32),
+            patch_heights=np.asarray((0.0,), dtype=np.float32),
+            patch_fibers_xyz=np.asarray(((1.0, 0.0, 0.0),), dtype=np.float32),
+            patch_fiber_std_degrees=np.asarray((2.0,), dtype=np.float32),
+            patch_confidence=np.asarray((0.7,), dtype=np.float32),
+            depth_sigma_voxels=2.5,
+            orientation_kernel_degrees=9.0,
+        )
+        self.assertLess(assignment.best_joint_residual[0], 0.25)
+        self.assertGreater(assignment.best_joint_residual[1], 2.5)
+        self.assertGreater(assignment.best_joint_residual[2], 8.0)
+        np.testing.assert_allclose(assignment.best_assignment_share, 1.0)
+
+    def test_structural_saturation_reports_competing_layer_ambiguity(self) -> None:
+        assignment = classify_cell_structural_evidence(
+            np.asarray(((0.0, 0.0, 0.0),), dtype=np.float32),
+            np.asarray(((1.0, 0.0, 0.0),), dtype=np.float32),
+            cell_center_xyz=np.zeros(3, dtype=np.float32),
+            patch_normals_xyz=np.asarray(
+                ((0.0, 0.0, 1.0), (0.0, 0.0, 1.0)), dtype=np.float32
+            ),
+            patch_heights=np.asarray((-0.25, 0.25), dtype=np.float32),
+            patch_fibers_xyz=np.asarray(
+                ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)), dtype=np.float32
+            ),
+            patch_fiber_std_degrees=np.asarray((2.0, 2.0), dtype=np.float32),
+            patch_confidence=np.asarray((0.7, 0.7), dtype=np.float32),
+            depth_sigma_voxels=2.5,
+            orientation_kernel_degrees=9.0,
+        )
+        self.assertLess(assignment.best_joint_residual[0], 0.2)
+        self.assertAlmostEqual(float(assignment.best_assignment_share[0]), 0.5)
 
     def test_stratigraphic_fingerprint_resolves_axial_depth_gauge(self) -> None:
         depths = np.arange(-10.0, 11.0, 5.0, dtype=np.float32)
@@ -743,6 +801,72 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(discovery.mode_gap_count, 1)
         self.assertEqual(discovery.matched_gap_count, 1)
         self.assertEqual(len(discovery.candidates), 1)
+
+    def test_contextual_growth_discovers_and_incrementally_adds_two_face_mode(self) -> None:
+        grid = GridSpec((2, 2, 1))
+        left = self._horizontal_patch(grid, (0, 1, 0), 0.1, 1)
+        lower = self._horizontal_patch(grid, (1, 0, 0), 0.1, 2)
+        target = self._horizontal_patch(grid, (1, 1, 0), 0.1, 30)
+        baseline = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            (left, lower),
+        )
+        estimate = target.estimate
+        covariance = estimate.covariance_matrix
+        modes = LayerModeTable(
+            np.asarray(((1, 1, 0),), dtype=np.int32),
+            np.asarray((0, 1), dtype=np.uint64),
+            np.asarray((0,), dtype=np.int8),
+            np.asarray((estimate.normal_xyz,), dtype=np.float32),
+            np.asarray((estimate.height_from_cell_center,), dtype=np.float32),
+            np.asarray(
+                ((
+                    covariance[0, 0],
+                    covariance[0, 1],
+                    covariance[0, 2],
+                    covariance[1, 1],
+                    covariance[1, 2],
+                    covariance[2, 2],
+                ),),
+                dtype=np.float32,
+            ),
+            np.asarray((estimate.fiber_xyz,), dtype=np.float32),
+            np.asarray((estimate.fiber_angular_std_radians,), dtype=np.float32),
+            np.asarray((estimate.confidence,), dtype=np.float32),
+            np.asarray((0.1,), dtype=np.float32),
+            np.asarray((2.5,), dtype=np.float32),
+            np.asarray((0.8,), dtype=np.float32),
+            np.asarray((0.9,), dtype=np.float32),
+            np.asarray((8.0,), dtype=np.float32),
+        )
+        candidates, statistics = discover_contextual_growth_candidates(
+            baseline,
+            {"test": modes},
+            ContextualGrowthSettings(),
+        )
+        self.assertEqual(statistics["multiFaceCandidateModes"], 1)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(len(candidates[0].supports), 2)
+
+        allowed = {
+            (30, 1, cell_face((0, 1, 0), 0, 1)),
+            (30, 2, cell_face((1, 0, 0), 1, 1)),
+        }
+        augmented = augment_surface_block(
+            baseline, (target,), allowed_supports=allowed
+        )
+        direct = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            (left, lower, target),
+        )
+        self.assertEqual(len(augmented.joins), 2)
+        self.assertEqual(
+            {_join.face for _join in augmented.joins},
+            {_join.face for _join in direct.joins},
+        )
+        self.assertEqual(len(augmented.components), 1)
 
     def test_hierarchical_block_merge_matches_direct_assembly(self) -> None:
         grid = GridSpec((4, 2, 1))

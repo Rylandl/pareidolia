@@ -48,6 +48,40 @@ def atomic_json(path: str | Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(target)
 
 
+def resolve_pipeline_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
+    """Follow an immutable variant chain to its originating raw-Acus pipeline.
+
+    Variants intentionally own a new selected-patch artifact while retaining an
+    ``inputRoot`` link to the geometry they refined.  Following that link makes
+    variants composable instead of limiting downstream tools to one generation.
+    """
+
+    current = Path(root).resolve()
+    visited: set[Path] = set()
+    while True:
+        if current in visited:
+            raise ValueError("variant inputRoot chain contains a cycle")
+        visited.add(current)
+        pipeline_path = current / "pipeline.json"
+        if pipeline_path.is_file():
+            pipeline = json.loads(pipeline_path.read_text())
+            if pipeline.get("state") != "complete":
+                raise ValueError("raw-Acus pipeline is not complete")
+            return current, pipeline
+        variant_path = current / "variant.json"
+        if not variant_path.is_file():
+            raise ValueError(
+                f"{current} has neither pipeline.json nor variant.json"
+            )
+        variant = json.loads(variant_path.read_text())
+        if variant.get("state") != "complete":
+            raise ValueError(f"variant at {current} is not complete")
+        input_root = variant.get("inputRoot")
+        if not input_root:
+            raise ValueError(f"variant at {current} has no inputRoot")
+        current = Path(input_root).resolve()
+
+
 @dataclass(frozen=True, slots=True)
 class VolumeSource:
     """One native uint8 ZYX CT array and its scanner-space metadata."""

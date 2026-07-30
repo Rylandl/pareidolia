@@ -576,6 +576,37 @@ def _transition_reward(
     return 0.9 * thickness_affinity * orthogonal_affinity
 
 
+def evaluate_stratigraphy(
+    layers: list[LayerMode] | tuple[LayerMode, ...],
+    source: VolumeSource,
+    settings: RawAcusSettings,
+    normal_hypothesis: int,
+    normal_confidence: float,
+) -> CellStratigraphy | None:
+    """Score one declared same-family layer stack under the physical model.
+
+    This is the non-searching counterpart to :func:`enumerate_stratigraphies`.
+    It lets later stages test a specific full-bank addition without asking the
+    beam search to rediscover or reprioritize the already-selected layers.
+    """
+
+    if not layers or any(
+        value.normal_hypothesis != normal_hypothesis for value in layers
+    ):
+        return None
+    ordered = tuple(
+        sorted(layers, key=lambda value: value.estimate.height_from_cell_center)
+    )
+    score = sum(_layer_reward(value) for value in ordered)
+    for first, second in zip(ordered, ordered[1:]):
+        transition = _transition_reward(first, second, source, settings)
+        if transition is None:
+            return None
+        score += transition
+    score += math.log(max(float(normal_confidence), 0.03))
+    return CellStratigraphy(normal_hypothesis, score, ordered)
+
+
 def enumerate_stratigraphies(
     modes: list[LayerMode],
     source: VolumeSource,
