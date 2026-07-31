@@ -5,9 +5,13 @@ import unittest
 import numpy as np
 
 from backend.cubical.clear_ribbon_paired_feedback import (
+    BOUNDARY_MATCH_FOREIGN_LABEL,
+    BOUNDARY_MATCH_SAME_LABEL,
+    BOUNDARY_MATCH_UNOWNED,
     SELECTION_CLASS_NEW_CLEAR_CORE,
     SELECTION_CLASS_PAIRED_GROWTH,
     build_paired_feedback_seeds,
+    classify_seeded_component_boundary_matches,
     grow_clear_cores_in_paired_graph,
     label_free_paired_components,
 )
@@ -57,6 +61,67 @@ def _graph(
 
 
 class ClearRibbonPairedFeedbackTests(unittest.TestCase):
+    def test_foreign_owned_boundary_vetoes_a_paired_candidate(self) -> None:
+        membership = {
+            "freeComponent": np.asarray((0, 0, 0), dtype=np.int32),
+            "componentNewLabelCount": np.asarray((1,), dtype=np.uint16),
+            "componentSoleNewLabel": np.asarray((10,), dtype=np.int32),
+        }
+        interface_feedback = {
+            "selectedLabel": np.asarray((10, -1, 20), dtype=np.int32)
+        }
+        arrays, stats = classify_seeded_component_boundary_matches(
+            membership,
+            interface_feedback,
+            np.asarray((0, 1, 2), dtype=np.int32),
+            np.asarray((-1, -1, -1), dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            arrays["lowerBoundaryOwnershipClass"],
+            (
+                BOUNDARY_MATCH_SAME_LABEL,
+                BOUNDARY_MATCH_UNOWNED,
+                BOUNDARY_MATCH_FOREIGN_LABEL,
+            ),
+        )
+        np.testing.assert_array_equal(
+            arrays["crossRepresentationConflict"], (0, 0, 1)
+        )
+        self.assertEqual(stats["conflictingCandidateCount"], 1)
+
+    def test_boundary_veto_splits_off_an_unseeded_branch(self) -> None:
+        bank = _bank(
+            ((0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0))
+        )
+        baseline = _baseline(4)
+        graph = _graph(((1, 2, 1.0), (2, 3, 1.0)))
+        feedback_seed = {
+            "newSeedCandidate": np.asarray((1,), dtype=np.int32),
+            "newSeedLabel": np.asarray((-1, 10, -1, -1), dtype=np.int32),
+        }
+        membership, stats = label_free_paired_components(
+            bank,
+            baseline,
+            graph,
+            feedback_seed,
+            processing_shape_sampling_xyz=(4, 1, 1),
+            settings=PairedSurfaceGrowthSettings(),
+            excluded_candidate=np.asarray((0, 0, 1, 0), dtype=np.uint8),
+        )
+        self.assertEqual(stats["singleLabelComponentCount"], 1)
+        self.assertEqual(stats["unseededComponentCount"], 1)
+        selection, growth = grow_clear_cores_in_paired_graph(
+            bank,
+            baseline,
+            graph,
+            feedback_seed,
+            membership,
+            processing_shape_sampling_xyz=(4, 1, 1),
+            settings=PairedSurfaceGrowthSettings(),
+        )
+        np.testing.assert_array_equal(selection["selected"], (1, 1, 0, 0))
+        self.assertEqual(growth["grownPairedCandidateCount"], 0)
+
     def test_empty_free_graph_preserves_the_baseline(self) -> None:
         bank = _bank(((0, 0, 0),))
         baseline = _baseline(1)

@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .clear_ribbon import CLEAR_RIBBON_SCHEMA
+from .clear_ribbon import CLEAR_RIBBON_SCHEMA, ClearRibbonSettings
 from .clear_ribbon_feedback import (
     CLEAR_RIBBON_FEEDBACK_SCHEMA,
     CLEAR_RIBBON_FEEDBACK_STEM,
@@ -25,6 +25,11 @@ from .contracts import (
     sha256_file,
 )
 from .isolated_slab import _percentile_record
+from .one_sided_interface import (
+    ONE_SIDED_INTERFACE_SCHEMA,
+    OneSidedInterfaceSettings,
+    match_signed_interface_endpoints,
+)
 from .paired_surface_bank import PAIRED_SURFACE_BANK_SCHEMA
 from .paired_surface_growth import (
     PAIRED_SURFACE_GROWTH_SCHEMA,
@@ -38,13 +43,18 @@ from .paired_surface_growth import (
 CLEAR_RIBBON_PAIRED_FEEDBACK_SCHEMA = (
     "pareidolia.clear-ribbon-paired-profile-feedback"
 )
-CLEAR_RIBBON_PAIRED_FEEDBACK_VERSION = 1
-CLEAR_RIBBON_PAIRED_FEEDBACK_STEM = "clear-ribbon-paired-feedback-v1"
+CLEAR_RIBBON_PAIRED_FEEDBACK_VERSION = 2
+CLEAR_RIBBON_PAIRED_FEEDBACK_STEM = "clear-ribbon-paired-feedback-v2"
 
 SELECTION_CLASS_UNSELECTED = 0
 SELECTION_CLASS_BASELINE = 1
 SELECTION_CLASS_NEW_CLEAR_CORE = 2
 SELECTION_CLASS_PAIRED_GROWTH = 3
+
+BOUNDARY_MATCH_NONE = 0
+BOUNDARY_MATCH_UNOWNED = 1
+BOUNDARY_MATCH_SAME_LABEL = 2
+BOUNDARY_MATCH_FOREIGN_LABEL = 3
 
 
 def _load_npz(path: Path, expected_sha256: str) -> dict[str, np.ndarray]:
@@ -71,6 +81,10 @@ def _load_inputs(
     Path,
     dict[str, Any],
     dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    Path,
+    dict[str, Any],
+    dict[str, np.ndarray],
 ]:
     value = Path(root).resolve()
     feedback_path = (
@@ -92,6 +106,12 @@ def _load_inputs(
         != 0
     ):
         raise ValueError("interface feedback did not preserve its baseline")
+    feedback_data_path = feedback_path.parent / str(
+        feedback_manifest["data"]["path"]
+    )
+    interface_feedback = _load_npz(
+        feedback_data_path, feedback_manifest["data"]["sha256"]
+    )
 
     selection_path = Path(
         feedback_manifest["identity"]["ribbonSelection"]["manifestPath"]
@@ -150,6 +170,24 @@ def _load_inputs(
         raise ValueError("ribbon bank references the wrong paired-bank schema")
     bank_data_path = bank_path.parent / str(bank_manifest["data"]["path"])
     bank = _load_npz(bank_data_path, bank_manifest["data"]["sha256"])
+
+    interface_path = Path(
+        feedback_manifest["identity"]["interfaceBank"]["manifestPath"]
+    )
+    if (
+        sha256_file(interface_path)
+        != feedback_manifest["identity"]["interfaceBank"]["manifestSha256"]
+    ):
+        raise ValueError("interface bank changed after interface feedback")
+    interface_manifest = json.loads(interface_path.read_text())
+    if interface_manifest.get("schema") != ONE_SIDED_INTERFACE_SCHEMA:
+        raise ValueError("interface feedback references the wrong interface schema")
+    interface_data_path = interface_path.parent / str(
+        interface_manifest["data"]["path"]
+    )
+    interfaces = _load_npz(
+        interface_data_path, interface_manifest["data"]["sha256"]
+    )
     return (
         feedback_path,
         feedback_manifest,
@@ -165,6 +203,10 @@ def _load_inputs(
         bank_path,
         bank_manifest,
         bank,
+        interface_feedback,
+        interface_path,
+        interface_manifest,
+        interfaces,
     )
 
 
@@ -218,6 +260,171 @@ def build_paired_feedback_seeds(
     }
 
 
+def classify_seeded_component_boundary_matches(
+    membership: Mapping[str, np.ndarray],
+    interface_feedback: Mapping[str, np.ndarray],
+    lower_interface: np.ndarray,
+    upper_interface: np.ndarray,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Veto a paired candidate contradicted by an owned signed boundary."""
+
+    component = np.asarray(membership["freeComponent"], dtype=np.int32)
+    label_count = np.asarray(membership["componentNewLabelCount"])
+    sole_label = np.asarray(
+        membership["componentSoleNewLabel"], dtype=np.int32
+    )
+    candidate_count = len(component)
+    single_label = np.zeros(candidate_count, dtype=bool)
+    component_member = component >= 0
+    single_label[component_member] = (
+        label_count[component[component_member]] == 1
+    )
+    intended_label = np.full(candidate_count, -1, dtype=np.int32)
+    intended_label[single_label] = sole_label[component[single_label]]
+    interface_label = np.asarray(
+        interface_feedback["selectedLabel"], dtype=np.int32
+    )
+
+    boundary_class = []
+    for matched_interface in (lower_interface, upper_interface):
+        matched = np.asarray(matched_interface, dtype=np.int32)
+        if len(matched) != candidate_count:
+            raise ValueError("paired boundary match count differs from bank")
+        value = np.full(candidate_count, BOUNDARY_MATCH_NONE, dtype=np.uint8)
+        valid = single_label & (matched >= 0)
+        owner = np.full(candidate_count, -1, dtype=np.int32)
+        owner[valid] = interface_label[matched[valid]]
+        value[valid & (owner < 0)] = BOUNDARY_MATCH_UNOWNED
+        value[valid & (owner == intended_label)] = BOUNDARY_MATCH_SAME_LABEL
+        value[
+            valid & (owner >= 0) & (owner != intended_label)
+        ] = BOUNDARY_MATCH_FOREIGN_LABEL
+        boundary_class.append(value)
+
+    lower_class, upper_class = boundary_class
+    conflict = (
+        (lower_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+        | (upper_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+    )
+    evaluated = single_label
+    matched_count = (
+        (lower_class != BOUNDARY_MATCH_NONE).astype(np.uint8)
+        + (upper_class != BOUNDARY_MATCH_NONE).astype(np.uint8)
+    )
+    return {
+        "intendedNewLabel": intended_label,
+        "lowerMatchedInterface": np.asarray(lower_interface, dtype=np.int32),
+        "upperMatchedInterface": np.asarray(upper_interface, dtype=np.int32),
+        "lowerBoundaryOwnershipClass": lower_class,
+        "upperBoundaryOwnershipClass": upper_class,
+        "crossRepresentationConflict": conflict.astype(np.uint8),
+    }, {
+        "evaluatedCandidateCount": int(np.count_nonzero(evaluated)),
+        "evaluatedBoundaryEndpointCount": int(2 * np.count_nonzero(evaluated)),
+        "matchedBoundaryEndpointCount": int(np.sum(matched_count[evaluated])),
+        "bothBoundaryMatchedCandidateCount": int(
+            np.count_nonzero(evaluated & (matched_count == 2))
+        ),
+        "oneBoundaryMatchedCandidateCount": int(
+            np.count_nonzero(evaluated & (matched_count == 1))
+        ),
+        "noBoundaryMatchedCandidateCount": int(
+            np.count_nonzero(evaluated & (matched_count == 0))
+        ),
+        "unownedMatchedEndpointCount": int(
+            np.count_nonzero(lower_class == BOUNDARY_MATCH_UNOWNED)
+            + np.count_nonzero(upper_class == BOUNDARY_MATCH_UNOWNED)
+        ),
+        "sameLabelMatchedEndpointCount": int(
+            np.count_nonzero(lower_class == BOUNDARY_MATCH_SAME_LABEL)
+            + np.count_nonzero(upper_class == BOUNDARY_MATCH_SAME_LABEL)
+        ),
+        "foreignLabelMatchedEndpointCount": int(
+            np.count_nonzero(lower_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+            + np.count_nonzero(upper_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+        ),
+        "conflictingCandidateCount": int(np.count_nonzero(conflict)),
+    }
+
+
+def audit_seeded_component_boundaries(
+    bank: Mapping[str, np.ndarray],
+    membership: Mapping[str, np.ndarray],
+    interface_feedback: Mapping[str, np.ndarray],
+    interfaces: Mapping[str, np.ndarray],
+    *,
+    processing_start_xyz: np.ndarray,
+    source_origin_xyz: np.ndarray,
+    processing_shape_sampling_xyz: tuple[int, int, int],
+    stride: int,
+    settings: ClearRibbonSettings,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Match only candidates reachable from a single new clear identity."""
+
+    component = np.asarray(membership["freeComponent"], dtype=np.int32)
+    label_count = np.asarray(membership["componentNewLabelCount"])
+    evaluated = np.zeros(len(component), dtype=bool)
+    component_member = component >= 0
+    evaluated[component_member] = (
+        label_count[component[component_member]] == 1
+    )
+    candidate = np.flatnonzero(evaluated).astype(np.int32)
+    normal = np.asarray(bank["normalXYZ"], dtype=np.float32)[candidate]
+    endpoint_position = np.concatenate(
+        (
+            np.asarray(bank["boundaryLowerXYZ"])[candidate],
+            np.asarray(bank["boundaryUpperXYZ"])[candidate],
+        )
+    ).astype(np.float32)
+    endpoint_normal = np.concatenate((normal, -normal)).astype(np.float32)
+    match = match_signed_interface_endpoints(
+        endpoint_position,
+        endpoint_normal,
+        np.asarray(interfaces["positionXYZ"]),
+        np.asarray(interfaces["signedNormalXYZ"]),
+        np.asarray(interfaces["processingKeyXYZ"]),
+        processing_start_xyz=processing_start_xyz,
+        source_origin_xyz=source_origin_xyz,
+        processing_shape_sampling_xyz=processing_shape_sampling_xyz,
+        stride=stride,
+        settings=OneSidedInterfaceSettings(
+            maximum_seed_position_residual_sampling_steps=(
+                settings.maximum_endpoint_position_residual_sampling_steps
+            ),
+            maximum_seed_normal_degrees=(
+                settings.maximum_endpoint_normal_degrees
+            ),
+            seed_match_normal_scale_degrees=(
+                settings.endpoint_match_normal_scale_degrees
+            ),
+        ),
+    )
+    candidate_count = len(component)
+    lower_interface = np.full(candidate_count, -1, dtype=np.int32)
+    upper_interface = np.full(candidate_count, -1, dtype=np.int32)
+    lower_interface[candidate] = match["interfaceIndex"][: len(candidate)]
+    upper_interface[candidate] = match["interfaceIndex"][len(candidate) :]
+    arrays, stats = classify_seeded_component_boundary_matches(
+        membership,
+        interface_feedback,
+        lower_interface,
+        upper_interface,
+    )
+    matched = match["interfaceIndex"] >= 0
+    stats.update(
+        {
+            "matchedPositionResidualSamplingSteps": _percentile_record(
+                match["positionResidualSamplingSteps"][matched]
+            ),
+            "matchedNormalResidualDegrees": _percentile_record(
+                match["normalResidualDegrees"][matched]
+            ),
+            "matchedCost": _percentile_record(match["matchCost"][matched]),
+        }
+    )
+    return arrays, stats
+
+
 def label_free_paired_components(
     bank: Mapping[str, np.ndarray],
     baseline_growth: Mapping[str, np.ndarray],
@@ -226,6 +433,7 @@ def label_free_paired_components(
     *,
     processing_shape_sampling_xyz: tuple[int, int, int],
     settings: PairedSurfaceGrowthSettings,
+    excluded_candidate: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     node_count = len(bank["localEvidenceScore"])
     key = np.asarray(bank["spatialKeyXYZ"], dtype=np.int32)
@@ -240,6 +448,13 @@ def label_free_paired_components(
         (np.asarray(bank["localEvidenceScore"]) >= settings.minimum_candidate_evidence)
         & ~occupied_key[flat]
     ) | (seed_label >= 0)
+    if excluded_candidate is not None:
+        excluded = np.asarray(excluded_candidate) > 0
+        if len(excluded) != node_count:
+            raise ValueError("paired exclusion count differs from candidate bank")
+        if np.any(excluded & (seed_label >= 0)):
+            raise ValueError("cross-representation veto rejects a clear-core seed")
+        eligible &= ~excluded
 
     edge_first = np.asarray(graph["edgeFirstCandidate"], dtype=np.int32)
     edge_second = np.asarray(graph["edgeSecondCandidate"], dtype=np.int32)
@@ -595,6 +810,10 @@ def run_clear_ribbon_paired_feedback(
         bank_path,
         bank_manifest,
         bank,
+        interface_feedback,
+        interface_path,
+        interface_manifest,
+        interfaces,
     ) = _load_inputs(feedback_root)
     graph = {
         name: values
@@ -603,6 +822,9 @@ def run_clear_ribbon_paired_feedback(
     }
     settings = PairedSurfaceGrowthSettings(
         **growth_manifest["identity"]["settings"]
+    )
+    ribbon_settings = ClearRibbonSettings(
+        **ribbon_manifest["identity"]["settings"]
     )
     processing_shape = tuple(
         int(value)
@@ -636,7 +858,13 @@ def run_clear_ribbon_paired_feedback(
             "manifestSha256": sha256_file(bank_path),
             "dataSha256": bank_manifest["data"]["sha256"],
         },
+        "interfaceBank": {
+            "manifestPath": str(interface_path),
+            "manifestSha256": sha256_file(interface_path),
+            "dataSha256": interface_manifest["data"]["sha256"],
+        },
         "growthSettings": settings.record(),
+        "boundaryMatchSettings": ribbon_settings.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
     identity["identitySha256"] = canonical_json_hash(identity)
@@ -664,6 +892,39 @@ def run_clear_ribbon_paired_feedback(
         settings=settings,
     )
     seeded = time.monotonic()
+    preliminary_membership, preliminary_component_stats = (
+        label_free_paired_components(
+            bank,
+            baseline_growth,
+            graph,
+            feedback_seed,
+            processing_shape_sampling_xyz=processing_shape,
+            settings=settings,
+        )
+    )
+    componentized = time.monotonic()
+    processing_start = np.asarray(
+        interface_manifest["geometry"]["processingVoxelBounds"]["startXYZ"],
+        dtype=np.float32,
+    )
+    source_origin = np.asarray(
+        interface_manifest["source"]["sourceOriginXYZ"], dtype=np.float32
+    )
+    boundary_audit, boundary_stats = audit_seeded_component_boundaries(
+        bank,
+        preliminary_membership,
+        interface_feedback,
+        interfaces,
+        processing_start_xyz=processing_start,
+        source_origin_xyz=source_origin,
+        processing_shape_sampling_xyz=processing_shape,
+        stride=int(ribbon_manifest["samplingStrideVoxels"]),
+        settings=ribbon_settings,
+    )
+    conflict = np.asarray(boundary_audit["crossRepresentationConflict"]) > 0
+    if np.any(conflict & (feedback_seed["newSeedLabel"] >= 0)):
+        raise RuntimeError("signed-boundary ownership contradicts a clear-core seed")
+    audited = time.monotonic()
     membership, component_stats = label_free_paired_components(
         bank,
         baseline_growth,
@@ -671,8 +932,9 @@ def run_clear_ribbon_paired_feedback(
         feedback_seed,
         processing_shape_sampling_xyz=processing_shape,
         settings=settings,
+        excluded_candidate=conflict,
     )
-    componentized = time.monotonic()
+    recomponentized = time.monotonic()
     grown, growth_stats = grow_clear_cores_in_paired_graph(
         bank,
         baseline_growth,
@@ -682,9 +944,57 @@ def run_clear_ribbon_paired_feedback(
         processing_shape_sampling_xyz=processing_shape,
         settings=settings,
     )
+    selected_new = (
+        (grown["selectionClass"] == SELECTION_CLASS_NEW_CLEAR_CORE)
+        | (grown["selectionClass"] == SELECTION_CLASS_PAIRED_GROWTH)
+    )
+    if np.any(selected_new & conflict):
+        raise RuntimeError("paired growth selected a boundary-ownership conflict")
+    lower_class = boundary_audit["lowerBoundaryOwnershipClass"]
+    upper_class = boundary_audit["upperBoundaryOwnershipClass"]
+    boundary_stats.update(
+        {
+            "selectedNewCandidateCount": int(np.count_nonzero(selected_new)),
+            "selectedUnownedMatchedEndpointCount": int(
+                np.count_nonzero(
+                    selected_new
+                    & (lower_class == BOUNDARY_MATCH_UNOWNED)
+                )
+                + np.count_nonzero(
+                    selected_new
+                    & (upper_class == BOUNDARY_MATCH_UNOWNED)
+                )
+            ),
+            "selectedSameLabelMatchedEndpointCount": int(
+                np.count_nonzero(
+                    selected_new
+                    & (lower_class == BOUNDARY_MATCH_SAME_LABEL)
+                )
+                + np.count_nonzero(
+                    selected_new
+                    & (upper_class == BOUNDARY_MATCH_SAME_LABEL)
+                )
+            ),
+            "selectedForeignLabelMatchedEndpointCount": int(
+                np.count_nonzero(
+                    selected_new
+                    & (lower_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+                )
+                + np.count_nonzero(
+                    selected_new
+                    & (upper_class == BOUNDARY_MATCH_FOREIGN_LABEL)
+                )
+            ),
+        }
+    )
     new_labels = _new_label_records(grown, feedback_seed)
     solved = time.monotonic()
-    arrays = {**grown, **membership, **feedback_seed}
+    arrays = {
+        **grown,
+        **membership,
+        **feedback_seed,
+        **boundary_audit,
+    }
     _write_npz(data_path, arrays)
 
     source = VolumeSource.open(
@@ -738,13 +1048,19 @@ def run_clear_ribbon_paired_feedback(
         "geometry": bank_manifest["geometry"],
         "calibration": bank_manifest["calibration"],
         "seeding": seed_stats,
+        "preliminaryComponents": preliminary_component_stats,
+        "boundaryOwnership": boundary_stats,
         "components": component_stats,
         "growth": growth_stats,
         "newClearCoreLabels": new_labels,
         "timingSeconds": {
             "feedbackSeeding": round(seeded - started, 6),
             "freeComponentLabeling": round(componentized - seeded, 6),
-            "growthAndAudit": round(solved - componentized, 6),
+            "signedBoundaryAudit": round(audited - componentized, 6),
+            "safeComponentRelabeling": round(
+                recomponentized - audited, 6
+            ),
+            "growthAndAudit": round(solved - recomponentized, 6),
             "writingAndArtifacts": round(finished - solved, 6),
             "total": round(finished - started, 6),
         },
@@ -764,9 +1080,24 @@ def run_clear_ribbon_paired_feedback(
             "2": "new clear-ribbon seed",
             "3": "paired-profile growth from one unambiguous new identity",
         },
+        "boundaryOwnershipClass": {
+            "0": "endpoint unmatched or candidate not singly seeded",
+            "1": "matched signed interface is currently unowned",
+            "2": "matched signed interface has the intended identity",
+            "3": (
+                "matched signed interface has a foreign identity; "
+                "candidate vetoed"
+            ),
+        },
         "method": {
             "baselinePolicy": "immutable selected candidates and occupied keys",
-            "ambiguityPolicy": "defer multi-label free components and key conflicts",
+            "ambiguityPolicy": (
+                "defer multi-label free components and key conflicts"
+            ),
+            "crossRepresentationPolicy": (
+                "veto any candidate whose matched signed boundary is owned "
+                "by another identity, then relabel the free graph"
+            ),
             "growthPolicy": "maximum-bottleneck over persisted paired graph",
             "changesExistingAssignments": False,
         },

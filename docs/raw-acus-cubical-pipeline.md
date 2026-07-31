@@ -1221,16 +1221,33 @@ removed before free components are labeled, a free component reached by more
 than one new identity is deferred in full, and source-key mutual exclusion is
 enforced globally during maximum-bottleneck growth.
 
-On the current core, the 395 clear-ribbon seeds occupy 37 distinct free graph
-components, so there are no multi-identity components or cross-identity key
-conflicts.  Conservative growth adds 1,817 already-measured paired profiles,
-for 2,212 selected profiles across the 37 new identities, while preserving all
-95,041 baseline profiles exactly.  The seeded free components contain 17--212
-candidates with a median of 61.  Added profiles have a median path bottleneck
-of 0.583 and median same-label graph degree of six; 92.74% have at least two
-same-label neighbors.  The complete solve and visual audits take 0.68 seconds
-on CPU.  These larger patches are still evidence-bounded clear cores, not a
-claim that the unresolved dense block has been partitioned into sheets.
+Paired connectivity alone is not accepted as a safety certificate.  Before
+growth, both physical faces of every candidate in a singly seeded free
+component are matched back to the signed-interface bank.  A candidate is
+vetoed if either matched face is already owned by another identity; the free
+graph is then relabeled because removing one contradictory profile can split
+off an otherwise plausible branch.  Unmatched faces and matched-but-unowned
+faces remain usable evidence, while a contradiction can never be hidden by a
+strong paired-graph path.
+
+On the current core, the 395 clear-ribbon seeds initially occupy 37 distinct
+free graph components containing 2,664 candidates.  Their 5,328 physical
+endpoints yield 2,571 signed-interface matches: 1,532 agree with the intended
+identity, 750 are unowned, and 289 contradict an existing owner.  All 289
+contradictory candidates are removed; none is a clear-core seed.  Safe
+relabeling still leaves 37 singly seeded components, now containing 10--201
+candidates with a median of 59.
+
+Conservative growth then adds 1,503 already-measured paired profiles, for
+1,898 profiles across the 37 new identities, while preserving all 95,041
+baseline profiles exactly.  The selected result has zero foreign-owned
+endpoint matches and exposes 519 unowned endpoint observations at 397 unique
+interfaces without a cross-identity conflict.  Added profiles have a median
+path bottleneck of 0.589 and median same-label graph degree of six; 92.35% have
+at least two same-label neighbors.  The complete solve and visual audits take
+0.92 seconds on CPU.  These larger patches are still evidence-bounded clear
+cores, not a claim that the unresolved dense block has been partitioned into
+sheets.
 
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
