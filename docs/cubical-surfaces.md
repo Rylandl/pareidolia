@@ -280,6 +280,36 @@ a successful repair. The replay adds 14 supported triangles while preserving
 all 4,307 component identities, with no interface collision, crossing, or
 cross-component fusion.
 
+`analyze-physical-ribbon-patch-corridors` addresses open surface islands and
+missing bands, where no closed hole exists yet. It does not grow from one cell.
+For every surface boundary edge it retains the three nearest reciprocal facing
+alternatives, then resolves those ambiguous pairs as order-preserving boundary
+arc alignments. Each corridor has at least three anchors, no crossing pairing,
+and at least 50% anchor density along both arcs. Ruled and cubic-Hermite strips
+compete so a tight physical bend can satisfy both endpoint tangent planes.
+
+The complete strip is sampled from native CT. Its air-material-air profile must
+agree on both sides, beat copies translated along the page normal, and preserve
+high-pass boundary texture across the gap. Passing strips drive complete
+alternating interface re-pairings under the same interface-exclusivity,
+profile-crossing, and strict-continuation factors as the main configuration.
+The global result is rebuilt counterfactually. A repair survives only when at
+least half of each original boundary arc enters the same edge-connected
+triangle region; sharing a vertex is explicitly insufficient. Competing repairs
+within one sheet are then enumerated locally, keeping only a subset that does
+not increase its triangle-region count or discard more than 2% of supported
+surface area.
+
+On the current slab, 7,992 outer boundary edges produce 3,162 reciprocal ranked
+pairs and 141 dense monotone corridors. Native CT retains 59 of the 128 screened
+corridors; 50 complete re-pairings reach trial replay, while exact arc closure
+rejects 42 and the density audit rejects one more. The seven surviving repairs
+add four net ribbons and 19 supported triangles, reduce triangle regions from
+767 to 760, and retain all 4,307 physical-sheet components with zero interface
+collision, profile crossing, or prior-component fusion. Flattened actual-CT
+views of every accepted component are written alongside the corridor evidence
+montage.
+
 The reproducible commands are:
 
 ```bash
@@ -301,4 +331,9 @@ python -m backend.cubical analyze-physical-ribbon-patch-holes \
   --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-v1 \
   --settings-json examples/physical-ribbon-patch-holes.json
+
+python -m backend.cubical analyze-physical-ribbon-patch-corridors \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-v1 \
+  --settings-json examples/physical-ribbon-patch-corridors.json
 ```

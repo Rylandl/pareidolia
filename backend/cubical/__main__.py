@@ -115,6 +115,10 @@ from .physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
     run_physical_ribbon_patch_holes,
 )
+from .physical_ribbon_patch_corridors import (
+    PhysicalRibbonPatchCorridorSettings,
+    run_physical_ribbon_patch_corridors,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -803,6 +807,21 @@ def _physical_ribbon_patch_holes(args: argparse.Namespace) -> None:
         args.configuration,
         args.output,
         settings=PhysicalRibbonPatchHoleSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_patch_corridors(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_patch_corridors(
+        args.configuration,
+        args.output,
+        settings=PhysicalRibbonPatchCorridorSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2408,6 +2427,25 @@ def main() -> None:
     physical_ribbon_patch_holes.add_argument("--force", action="store_true")
     physical_ribbon_patch_holes.set_defaults(
         handler=_physical_ribbon_patch_holes
+    )
+    physical_ribbon_patch_corridors = subparsers.add_parser(
+        "analyze-physical-ribbon-patch-corridors",
+        description=(
+            "Find mutually facing multi-edge arcs on open physical-ribbon "
+            "boundaries, fit bend-aware corridor surfaces, test them against "
+            "native CT and fiber continuation, and replay only exact closures."
+        ),
+    )
+    physical_ribbon_patch_corridors.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_patch_corridors.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_patch_corridors.add_argument("--settings-json", type=Path)
+    physical_ribbon_patch_corridors.add_argument("--force", action="store_true")
+    physical_ribbon_patch_corridors.set_defaults(
+        handler=_physical_ribbon_patch_corridors
     )
     gap_census = subparsers.add_parser(
         "gap-census",

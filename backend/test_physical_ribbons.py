@@ -25,6 +25,14 @@ from backend.cubical.physical_ribbon_patch_holes import (
     _point_in_polygon,
     extract_surface_boundary_loops,
 )
+from backend.cubical.physical_ribbon_patch_corridors import (
+    PhysicalRibbonPatchCorridorSettings,
+    _best_monotone_corridor_chain,
+    _corridor_model_grid,
+    _evaluate_corridor_connections,
+    _shifted_trace_correlation,
+    _triangle_region_labels,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -401,6 +409,109 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
         )
         self.assertEqual(states[0][1], (1 << 2) | (1 << 3))
         self.assertTrue(stats["baselineStatePreserved"])
+
+
+class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_arc_alignment_discards_crossing_edge_hypothesis(self) -> None:
+        records = [
+            (0, 4, 2.0, 0.0, 2.0),
+            (1, 5, 2.0, 0.0, 2.0),
+            (2, 7, 2.0, 0.0, 2.0),
+            (3, 6, 2.0, 0.0, 2.0),
+        ]
+        position = np.asarray((0, 1, 2, 3, 0, 1, 2, 3), dtype=np.int32)
+        loop_count = np.full(8, 8, dtype=np.int32)
+        chain, _, density = _best_monotone_corridor_chain(
+            records, position, loop_count, maximum_gap=4
+        )
+        self.assertEqual(len(chain), 3)
+        self.assertGreaterEqual(density, 0.5)
+
+    def test_vertex_touch_does_not_count_as_corridor_closure(self) -> None:
+        center = np.asarray(
+            ((0, 0, 0), (-1, 0, 0), (0, 1, 0), (1, 0, 0), (0, -1, 0)),
+            dtype=np.float32,
+        )
+        surface = {
+            "triangleFrontierIndex": np.asarray(((0, 1, 2), (0, 3, 4)), dtype=np.int32),
+            "midpointXYZ": center,
+            "signedNormalXYZ": np.tile((0, 0, 1), (5, 1)).astype(np.float32),
+        }
+        corridors = {
+            "corridorPairOffset": np.asarray((0, 1), dtype=np.int64),
+            "corridorFirstBoundaryEdge": np.asarray((0,), dtype=np.int32),
+            "corridorSecondBoundaryEdge": np.asarray((1,), dtype=np.int32),
+            "boundaryEdgeFirstFrontierIndex": np.asarray((1, 3), dtype=np.int32),
+            "boundaryEdgeSecondFrontierIndex": np.asarray((2, 4), dtype=np.int32),
+            "boundaryEdgeMidpointXYZ": np.asarray(((-0.5, 0.5, 0), (0.5, -0.5, 0)), dtype=np.float32),
+            "boundaryEdgeNormalXYZ": np.tile((0, 0, 1), (2, 1)).astype(np.float32),
+            "boundaryEdgeLengthVoxels": np.full(2, np.sqrt(2), dtype=np.float32),
+            "boundaryEdgeTriangleRegion": np.asarray((0, 1), dtype=np.int32),
+        }
+        scored = {
+            "scoredCorridorIndex": np.asarray((0,), dtype=np.int32),
+            "corridorPatchOffset": np.asarray((0, 1), dtype=np.int64),
+            "corridorPatchXYZ": np.zeros((1, 3), dtype=np.float32),
+        }
+        disconnected = _evaluate_corridor_connections(surface, corridors, scored)
+        self.assertEqual(int(disconnected["boundaryArcsConnected"][0]), 0)
+        surface["triangleFrontierIndex"] = np.asarray(
+            ((0, 1, 2), (0, 3, 4), (1, 2, 3), (2, 3, 4)), dtype=np.int32
+        )
+        connected = _evaluate_corridor_connections(surface, corridors, scored)
+        self.assertEqual(int(connected["boundaryArcsConnected"][0]), 1)
+
+    def test_hermite_corridor_obeys_both_endpoint_tangent_planes(self) -> None:
+        along = np.asarray((0.0, 1.0, 2.0), dtype=np.float32)
+        first = np.column_stack((np.zeros(3), along, np.zeros(3)))
+        second = np.column_stack((np.full(3, 4.0), along, np.ones(3)))
+        corridors = {
+            "corridorPairOffset": np.asarray((0, 3), dtype=np.int64),
+            "corridorFirstBoundaryEdge": np.asarray((0, 1, 2), dtype=np.int32),
+            "corridorSecondBoundaryEdge": np.asarray((3, 4, 5), dtype=np.int32),
+            "boundaryEdgeMidpointXYZ": np.vstack((first, second)).astype(np.float32),
+            "boundaryEdgeMidpointUV": np.vstack(
+                (
+                    np.column_stack((np.zeros(3), along)),
+                    np.column_stack((np.full(3, 4.0), along)),
+                )
+            ).astype(np.float32),
+            "boundaryEdgeNormalXYZ": np.vstack(
+                (
+                    np.tile((0.0, 0.0, 1.0), (3, 1)),
+                    np.tile((1.0, 0.0, 0.0), (3, 1)),
+                )
+            ).astype(np.float32),
+            "boundaryEdgeThicknessVoxels": np.ones(6, dtype=np.float32),
+        }
+        model = _corridor_model_grid(
+            0,
+            corridors,
+            settings=PhysicalRibbonPatchCorridorSettings(
+                hermite_tensions=(1.0,), patch_pixel_step_voxels=0.25
+            ),
+        )
+        points = np.asarray(model["pointsXYZ"])[1]
+        normals = np.asarray(model["normalXYZ"])[1]
+        np.testing.assert_allclose(points[:, 0], model["firstBoundaryXYZ"], atol=1e-5)
+        np.testing.assert_allclose(points[:, -1], model["secondBoundaryXYZ"], atol=1e-5)
+        self.assertGreater(float(np.min(np.abs(normals[:, 0, 2]))), 0.98)
+        self.assertGreater(float(np.min(np.abs(normals[:, -1, 0]))), 0.98)
+
+    def test_boundary_texture_correlation_allows_small_phase_shift(self) -> None:
+        trace = np.asarray((0, 3, -2, 5, -4, 2, 1, -3, 4, -1), dtype=np.float32)
+        shifted = np.concatenate((np.zeros(1, dtype=np.float32), trace[:-1]))
+        unrelated = np.asarray((1, 1, -1, -1, 1, 1, -1, -1, 1, 1), dtype=np.float32)
+        self.assertGreater(_shifted_trace_correlation(trace, shifted), 0.95)
+        self.assertLess(_shifted_trace_correlation(trace, unrelated), 0.75)
+
+    def test_triangle_region_requires_shared_mesh_edges(self) -> None:
+        triangles = np.asarray(
+            ((0, 1, 2), (2, 1, 3), (4, 5, 6)), dtype=np.int32
+        )
+        region = _triangle_region_labels(triangles)
+        self.assertEqual(int(region[0]), int(region[1]))
+        self.assertNotEqual(int(region[0]), int(region[2]))
 
 
 if __name__ == "__main__":
