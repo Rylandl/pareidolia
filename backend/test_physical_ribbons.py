@@ -36,6 +36,9 @@ from backend.cubical.physical_ribbon_patch_corridors import (
 from backend.cubical.physical_ribbon_corridor_variants import (
     compile_exact_variant_reconfiguration,
 )
+from backend.cubical.physical_ribbon_corridor_sets import (
+    _choose_global_variant_states,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -415,6 +418,56 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_global_corridor_set_uses_compatible_lower_local_choice(self) -> None:
+        empty_key = (0.0, 0.0, 0.0, 0.0, 0.0)
+        states = (
+            (
+                {
+                    "stateIndex": 0,
+                    "variantIndices": (),
+                    "added": frozenset(),
+                    "removed": frozenset(),
+                    "key": empty_key,
+                },
+                {
+                    "stateIndex": 1,
+                    "variantIndices": (10,),
+                    "added": frozenset((1,)),
+                    "removed": frozenset(),
+                    "key": (2.0, 0.0, 1.0, 0.0, 0.0),
+                },
+                {
+                    "stateIndex": 2,
+                    "variantIndices": (11,),
+                    "added": frozenset((3,)),
+                    "removed": frozenset(),
+                    "key": (1.0, 0.0, 1.0, 0.0, 0.0),
+                },
+            ),
+            (
+                {
+                    "stateIndex": 3,
+                    "variantIndices": (),
+                    "added": frozenset(),
+                    "removed": frozenset(),
+                    "key": empty_key,
+                },
+                {
+                    "stateIndex": 4,
+                    "variantIndices": (20,),
+                    "added": frozenset((2,)),
+                    "removed": frozenset(),
+                    "key": (2.0, 0.0, 1.0, 0.0, 0.0),
+                },
+            ),
+        )
+        chosen = _choose_global_variant_states(
+            states,
+            valid_modifications=lambda added, _removed: not {1, 2} <= added,
+            beam_width=32,
+        )
+        self.assertEqual(chosen["variantIndices"], (11, 20))
+
     def test_exact_variant_compiles_back_to_replay_contract(self) -> None:
         variants = {
             "corridorVariantAddedOffset": np.asarray((0, 2, 3), dtype=np.int64),

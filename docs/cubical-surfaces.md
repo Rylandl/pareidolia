@@ -312,7 +312,7 @@ montage.
 
 `analyze-physical-ribbon-corridor-variants` removes one remaining local-choice
 assumption from that result. Rather than sending only the highest-factor-score
-matching to replay, it retains four diverse, complete, conflict-free matchings
+matching to replay, it retains eight diverse, complete, conflict-free matchings
 for every CT-supported corridor. Every matching must cover the patch and anchor
 both boundary arcs. It is then reconstructed inside the complete source sheet;
 exact edge-connected closure, no sheet split, non-increasing triangle-region
@@ -321,17 +321,33 @@ region reduction and retained area outrank the original local factor score.
 Enumeration and exact screening are immutable cached stages, so later replay or
 visualization iterations do not repeat the expensive reconstructions.
 
-On the current slab, 775,621 beam states yield 236 complete variants for the 59
-CT-supported corridors. Sixty variants exactly connect their boundary arcs and
-48 pass the density-preserving surface test, exposing valid closures for 20
-corridors. Only two of the 20 selected variants were locally rank zero. The
-seven original repairs are all retained, while 13 additional repairs were
-hidden by the single-best local matching. Global replay accepts all 20 at once:
-selected ribbons change from 37,889 to 37,887, supported triangles from 28,116
-to 28,175, and triangle regions from 767 to 737. All 4,307 sheet components are
-preserved with zero interface collision, profile crossing, component split, or
-prior-component fusion. Exact screening takes about 135 seconds and the global
-replay about 36 seconds on this block.
+On the current slab, 775,621 beam states yield 472 complete variants for the 59
+CT-supported corridors. Of those, 120 exactly connect their boundary arcs and
+98 pass the density-preserving surface test, exposing valid closures for 24
+corridors. The locally preferred variants are distributed throughout ranks
+zero through seven rather than concentrating at rank zero. Choosing one variant
+per corridor locally and then replaying greedily accepts only 23: two choices in
+one physical sheet compete even though a different pair of exact variants is
+compatible. Exact screening takes about 266 seconds; its result is cached.
+
+`optimize-physical-ribbon-corridor-sets` resolves that interaction before
+replay. Exact variants are grouped by physical-sheet component. Complete
+multi-corridor assignments are reconstructed as a single surface, scored by
+actual region reduction and retained supported area, and retained as component
+states. A block-wide beam then chooses one state per component under shared
+interface and exact profile-crossing constraints. No individual cell or edge
+can drive the decision.
+
+The current block has 22 sheet components with exact corridor alternatives.
+The optimizer retains 129 exact component states, reconstructs 24 multi-corridor
+assignments, and chooses 24 mutually compatible repairs. All 24 survive the
+ordinary counterfactual replay. Selected ribbons change from 37,889 to 37,883,
+supported triangles from 28,116 to 28,186, and the complete edge-connected
+triangle-region count from 832 to 801. All 4,307 sheet components are preserved
+with zero interface collision, profile crossing, component split, or
+prior-component fusion. Component/global optimization takes about 14 seconds
+and final replay about 37 seconds. Flattened actual-CT previews have zero
+nonadjacent chart overlap.
 
 The reproducible commands are:
 
@@ -365,4 +381,10 @@ python -m backend.cubical analyze-physical-ribbon-corridor-variants \
   --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-v1 \
   --settings-json examples/physical-ribbon-corridor-variants.json
+
+python -m backend.cubical optimize-physical-ribbon-corridor-sets \
+  --variants work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-sets-v1 \
+  --settings-json examples/physical-ribbon-corridor-sets.json
 ```

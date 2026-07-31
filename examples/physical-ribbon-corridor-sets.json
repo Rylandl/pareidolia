@@ -1,0 +1,7 @@
+{
+  "component_assignment_beam_width": 256,
+  "maximum_retained_states_per_component": 16,
+  "global_assignment_beam_width": 4096,
+  "minimum_surface_area_retention": 0.98,
+  "maximum_preview_components": 8
+}

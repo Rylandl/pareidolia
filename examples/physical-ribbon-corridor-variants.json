@@ -1,5 +1,5 @@
 {
-  "maximum_variants_per_corridor": 4,
+  "maximum_variants_per_corridor": 8,
   "minimum_variant_patch_coverage": 0.45,
   "minimum_anchor_count_per_arc": 1,
   "minimum_surface_area_retention": 0.98,
