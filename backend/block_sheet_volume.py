@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c/sheet-halo-core-12x12x10-v1/halo-1"
-    / "owned-bp32-c10-u010-opposed-sides-transitive-v11"
+    / "owned-bp32-c10-u010-opposed-sides-curvature-v12"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"

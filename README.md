@@ -286,6 +286,12 @@ reconnect them. On the owned 12 x 12 x 10 core the current solve calibrates a
 joins with 57.952% endpoint utilization; the maximum accepted axial hinge is
 26.213 degrees. All 206 detected foldback pairs remain in different final
 components, including those previously reconnected by short transitive loops.
+The promoted curvature-refined successor removes all 81 remaining multiscale
+hinge flags in three cut-and-refill rounds while retaining 5,127 joins and
+57.581% endpoint utilization. Its largest component grows from 158 to 159
+patches, the 150-patch runner-up is unchanged, and the maximum retained axial
+hinge falls to 24.512 degrees. The pre-curvature graph remains available as the
+v11 checkpoint so this geometry/coverage tradeoff stays inspectable.
 
 The optional layer partition compiles fixed active sheetlets into a persisted
 typed graph. Continuations retain raw likelihood plus exact whole-face matching

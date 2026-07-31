@@ -2183,9 +2183,9 @@ def main() -> None:
         "--stack-transport",
         action="store_true",
         help=(
-            "experimentally require one shared integer cell-stack gauge; "
-            "this is intentionally off because incomplete stacks require "
-            "partial monotone transport"
+            "experimentally require an independent path-consistent integer "
+            "layer gauge per connected sheet; this is intentionally off "
+            "because incomplete stacks require partial monotone transport"
         ),
     )
     sheet_restitch.add_argument(
