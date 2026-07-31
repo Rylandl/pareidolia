@@ -88,7 +88,13 @@ from backend.cubical.multiseam import run_multiseam_audit
 from backend.cubical.needle_field import (
     BlockNeedleFieldSettings,
     build_needle_neighbor_graph,
+    curvature_aware_tangent_metrics,
     optimize_block_needle_field,
+)
+from backend.cubical.needle_topology import (
+    BlockNeedleTopologySettings,
+    _fixed_point_packet_growth,
+    score_stack_fingerprint_pairs,
 )
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
@@ -323,6 +329,91 @@ class CubicalGeometryTests(unittest.TestCase):
             2.0,
         )
         self.assertEqual(summary["counts"]["needles"], count)
+
+    def test_curvature_aware_needle_affinity_separates_bend_from_layer_jump(
+        self,
+    ) -> None:
+        angle = math.radians(30.0)
+        radius = 20.0
+        first_point = np.asarray((radius, 0.0, 0.0))
+        second_point = np.asarray(
+            (radius * math.cos(angle), radius * math.sin(angle), 0.0)
+        )
+        bend = curvature_aware_tangent_metrics(
+            (second_point - first_point)[None, :],
+            np.asarray(((1.0, 0.0, 0.0),)),
+            np.asarray(((math.cos(angle), math.sin(angle), 0.0),)),
+            compatibility_sigma_voxels=3.0,
+            minimum_curvature_radius_voxels=4.0,
+        )
+        jump = curvature_aware_tangent_metrics(
+            np.asarray(((0.0, 5.0, 0.0),)),
+            np.asarray(((0.0, 1.0, 0.0),)),
+            np.asarray(((0.0, 1.0, 0.0),)),
+            compatibility_sigma_voxels=3.0,
+            minimum_curvature_radius_voxels=4.0,
+        )
+
+        self.assertAlmostEqual(
+            float(bend["midpointLayerShiftVoxels"][0]), 0.0, places=6
+        )
+        self.assertAlmostEqual(
+            float(bend["bendModelResidualVoxels"][0]), 0.0, places=5
+        )
+        self.assertGreater(float(bend["affinity"][0]), 0.7)
+        self.assertAlmostEqual(
+            float(jump["midpointLayerShiftVoxels"][0]), 5.0, places=6
+        )
+        self.assertLess(float(jump["affinity"][0]), 0.3)
+
+    def test_needle_stack_fingerprint_transports_unsigned_normal_gauge(
+        self,
+    ) -> None:
+        density = np.asarray(((1.0, 2.0, 3.0), (3.0, 2.0, 1.0)))
+        moment = np.asarray(((0.5, 1.0, 1.5), (1.5, 1.0, 0.5)))
+        normal = np.asarray(((0.0, 0.0, 1.0), (0.0, 0.0, -1.0)))
+        mismatch = score_stack_fingerprint_pairs(
+            density,
+            moment,
+            normal,
+            np.asarray((0,), dtype=np.int32),
+            np.asarray((1,), dtype=np.int32),
+            chunk_edges=8,
+        )
+        self.assertAlmostEqual(float(mismatch[0]), 0.0, places=6)
+
+    def test_block_needle_packet_growth_requires_independent_support(
+        self,
+    ) -> None:
+        center = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (0.0, 4.0, 0.0),
+                (4.0, 0.0, 0.0),
+                (4.0, 4.0, 0.0),
+                (8.0, 4.0, 0.0),
+                (-2.0, 2.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        first = np.asarray((0, 2, 0, 1, 3, 0, 1), dtype=np.int32)
+        second = np.asarray((1, 3, 2, 3, 4, 5, 5), dtype=np.int32)
+        seed = np.asarray((1, 1, 0, 0, 0, 0, 0), dtype=bool)
+        growth = np.asarray((0, 0, 1, 1, 1, 1, 1), dtype=bool)
+        component, selected, records = _fixed_point_packet_growth(
+            center,
+            first,
+            second,
+            seed,
+            growth,
+            np.ones(len(first), dtype=np.float32),
+            BlockNeedleTopologySettings(),
+        )
+        self.assertEqual(component[0], component[2])
+        self.assertEqual(component[0], component[5])
+        self.assertNotEqual(component[0], component[4])
+        self.assertFalse(bool(selected[4]))
+        self.assertGreaterEqual(sum(value["mergedComponentPairs"] for value in records), 2)
 
     def _write_analytic_candidate_boundary(
         self,

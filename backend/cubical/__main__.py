@@ -47,6 +47,10 @@ from .needle_field import (
     BlockNeedleFieldSettings,
     run_block_needle_field,
 )
+from .needle_topology import (
+    BlockNeedleTopologySettings,
+    run_block_needle_topology,
+)
 from .pipeline import run_raw_acus_pipeline
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
@@ -434,6 +438,7 @@ def _block_needle_field(args: argparse.Namespace) -> None:
         "mixture_iterations": "mixture_iteration_count",
         "mixture_annealing_iterations": "mixture_annealing_iterations",
         "carrier_minimum_affinity": "carrier_minimum_affinity",
+        "minimum_curvature_radius": "minimum_curvature_radius_voxels",
         "compute": "compute",
     }
     for argument_name, setting_name in argument_settings.items():
@@ -446,6 +451,21 @@ def _block_needle_field(args: argparse.Namespace) -> None:
         world_start_xyz=tuple(args.world_start),
         world_stop_xyz_exclusive=tuple(args.world_stop),
         settings=BlockNeedleFieldSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _block_needle_topology(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_block_needle_topology(
+        args.field,
+        args.output,
+        settings=BlockNeedleTopologySettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1674,11 +1694,28 @@ def main() -> None:
     needle_field.add_argument("--mixture-iterations", type=int)
     needle_field.add_argument("--mixture-annealing-iterations", type=int)
     needle_field.add_argument("--carrier-minimum-affinity", type=float)
+    needle_field.add_argument("--minimum-curvature-radius", type=float)
     needle_field.add_argument(
         "--compute", choices=("auto", "gpu", "cpu")
     )
     needle_field.add_argument("--force", action="store_true")
     needle_field.set_defaults(handler=_block_needle_field)
+    needle_topology = subparsers.add_parser(
+        "solve-block-needle-topology",
+        description=(
+            "Build one curvature-aware, stack-fingerprinted ply topology graph "
+            "over every needle in a completed block-global field."
+        ),
+    )
+    needle_topology.add_argument("--field", type=Path, required=True)
+    needle_topology.add_argument("--output", type=Path, required=True)
+    needle_topology.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional BlockNeedleTopologySettings keyword object",
+    )
+    needle_topology.add_argument("--force", action="store_true")
+    needle_topology.set_defaults(handler=_block_needle_topology)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

@@ -45,6 +45,7 @@ class BlockNeedleFieldSettings:
     mixture_iteration_count: int = 32
     mixture_annealing_iterations: int = 16
     carrier_minimum_affinity: float = 0.7
+    minimum_curvature_radius_voxels: float = 4.0
     compute: str = "auto"
 
     def __post_init__(self) -> None:
@@ -58,6 +59,7 @@ class BlockNeedleFieldSettings:
             self.tangent_compatibility_sigma_voxels,
             self.mixture_initial_temperature,
             self.mixture_temperature,
+            self.minimum_curvature_radius_voxels,
         )
         if any(not math.isfinite(value) or value <= 0.0 for value in positive):
             raise ValueError("needle-field scales must be finite and positive")
@@ -683,22 +685,46 @@ def optimize_normal_hypothesis_mixture(
         ) ** fraction
         neighbor_normal = normal[neighbor_index]
         neighbor_probability = probability[neighbor_index]
-        cosine = xp.einsum(
+        signed_cosine = xp.einsum(
             "nhi,nkli->nhkl", normal, neighbor_normal, optimize=True
         )
-        axial_similarity = xp.clip(cosine * cosine, 0.0, 1.0)
-        source_offset = xp.abs(
-            xp.einsum("nki,nhi->nhk", displacement, normal, optimize=True)
+        axial_cosine = xp.clip(xp.abs(signed_cosine), 0.0, 1.0)
+        axial_similarity = axial_cosine * axial_cosine
+        source_height = xp.einsum(
+            "nki,nhi->nhk", displacement, normal, optimize=True
         )
-        target_offset = xp.abs(
-            xp.einsum(
-                "nki,nkli->nkl", displacement, neighbor_normal, optimize=True
-            )
+        target_height = xp.einsum(
+            "nki,nkli->nkl", displacement, neighbor_normal, optimize=True
+        )
+        aligned_target_height = (
+            target_height[:, None, :, :]
+            * xp.where(signed_cosine < 0.0, -1.0, 1.0)
+        )
+        expanded_source_height = source_height[..., None]
+        midpoint_residual = 0.5 * xp.abs(
+            expanded_source_height + aligned_target_height
+        )
+        observed_sag = 0.5 * xp.abs(
+            expanded_source_height - aligned_target_height
+        )
+        normal_angle = xp.arccos(axial_cosine)
+        chord_length = xp.sqrt(xp.sum(displacement * displacement, axis=-1))
+        expected_sag = (
+            chord_length[:, None, :, None] * xp.sin(0.5 * normal_angle)
+        )
+        bend_residual = xp.abs(observed_sag - expected_sag)
+        curvature_radius = chord_length[:, None, :, None] / xp.maximum(
+            2.0 * xp.sin(0.5 * normal_angle), 1.0e-6
+        )
+        resolved_curvature = (
+            (normal_angle <= 1.0e-4)
+            | (curvature_radius >= settings.minimum_curvature_radius_voxels)
         )
         tangent_sigma = settings.tangent_compatibility_sigma_voxels
         tangent_affinity = (
-            xp.exp(-0.5 * (source_offset / tangent_sigma) ** 2)[..., None]
-            * xp.exp(-0.5 * (target_offset / tangent_sigma) ** 2)[:, None, :, :]
+            xp.exp(-0.5 * (midpoint_residual / tangent_sigma) ** 2)
+            * xp.exp(-0.5 * (bend_residual / tangent_sigma) ** 2)
+            * resolved_curvature
         )
         pair_affinity = axial_similarity * tangent_affinity
         expected_reward = xp.sum(
@@ -826,6 +852,74 @@ def _field_metrics(
     }
 
 
+def curvature_aware_tangent_metrics(
+    displacement_xyz: np.ndarray,
+    first_normal_xyz: np.ndarray,
+    second_normal_xyz: np.ndarray,
+    *,
+    compatibility_sigma_voxels: float,
+    minimum_curvature_radius_voxels: float,
+) -> dict[str, np.ndarray]:
+    """Score one smooth Hermite chord without flattening real curvature.
+
+    After aligning the unsigned endpoint normals, a locally smooth chord has
+    equal-and-opposite signed tangent-plane offsets.  Their mean is therefore
+    a layer-shift residual.  Their antisymmetric magnitude is compared with
+    the circular-arc sag implied by the endpoint normal angle.  A parallel
+    layer jump has same-sign offsets and is rejected even when its normals are
+    identical; a resolved bend is not penalized merely for being curved.
+    """
+
+    displacement = np.asarray(displacement_xyz, dtype=np.float64)
+    first = np.asarray(first_normal_xyz, dtype=np.float64)
+    second = np.asarray(second_normal_xyz, dtype=np.float64)
+    if displacement.ndim != 2 or displacement.shape[1:] != (3,):
+        raise ValueError("Hermite displacement must have shape (N, 3)")
+    if first.shape != displacement.shape or second.shape != displacement.shape:
+        raise ValueError("Hermite normals must match displacement shape")
+    if compatibility_sigma_voxels <= 0.0:
+        raise ValueError("Hermite compatibility sigma must be positive")
+    if minimum_curvature_radius_voxels <= 0.0:
+        raise ValueError("minimum curvature radius must be positive")
+
+    signed_cosine = np.einsum("ij,ij->i", first, second)
+    alignment = np.where(signed_cosine < 0.0, -1.0, 1.0)
+    aligned_second = second * alignment[:, None]
+    axial_cosine = np.clip(np.abs(signed_cosine), 0.0, 1.0)
+    normal_angle = np.arccos(axial_cosine)
+    first_height = np.einsum("ij,ij->i", displacement, first)
+    second_height = np.einsum("ij,ij->i", displacement, aligned_second)
+    midpoint_residual = 0.5 * np.abs(first_height + second_height)
+    observed_sag = 0.5 * np.abs(first_height - second_height)
+    chord_length = np.linalg.norm(displacement, axis=1)
+    sine_half_angle = np.sin(0.5 * normal_angle)
+    expected_sag = chord_length * sine_half_angle
+    bend_residual = np.abs(observed_sag - expected_sag)
+    curvature_radius = np.divide(
+        chord_length,
+        2.0 * sine_half_angle,
+        out=np.full_like(chord_length, np.inf),
+        where=sine_half_angle > 1.0e-6,
+    )
+    resolved = (normal_angle <= 1.0e-4) | (
+        curvature_radius >= minimum_curvature_radius_voxels
+    )
+    sigma = float(compatibility_sigma_voxels)
+    affinity = (
+        axial_cosine**2
+        * np.exp(-0.5 * (midpoint_residual / sigma) ** 2)
+        * np.exp(-0.5 * (bend_residual / sigma) ** 2)
+        * resolved
+    ).astype(np.float32)
+    return {
+        "affinity": affinity,
+        "normalAngleDegrees": np.degrees(normal_angle).astype(np.float32),
+        "midpointLayerShiftVoxels": midpoint_residual.astype(np.float32),
+        "bendModelResidualVoxels": bend_residual.astype(np.float32),
+        "curvatureRadiusVoxels": curvature_radius.astype(np.float32),
+    }
+
+
 def analyze_needle_carriers(
     needles: NeedleTable,
     graph: NeedleNeighborGraph,
@@ -841,24 +935,15 @@ def analyze_needle_carriers(
     )[valid]
     target = index[valid]
     displacement = needles.center_xyz[target] - needles.center_xyz[source]
-    cosine = np.clip(
-        np.abs(np.einsum("ij,ij->i", normals[source], normals[target])),
-        0.0,
-        1.0,
+    geometry = curvature_aware_tangent_metrics(
+        displacement,
+        normals[source],
+        normals[target],
+        compatibility_sigma_voxels=settings.tangent_compatibility_sigma_voxels,
+        minimum_curvature_radius_voxels=settings.minimum_curvature_radius_voxels,
     )
-    source_offset = np.abs(
-        np.einsum("ij,ij->i", displacement, normals[source])
-    )
-    target_offset = np.abs(
-        np.einsum("ij,ij->i", displacement, normals[target])
-    )
-    sigma = settings.tangent_compatibility_sigma_voxels
-    affinity = (
-        cosine**2
-        * np.exp(-0.5 * (source_offset / sigma) ** 2)
-        * np.exp(-0.5 * (target_offset / sigma) ** 2)
-    ).astype(np.float32)
-    normal_angle = np.degrees(np.arccos(cosine)).astype(np.float32)
+    affinity = geometry["affinity"]
+    normal_angle = geometry["normalAngleDegrees"]
     retained = affinity >= settings.carrier_minimum_affinity
     first = np.minimum(source[retained], target[retained])
     second = np.maximum(source[retained], target[retained])
@@ -957,12 +1042,14 @@ def analyze_needle_carriers(
             }
         )
     retained_directed_angle = normal_angle[retained]
-    retained_directed_offset = np.maximum(source_offset, target_offset)[retained]
+    retained_midpoint = geometry["midpointLayerShiftVoxels"][retained]
+    retained_bend = geometry["bendModelResidualVoxels"][retained]
+    retained_radius = geometry["curvatureRadiusVoxels"][retained]
     summary = {
         "method": {
             "edgeAffinity": (
-                "axial-normal cosine squared times Gaussian source and target "
-                "candidate-plane displacement compatibility"
+                "axial-normal cosine squared times curvature-aware Hermite "
+                "midpoint-layer-shift and circular-bend compatibility"
             ),
             "component": (
                 "connected component of unique undirected edges at the declared "
@@ -988,9 +1075,11 @@ def analyze_needle_carriers(
         "retainedEdgeNormalAngleDegrees": _percentile_record(
             retained_directed_angle
         ),
-        "retainedEdgeMaximumPlaneOffsetVoxels": _percentile_record(
-            retained_directed_offset
+        "retainedEdgeMidpointLayerShiftVoxels": _percentile_record(
+            retained_midpoint
         ),
+        "retainedEdgeBendModelResidualVoxels": _percentile_record(retained_bend),
+        "retainedEdgeCurvatureRadiusVoxels": _percentile_record(retained_radius),
         "topComponents": top,
     }
     arrays = {

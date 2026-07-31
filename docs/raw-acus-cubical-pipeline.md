@@ -774,12 +774,19 @@ Each unsigned fiber needle admits a family of perpendicular page normals, so a
 single normal per cell and a single global orientation cluster are both too
 restrictive.  The block solve instead keeps several local unsigned normal
 hypotheses per needle.  A GPU mean-field solve couples their probabilities
-using local evidence, axial normal agreement, and the requirement that the
-neighbor displacement lie in both candidate tangent planes.  The resulting
-high-affinity connected components are conservative diagnostic carriers, not
-final papyrus sheet identities.  Large normal change across a carrier is
-permitted when it is accumulated through locally compatible edges, which is
-necessary for real hairpins.
+using local evidence, axial normal agreement, and a curvature-aware Hermite
+chord.  After aligning the unsigned endpoint normals, a smooth bend has
+equal-and-opposite signed tangent-plane offsets.  Their symmetric part is a
+layer-shift residual, while their antisymmetric part is checked against the sag
+implied by the endpoint normal angle.  This replaces the incorrect flat-patch
+assumption that each endpoint must lie in the other endpoint's tangent plane.
+A parallel layer jump is penalized while a resolved bend is not penalized
+merely for being curved.
+
+The resulting high-affinity connected components are conservative diagnostic
+normal carriers, not final papyrus sheet identities.  Large normal change
+across a carrier is permitted when it is accumulated through locally
+compatible edges, which is necessary for real hairpins.
 
 ```bash
 python3 -m backend.cubical solve-block-needle-field \
@@ -796,9 +803,40 @@ artifact identity.  A `BlockNeedleFieldSettings` keyword object may be passed
 with `--settings-json`; explicit command-line options override matching JSON
 values.  On the current 12 x 12 x 10, 32-source-voxel-cell core, canonical tile
 ownership gives 43,950 unique needles and 1,048,874 directed neighborhood
-edges.  The GTX 1080 reference solve takes 4.04 seconds end to end and writes a
-15.06 MB immutable artifact.  These measurements establish feasibility, not a
-claim that its conservative carriers are finished sheets.
+edges.  The curvature-aware GTX 1080 reference solve takes 6.77 seconds end to
+end and writes a 15.16 MB immutable artifact.  It forms 42 conservative normal
+carriers with at least 128 needles, 12 with at least 256, and five with at least
+512; the largest has 974 of 43,950 needles, so the added curvature does not
+produce one transitive giant component.  These measurements establish
+feasibility, not a claim that its normal carriers are finished sheets.
+
+The block needle-topology stage then distinguishes fiber-coherent physical
+plies.  It builds a normal-depth density and `cos(2 fiber-angle)` stack
+fingerprint around every needle directly from the dense graph.  Robust caps are
+calibrated from the strongest real edges, while the minimum layer spacing,
+curvature radius, fiber scale, and depth kernel come from the immutable
+raw-Acus physical settings.  Conservative seed components grow to a fixed point
+only through bridge packets with independent endpoints and nonzero spatial
+span.  A singleton may use one endpoint on its own side, but still requires two
+independent target needles.  Normal-separated branches are not globally
+repulsive—a real hairpin can return beside itself—so the physical invariant is
+zero selected direct layer-shift edges rather than global spatial injectivity.
+
+```bash
+python3 -m backend.cubical solve-block-needle-topology \
+  --field /path/to/block-needle-field \
+  --output /path/to/block-needle-topology
+```
+
+On the same core this stage evaluates 612,222 unique needle pairs and selects
+91,618 ply edges in 1.95 seconds including compressed output and two projection
+previews.  It selects zero direct edges at or beyond the physical 3.74-voxel
+layer-spacing floor.  The largest fiber-coherent carrier has 245 needles;
+50.53% of total needle-quality mass belongs to carriers of at least eight
+needles and 78.84% belongs to a carrier of at least two.  The leading carrier's
+local selected-edge normal angle is 7.38° median / 17.24° p90 and its global
+fiber projector has 95.95% of its mass on one axis.  Orthogonal plies remain
+separate by design and are the next level of papyrus-sheet association.
 
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
