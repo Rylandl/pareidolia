@@ -761,6 +761,58 @@ python3 -m backend.cubical audit-boundary-cluster-reference \
   --output /path/to/cluster-reference-audit.json
 ```
 
+## Block-global needle inference
+
+Cells are an ownership, indexing, and eventual meshing device; they do not
+have to be independent inference domains.  The block needle-field stage unions
+the source-anchored extraction tiles from one or more raw-Acus roots,
+deduplicates overlap by canonical tile identity and content hash, crops needle
+centers to an explicit world-space cuboid, and builds one spatial graph over
+every retained needle.
+
+Each unsigned fiber needle admits a family of perpendicular page normals, so a
+single normal per cell and a single global orientation cluster are both too
+restrictive.  The block solve instead keeps several local unsigned normal
+hypotheses per needle.  A GPU mean-field solve couples their probabilities
+using local evidence, axial normal agreement, and the requirement that the
+neighbor displacement lie in both candidate tangent planes.  The resulting
+high-affinity connected components are conservative diagnostic carriers, not
+final papyrus sheet identities.  Large normal change across a carrier is
+permitted when it is accumulated through locally compatible edges, which is
+necessary for real hairpins.
+
+```bash
+python3 -m backend.cubical solve-block-needle-field \
+  --raw-root /path/to/raw-acus-child-0 \
+  --raw-root /path/to/raw-acus-child-1 \
+  --world-start 3456 2720 7264 \
+  --world-stop 3840 3104 7584 \
+  --compute gpu \
+  --output /path/to/block-needle-field
+```
+
+All solver values have declared dataclass defaults and are recorded in the
+artifact identity.  A `BlockNeedleFieldSettings` keyword object may be passed
+with `--settings-json`; explicit command-line options override matching JSON
+values.  On the current 12 x 12 x 10, 32-source-voxel-cell core, canonical tile
+ownership gives 43,950 unique needles and 1,048,874 directed neighborhood
+edges.  The GTX 1080 reference solve takes 4.04 seconds end to end and writes a
+15.06 MB immutable artifact.  These measurements establish feasibility, not a
+claim that its conservative carriers are finished sheets.
+
+The complementary resolution audit asks whether the existing planar cubical
+representation is locally too coarse.  It preserves shared-face endpoint,
+corner, and ordering constraints while relaxing only normal and fiber gates;
+coherent high-bend correspondences are emitted solely as refinement evidence
+and can never be inserted as graph joins.
+
+```bash
+python3 -m backend.cubical audit-sheet-resolution \
+  --graph /path/to/surface-graph-v1.json \
+  --voxel-size-microns 7.91 \
+  --output /path/to/sheet-resolution-audit
+```
+
 ## Tests
 
 ```bash

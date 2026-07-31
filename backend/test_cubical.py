@@ -21,6 +21,7 @@ from backend.cubical.block import (
     merge_surface_blocks,
     rebuild_surface_block,
     select_surface_joins,
+    surface_block_from_retained_joins,
 )
 from backend.cubical.boundary_band import (
     BoundaryBandSettings,
@@ -84,6 +85,11 @@ from backend.cubical.sheet_transport import (
     synchronize_stack_transport,
 )
 from backend.cubical.multiseam import run_multiseam_audit
+from backend.cubical.needle_field import (
+    BlockNeedleFieldSettings,
+    build_needle_neighbor_graph,
+    optimize_block_needle_field,
+)
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
 from backend.cubical.flatten import (
@@ -94,6 +100,7 @@ from backend.cubical.flatten import (
 )
 from backend.cubical.contracts import RawAcusSettings, VolumeSource, sha256_file
 from backend.cubical.repair import evaluate_single_cell_gap_repairs
+from backend.cubical.raw_acus import NeedleTable
 from backend.cubical.saturation import classify_cell_structural_evidence
 from backend.cubical.saturation_reselection import (
     SaturationReselectionSettings,
@@ -105,6 +112,11 @@ from backend.cubical.saturation_selection import (
     reweight_saturation_candidates,
 )
 from backend.cubical.sheet_packets import run_dual_axis_packet_connectivity
+from backend.cubical.sheet_resolution import (
+    SheetResolutionAuditSettings,
+    analyze_sheet_resolution,
+    suggested_refinement_factor,
+)
 from backend.cubical.sheet_evidence import (
     SheetEvidenceInput,
     compile_block_sheet_evidence,
@@ -184,6 +196,133 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         assert patch is not None
         return patch
+
+    def test_sheet_resolution_detects_coherent_subcell_hairpin(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        patches = []
+        half_angle = math.radians(25.0)
+        for layer_index, shared_height in enumerate((0.35, 0.65)):
+            for cell_x, normal_x in (
+                (0, math.sin(half_angle)),
+                (1, -math.sin(half_angle)),
+            ):
+                normal = (normal_x, 0.0, math.cos(half_angle))
+                center = grid.cell_center_world((cell_x, 0, 0))
+                shared = np.asarray((1.0, 0.5, shared_height))
+                height = float(np.dot(np.asarray(normal), shared - center))
+                patch = clip_plane_to_cell(
+                    grid,
+                    (cell_x, 0, 0),
+                    PlaneEstimate.isotropic(
+                        normal,
+                        height,
+                        angular_std_radians=math.radians(1.0),
+                        height_std=0.02,
+                        fiber_xyz=(0.0, 1.0, 0.0),
+                        fiber_angular_std_radians=math.radians(2.0),
+                    ),
+                    patch_id=10 * layer_index + cell_x + 1,
+                )
+                self.assertIsNotNone(patch)
+                patches.append(patch)
+        block = surface_block_from_retained_joins(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            tuple(value for value in patches if value is not None),
+            (),
+        )
+        summary, arrays = analyze_sheet_resolution(
+            block,
+            settings=SheetResolutionAuditSettings(
+                normal_limit_degrees=20.0,
+                minimum_coherent_layers=2,
+                maximum_refinement_factor=4,
+            ),
+        )
+        self.assertEqual(summary["statistics"]["coherentHighBendFaces"], 1)
+        self.assertEqual(
+            summary["statistics"]["coherentHighBendCorrespondences"], 2
+        )
+        self.assertEqual(summary["statistics"]["cellsRecommendedAtLeast4x"], 2)
+        self.assertEqual(summary["refinementRegions"][0]["cellCount"], 2)
+        np.testing.assert_array_equal(
+            arrays["cellRecommendedRefinementFactorXYZ"],
+            np.full((2, 1, 1), 4, dtype=np.uint8),
+        )
+
+    def test_sheet_resolution_factor_is_bounded_power_of_two(self) -> None:
+        self.assertEqual(suggested_refinement_factor(15.0, 20.0, 4), 1)
+        self.assertEqual(suggested_refinement_factor(35.0, 20.0, 4), 2)
+        self.assertEqual(suggested_refinement_factor(50.0, 20.0, 4), 4)
+        self.assertEqual(suggested_refinement_factor(89.0, 20.0, 4), 4)
+
+    def test_block_needle_field_tracks_a_multilayer_hairpin(self) -> None:
+        centers = []
+        directions = []
+        truth_normals = []
+        radius = 30.0
+        for layer_index, offset in enumerate((-2.5, 2.5)):
+            for theta in np.linspace(-0.45 * math.pi, 0.45 * math.pi, 31):
+                tangent = np.asarray(
+                    (math.cos(theta), 0.0, math.sin(theta)), dtype=np.float32
+                )
+                normal = np.asarray(
+                    (-math.sin(theta), 0.0, math.cos(theta)), dtype=np.float32
+                )
+                base = np.asarray(
+                    (
+                        radius * math.sin(theta),
+                        0.0,
+                        radius * (1.0 - math.cos(theta)),
+                    ),
+                    dtype=np.float32,
+                ) + offset * normal
+                for y_value in np.linspace(-12.0, 12.0, 7):
+                    centers.append(base + np.asarray((0.0, y_value, 0.0)))
+                    directions.append(
+                        tangent
+                        if layer_index == 0
+                        else np.asarray((0.0, 1.0, 0.0), dtype=np.float32)
+                    )
+                    truth_normals.append(normal)
+        center_array = np.asarray(centers, dtype=np.float32)
+        count = len(center_array)
+        ones = np.ones(count, dtype=np.float32)
+        needles = NeedleTable(
+            center_array,
+            np.asarray(directions, dtype=np.float32),
+            ones,
+            ones,
+            ones,
+        )
+        settings = BlockNeedleFieldSettings(
+            neighbor_radius_voxels=12.0,
+            maximum_neighbors=24,
+            spatial_kernel_voxels=7.0,
+            smoothing_weight=0.8,
+            iteration_count=12,
+            compute="cpu",
+        )
+        graph = build_needle_neighbor_graph(needles, settings)
+        summary, arrays = optimize_block_needle_field(
+            needles, graph, settings=settings
+        )
+        truth = np.asarray(truth_normals, dtype=np.float32)
+        error = np.degrees(
+            np.arccos(
+                np.clip(
+                    np.abs(np.einsum("ij,ij->i", arrays["normalXYZ"], truth)),
+                    0.0,
+                    1.0,
+                )
+            )
+        )
+        self.assertLess(float(np.percentile(error, 90)), 6.0)
+        self.assertLess(
+            summary["clusteredFieldMetrics"]["needlePlaneResidualDegrees"]["p90"],
+            2.0,
+        )
+        self.assertEqual(summary["counts"]["needles"], count)
 
     def _write_analytic_candidate_boundary(
         self,

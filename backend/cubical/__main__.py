@@ -43,6 +43,10 @@ from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
 from .mode_bank import run_mode_bank
 from .multiseam import run_multiseam_audit
+from .needle_field import (
+    BlockNeedleFieldSettings,
+    run_block_needle_field,
+)
 from .pipeline import run_raw_acus_pipeline
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
@@ -51,6 +55,10 @@ from .selection import configuration_options
 from .sheet_packets import (
     DualAxisPacketSettings,
     run_dual_axis_packet_connectivity,
+)
+from .sheet_resolution import (
+    SheetResolutionAuditSettings,
+    run_sheet_resolution_audit,
 )
 from .sheet_evidence import (
     SheetEvidenceInput,
@@ -400,6 +408,49 @@ def _full_acus(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _block_needle_field(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    argument_settings = {
+        "neighbor_radius": "neighbor_radius_voxels",
+        "maximum_neighbors": "maximum_neighbors",
+        "spatial_kernel": "spatial_kernel_voxels",
+        "smoothing_weight": "smoothing_weight",
+        "robust_smoothing_angle": "robust_smoothing_angle_degrees",
+        "iterations": "iteration_count",
+        "damping": "damping",
+        "maximum_normal_hypotheses": "maximum_normal_hypotheses",
+        "minimum_candidate_cross_angle": "minimum_candidate_cross_angle_degrees",
+        "candidate_residual_kernel": "candidate_residual_kernel_degrees",
+        "candidate_separation": "candidate_separation_degrees",
+        "tangent_compatibility_sigma": "tangent_compatibility_sigma_voxels",
+        "mixture_pairwise_weight": "mixture_pairwise_weight",
+        "mixture_initial_temperature": "mixture_initial_temperature",
+        "mixture_temperature": "mixture_temperature",
+        "mixture_damping": "mixture_damping",
+        "mixture_iterations": "mixture_iteration_count",
+        "mixture_annealing_iterations": "mixture_annealing_iterations",
+        "carrier_minimum_affinity": "carrier_minimum_affinity",
+        "compute": "compute",
+    }
+    for argument_name, setting_name in argument_settings.items():
+        value = getattr(args, argument_name, None)
+        if value is not None:
+            settings_values[setting_name] = value
+    summary = run_block_needle_field(
+        args.raw_root,
+        args.output,
+        world_start_xyz=tuple(args.world_start),
+        world_stop_xyz_exclusive=tuple(args.world_stop),
+        settings=BlockNeedleFieldSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _gap_census(args: argparse.Namespace) -> None:
     root = Path(args.root)
     pipeline_manifest = json.loads((root / "pipeline.json").read_text())
@@ -668,6 +719,23 @@ def _rank_cell_refinement_targets(args: argparse.Namespace) -> None:
             minimum_incident_open_trace_endpoints=(
                 args.minimum_incident_open_trace_endpoints
             ),
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _audit_sheet_resolution(args: argparse.Namespace) -> None:
+    summary = run_sheet_resolution_audit(
+        args.graph,
+        args.output,
+        settings=SheetResolutionAuditSettings(
+            normal_limit_degrees=args.normal_limit_degrees,
+            robust_standard_deviations=args.robust_standard_deviations,
+            minimum_normal_limit_degrees=args.minimum_normal_limit_degrees,
+            minimum_coherent_layers=args.minimum_coherent_layers,
+            maximum_refinement_factor=args.maximum_refinement_factor,
+            voxel_size_microns=args.voxel_size_microns,
         ),
         force=args.force,
     )
@@ -1555,6 +1623,62 @@ def main() -> None:
         help="rebake this pipeline's own matching artifacts from native CT",
     )
     full_acus.set_defaults(handler=_full_acus)
+    needle_field = subparsers.add_parser(
+        "solve-block-needle-field",
+        description=(
+            "Load every unique canonical Acus needle in one world-space cuboid "
+            "and jointly optimize a robust unsigned page-normal field without "
+            "independent cell fitting."
+        ),
+    )
+    needle_field.add_argument(
+        "--raw-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="complete raw-Acus pipeline root; repeat for adjacent source blocks",
+    )
+    needle_field.add_argument(
+        "--world-start", nargs=3, type=float, required=True
+    )
+    needle_field.add_argument(
+        "--world-stop", nargs=3, type=float, required=True
+    )
+    needle_field.add_argument("--output", type=Path, required=True)
+    needle_field.add_argument(
+        "--settings-json",
+        type=Path,
+        help=(
+            "optional BlockNeedleFieldSettings keyword object; explicit command "
+            "options override matching JSON values"
+        ),
+    )
+    needle_field.add_argument("--neighbor-radius", type=float)
+    needle_field.add_argument("--maximum-neighbors", type=int)
+    needle_field.add_argument("--spatial-kernel", type=float)
+    needle_field.add_argument("--smoothing-weight", type=float)
+    needle_field.add_argument(
+        "--robust-smoothing-angle", type=float
+    )
+    needle_field.add_argument("--iterations", type=int)
+    needle_field.add_argument("--damping", type=float)
+    needle_field.add_argument("--maximum-normal-hypotheses", type=int)
+    needle_field.add_argument("--minimum-candidate-cross-angle", type=float)
+    needle_field.add_argument("--candidate-residual-kernel", type=float)
+    needle_field.add_argument("--candidate-separation", type=float)
+    needle_field.add_argument("--tangent-compatibility-sigma", type=float)
+    needle_field.add_argument("--mixture-pairwise-weight", type=float)
+    needle_field.add_argument("--mixture-initial-temperature", type=float)
+    needle_field.add_argument("--mixture-temperature", type=float)
+    needle_field.add_argument("--mixture-damping", type=float)
+    needle_field.add_argument("--mixture-iterations", type=int)
+    needle_field.add_argument("--mixture-annealing-iterations", type=int)
+    needle_field.add_argument("--carrier-minimum-affinity", type=float)
+    needle_field.add_argument(
+        "--compute", choices=("auto", "gpu", "cpu")
+    )
+    needle_field.add_argument("--force", action="store_true")
+    needle_field.set_defaults(handler=_block_needle_field)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(
@@ -2111,6 +2235,41 @@ def main() -> None:
     )
     cell_refinement_targets.add_argument("--force", action="store_true")
     cell_refinement_targets.set_defaults(handler=_rank_cell_refinement_targets)
+    sheet_resolution = subparsers.add_parser(
+        "audit-sheet-resolution",
+        description=(
+            "Detect coherent ordered-layer bends that are geometrically visible "
+            "but under-resolved by one planar Acus sheetlet per cell, and emit "
+            "power-of-two local raw-Acus refinement targets."
+        ),
+    )
+    sheet_resolution.add_argument("--graph", type=Path, required=True)
+    sheet_resolution.add_argument("--output", type=Path, required=True)
+    sheet_resolution.add_argument(
+        "--normal-limit-degrees",
+        type=float,
+        default=0.0,
+        help="absolute locally-linear bend limit; zero derives it from retained joins",
+    )
+    sheet_resolution.add_argument(
+        "--robust-standard-deviations", type=float, default=3.0
+    )
+    sheet_resolution.add_argument(
+        "--minimum-normal-limit-degrees", type=float, default=15.0
+    )
+    sheet_resolution.add_argument(
+        "--minimum-coherent-layers", type=int, default=2
+    )
+    sheet_resolution.add_argument(
+        "--maximum-refinement-factor", type=int, default=4
+    )
+    sheet_resolution.add_argument(
+        "--voxel-size-microns",
+        type=float,
+        help="source voxel pitch used only for physical-size reporting",
+    )
+    sheet_resolution.add_argument("--force", action="store_true")
+    sheet_resolution.set_defaults(handler=_audit_sheet_resolution)
     sheet_restitch = subparsers.add_parser(
         "restitch-block-sheets",
         description=(
