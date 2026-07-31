@@ -1067,6 +1067,114 @@ dense material without a physical air--papyrus--air interval remain
 deliberately unresolved
 for a later boundary-evidence stage.
 
+### Signed one-sided boundary patches
+
+The paired bank cannot represent a clear material boundary when the opposite
+face is occluded, touches another ply, or leaves the block.  The next stage
+therefore reuses the identical source-aligned CT preparation to extract every
+strong **signed air-to-material interface** without requiring an exit
+crossing.  It anchors both exact physical faces of selected paired profiles;
+the two faces have opposite signed normals but retain one sheet identity.
+Ambiguous anchors from different identities are marked as conflicts and are
+never assigned.
+
+```bash
+python3 -m backend.cubical build-one-sided-interface-bank \
+  --growth /path/to/paired-surface-growth \
+  --output /path/to/one-sided-interface-bank
+
+python3 -m backend.cubical grow-one-sided-interfaces \
+  --bank /path/to/one-sided-interface-bank \
+  --output /path/to/one-sided-interface-growth
+```
+
+This field is dense, unlike the paired profiles.  Its default topology uses
+only processing-lattice sites that share a face.  Reusing the paired graph's
+sqrt(5)-step sparse links connected distinct nearby boundaries into a 12,559
+interface component touching 59 trusted identities.  Shared-face topology
+reduces the largest component to 377 while still exposing substantial new
+boundary support.  Signed normal comparison rejects opposite sheet faces;
+normal sign is never canonicalized away in this stage.
+
+Connected patches retain ambiguity explicitly.  A patch with no seed is an
+unowned boundary hypothesis, one touching a single identity may grow that
+identity, and one touching multiple identities is deferred rather than split
+by queue order.  Fragment identities may associate only when at least two
+independent boundary components on **each** corresponding physical face show
+consistent side parity and balanced seed support.  A parity-aware union keeps
+canonical-side flips explicit and rejects contradictory association cycles.
+
+On the current core, extraction takes about 3.0 seconds and writes 360,545
+owned strong interfaces.  The strict 0.75-step / 15-degree anchor matches
+88,147 of 190,082 paired endpoints to 74,063 unique interface seeds while
+excluding 828 conflicting seeds.  Shared-face graph construction, bilateral
+association, conservative growth, compressed output, and previews complete in
+about 1.7 seconds.  Eight bilateral joins reduce 878 input identities to 870
+assemblies, with no assembly larger than three identities.  The solve selects
+139,089 interfaces: 74,063 immutable anchors plus 65,026 unambiguous
+extensions.  It leaves 28,710 non-seed interfaces in contested components and
+163,831 in wholly unseeded components for later sheet-pair inference.  These
+deferred populations are first-class output, not failures hidden by a winner.
+
+### Exact two-face ribbon bank
+
+The strongest subset of the boundary field is represented explicitly as a
+**ribbon**: one physically bounded paired profile whose lower and upper faces
+both match strong signed interface samples.  Reciprocal or near-identical
+profiles that land on the same exact interface pair collapse to one ribbon,
+while their alternative count and original candidate mapping remain
+persisted.  The strict paired-profile continuity graph is then projected onto
+these ribbons without recomputing or weakening its two-boundary geometry.
+
+```bash
+python3 -m backend.cubical build-clear-ribbon-bank \
+  --growth /path/to/one-sided-interface-growth \
+  --output /path/to/clear-ribbon-bank
+
+python3 -m backend.cubical select-clear-ribbons \
+  --bank /path/to/clear-ribbon-bank \
+  --output /path/to/clear-ribbon-selection
+```
+
+This stage is an evidence bank and component census, not a selector.  In
+particular it records competing ribbons at the same source-lattice key so a
+later solve cannot accidentally select an entire connected component and
+violate local mutual exclusion.
+
+On the current core, 20,141 of 309,672 physically bounded candidates match
+both strict signed faces.  They reduce to 19,303 unique ribbons, including
+838 exact face-pair alternatives.  Projecting the persisted paired graph
+produces 49,496 unique strict continuity edges and 4,320 components.  The
+largest components contain 240 and 239 ribbons.  Of all components, 2,395
+touch exactly one trusted assembly, 1,923 are unseeded, and only two touch
+multiple assemblies; the contested population is just 16 ribbons.  Twelve
+unseeded components contain at least eight ribbons and the largest contains
+27, providing a small but concrete population of entirely new clear sheet
+cores.  There are also 794 same-key alternatives across 401 components, which
+is why the bank deliberately stops before selection.  Construction and both
+PNG audits take about 1.2 seconds; a verified cached read takes about half a
+second including Python startup.
+
+The following selection stage treats every previously selected paired surface
+as an immutable anchor.  Within a component that touches exactly one trusted
+assembly it grows a maximum-bottleneck forest over strict two-face continuity
+edges.  Components touching multiple assemblies retain their anchors but
+defer their interiors.  Entirely unseeded components receive a new identity
+only when at least eight ribbons remain after global source-lattice mutual
+exclusion.  The hard constraint is therefore one selected ribbon per source
+lattice key, including across otherwise disconnected components.
+
+On the current core, selection takes about 0.1 seconds and retains all 15,155
+anchors, adds 474 collision-safe ribbons to anchored assemblies, and admits
+104 ribbons as ten entirely new clear cores.  The new cores contain 8--24
+ribbons, with a median of 8.5.  Two candidate cores fall below the minimum
+after exclusivity and are rolled back; 768 individual alternatives are marked
+as collision-rejected.  The median path bottleneck is 0.809 for anchored
+growth and 0.798 for new cores.  Including compressed output and both PNG
+audits, the stage takes about 0.26 seconds and writes a 50 KB selection table.
+This is intentionally a high-confidence scaffold rather than an attempt to
+claim utilization in unresolved dense material.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;
@@ -1089,6 +1197,10 @@ python3 -m unittest \
   backend.test_isolated_slab \
   backend.test_paired_surface_bank \
   backend.test_paired_surface_growth \
+  backend.test_one_sided_interface \
+  backend.test_one_sided_growth \
+  backend.test_clear_ribbon \
+  backend.test_clear_ribbon_selection \
   backend.test_raw_acus_pipeline -v
 ```
 
@@ -1097,4 +1209,8 @@ raw source and shared-calibration identities, content hash checks, unsigned
 normal recovery, physical two-ply/empty alternatives, exact mode-bank
 persistence, gap classification, configuration-aware face selection, cubical
 clipping, trace alignment, frozen topology round trips, conditional boundary
-reselection, topology vetoes, and hierarchical assembly.
+reselection, topology vetoes, signed interface anchoring,
+ambiguity-preserving boundary growth, bilateral seed association, and
+exact two-face ribbon de-duplication, collision-aware component census, and
+collision-safe ribbon selection, minimum-size rollback, contested-component
+deferral, and hierarchical assembly.

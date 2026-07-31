@@ -38,6 +38,11 @@ from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
 from .continuity import JoinContinuitySettings, run_join_continuity_refinement
 from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
+from .clear_ribbon import ClearRibbonSettings, run_clear_ribbon_bank
+from .clear_ribbon_selection import (
+    ClearRibbonSelectionSettings,
+    run_clear_ribbon_selection,
+)
 from .export import write_block_obj, write_block_projection_png
 from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
@@ -67,6 +72,14 @@ from .needle_surface import (
 from .needle_topology import (
     BlockNeedleTopologySettings,
     run_block_needle_topology,
+)
+from .one_sided_interface import (
+    OneSidedInterfaceSettings,
+    run_one_sided_interface_bank,
+)
+from .one_sided_growth import (
+    OneSidedGrowthSettings,
+    run_one_sided_growth,
 )
 from .pipeline import run_raw_acus_pipeline
 from .paired_surface_bank import (
@@ -601,6 +614,66 @@ def _paired_surface_growth(args: argparse.Namespace) -> None:
         args.bank,
         args.output,
         settings=PairedSurfaceGrowthSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _one_sided_interface_bank(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_one_sided_interface_bank(
+        args.growth,
+        args.output,
+        settings=OneSidedInterfaceSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _one_sided_interface_growth(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_one_sided_growth(
+        args.bank,
+        args.output,
+        settings=OneSidedGrowthSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _clear_ribbon_bank(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_clear_ribbon_bank(
+        args.growth,
+        args.output,
+        settings=ClearRibbonSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _clear_ribbon_selection(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_clear_ribbon_selection(
+        args.bank,
+        args.output,
+        settings=ClearRibbonSelectionSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1978,6 +2051,76 @@ def main() -> None:
     )
     paired_surface_growth.add_argument("--force", action="store_true")
     paired_surface_growth.set_defaults(handler=_paired_surface_growth)
+    one_sided_interface = subparsers.add_parser(
+        "build-one-sided-interface-bank",
+        description=(
+            "Extract signed air-to-material CT interfaces without requiring "
+            "an opposite face, and anchor them to both exact faces of the "
+            "selected paired-surface result."
+        ),
+    )
+    one_sided_interface.add_argument("--growth", type=Path, required=True)
+    one_sided_interface.add_argument("--output", type=Path, required=True)
+    one_sided_interface.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional OneSidedInterfaceSettings keyword object",
+    )
+    one_sided_interface.add_argument("--force", action="store_true")
+    one_sided_interface.set_defaults(handler=_one_sided_interface_bank)
+    one_sided_growth = subparsers.add_parser(
+        "grow-one-sided-interfaces",
+        description=(
+            "Grow paired-surface identities over signed one-sided material "
+            "interfaces, associate only bilaterally supported fragments, "
+            "and preserve multi-identity components as unresolved."
+        ),
+    )
+    one_sided_growth.add_argument("--bank", type=Path, required=True)
+    one_sided_growth.add_argument("--output", type=Path, required=True)
+    one_sided_growth.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional OneSidedGrowthSettings keyword object",
+    )
+    one_sided_growth.add_argument("--force", action="store_true")
+    one_sided_growth.set_defaults(handler=_one_sided_interface_growth)
+    clear_ribbon_bank = subparsers.add_parser(
+        "build-clear-ribbon-bank",
+        description=(
+            "Map both faces of every physically bounded paired profile onto "
+            "strong signed interfaces, collapse reciprocal duplicates, and "
+            "catalog strict two-boundary components without selecting new "
+            "alternatives."
+        ),
+    )
+    clear_ribbon_bank.add_argument("--growth", type=Path, required=True)
+    clear_ribbon_bank.add_argument("--output", type=Path, required=True)
+    clear_ribbon_bank.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional ClearRibbonSettings keyword object",
+    )
+    clear_ribbon_bank.add_argument("--force", action="store_true")
+    clear_ribbon_bank.set_defaults(handler=_clear_ribbon_bank)
+    clear_ribbon_selection = subparsers.add_parser(
+        "select-clear-ribbons",
+        description=(
+            "Select a collision-safe maximum-bottleneck forest from the exact "
+            "two-face ribbon bank, preserving trusted anchors, deferring "
+            "contested interiors, and assigning new identities only to "
+            "substantial unseeded cores."
+        ),
+    )
+    clear_ribbon_selection.add_argument("--bank", type=Path, required=True)
+    clear_ribbon_selection.add_argument("--output", type=Path, required=True)
+    clear_ribbon_selection.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional ClearRibbonSelectionSettings keyword object",
+    )
+    clear_ribbon_selection.add_argument("--force", action="store_true")
+    clear_ribbon_selection.set_defaults(handler=_clear_ribbon_selection)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(
