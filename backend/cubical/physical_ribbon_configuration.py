@@ -362,6 +362,42 @@ def _component_labels(
     return component, size[size_order]
 
 
+def _undirected_edge_key(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    first_u64 = np.asarray(first, dtype=np.uint64)
+    second_u64 = np.asarray(second, dtype=np.uint64)
+    low = np.minimum(first_u64, second_u64)
+    high = np.maximum(first_u64, second_u64)
+    return (low << np.uint64(32)) | high
+
+
+def _support_topology_edge_mask(
+    support_first: np.ndarray,
+    support_second: np.ndarray,
+    topology_first: np.ndarray,
+    topology_second: np.ndarray,
+) -> np.ndarray:
+    support_key = _undirected_edge_key(support_first, support_second)
+    topology_key = _undirected_edge_key(topology_first, topology_second)
+    ordered_support = np.sort(support_key)
+    if len(ordered_support) > 1 and np.any(
+        ordered_support[1:] == ordered_support[:-1]
+    ):
+        raise ValueError("support continuity contains duplicate edges")
+    ordered_topology = np.sort(topology_key)
+    if len(ordered_topology) > 1 and np.any(
+        ordered_topology[1:] == ordered_topology[:-1]
+    ):
+        raise ValueError("topology continuity contains duplicate edges")
+    location = np.searchsorted(ordered_support, topology_key)
+    present = location < len(ordered_support)
+    present[present] &= (
+        ordered_support[location[present]] == topology_key[present]
+    )
+    if not np.all(present):
+        raise ValueError("topology continuity is not a subset of support continuity")
+    return np.isin(support_key, topology_key, assume_unique=True)
+
+
 def optimize_physical_ribbon_configuration(
     ribbon: Mapping[str, np.ndarray],
     interfaces: Mapping[str, np.ndarray],
@@ -369,6 +405,7 @@ def optimize_physical_ribbon_configuration(
     crossings: Mapping[str, np.ndarray],
     *,
     settings: PhysicalRibbonConfigurationSettings,
+    topology_continuity: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     frontier = np.asarray(
         continuity["frontierRibbonCandidate"], dtype=np.int32
@@ -390,6 +427,25 @@ def optimize_physical_ribbon_configuration(
         continuity["edgeSecondFrontierIndex"], dtype=np.int32
     )
     edge_weight = np.asarray(continuity["edgeScore"], dtype=np.float32)
+    topology = topology_continuity or continuity
+    if not np.array_equal(
+        frontier,
+        np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32),
+    ):
+        raise ValueError("support and topology continuity frontiers differ")
+    topology_first = np.asarray(
+        topology["edgeFirstFrontierIndex"], dtype=np.int32
+    )
+    topology_second = np.asarray(
+        topology["edgeSecondFrontierIndex"], dtype=np.int32
+    )
+    topology_weight = np.asarray(topology["edgeScore"], dtype=np.float32)
+    topology_edge_mask = _support_topology_edge_mask(
+        first,
+        second,
+        topology_first,
+        topology_second,
+    )
     crossing_first = np.asarray(
         crossings["crossingFirstFrontierIndex"], dtype=np.int32
     )
@@ -398,6 +454,9 @@ def optimize_physical_ribbon_configuration(
     )
     continuity_offset, continuity_neighbor, continuity_neighbor_weight = _adjacency(
         node_count, first, second, edge_weight
+    )
+    topology_offset, topology_neighbor, topology_neighbor_weight = _adjacency(
+        node_count, topology_first, topology_second, topology_weight
     )
     crossing_offset, crossing_neighbor, _ = _adjacency(
         node_count, crossing_first, crossing_second
@@ -566,23 +625,22 @@ def optimize_physical_ribbon_configuration(
     # exclusivity, exact non-intersection, or component ambiguity.
     hole_growth_records: list[dict[str, Any]] = []
     for growth_sweep in range(settings.maximum_hole_growth_sweeps):
-        component, _ = _component_labels(selected, first, second)
+        component, _ = _component_labels(
+            selected, topology_first, topology_second
+        )
         interface_owner = np.full(len(interfaces["positionXYZ"]), -1, dtype=np.int32)
         selected_node = np.flatnonzero(selected)
         interface_owner[source[selected_node]] = selected_node
         interface_owner[target[selected_node]] = selected_node
-        edge_from_selected = selected[first] ^ selected[second]
+        edge_from_selected = (
+            selected[topology_first] ^ selected[topology_second]
+        )
         unselected_end = np.where(
-            selected[first[edge_from_selected]],
-            second[edge_from_selected],
-            first[edge_from_selected],
+            selected[topology_first[edge_from_selected]],
+            topology_second[edge_from_selected],
+            topology_first[edge_from_selected],
         )
-        selected_end = np.where(
-            selected[first[edge_from_selected]],
-            first[edge_from_selected],
-            second[edge_from_selected],
-        )
-        cross_weight = edge_weight[edge_from_selected]
+        cross_weight = topology_weight[edge_from_selected]
         neighbor_count = np.zeros(node_count, dtype=np.int32)
         neighbor_weight = np.zeros(node_count, dtype=np.float32)
         np.add.at(neighbor_count, unselected_end, 1)
@@ -613,9 +671,9 @@ def optimize_physical_ribbon_configuration(
         )
         accepted_proposal: list[tuple[float, int, int, float]] = []
         for node in proposed:
-            begin, end = continuity_offset[node], continuity_offset[node + 1]
-            neighbor = continuity_neighbor[begin:end]
-            weight = continuity_neighbor_weight[begin:end]
+            begin, end = topology_offset[node], topology_offset[node + 1]
+            neighbor = topology_neighbor[begin:end]
+            weight = topology_neighbor_weight[begin:end]
             active = selected[neighbor]
             neighbor = neighbor[active]
             weight = weight[active]
@@ -653,8 +711,8 @@ def optimize_physical_ribbon_configuration(
             begin, end = crossing_offset[node], crossing_offset[node + 1]
             if np.any(selected[crossing_neighbor[begin:end]]):
                 continue
-            edge_begin, edge_end = continuity_offset[node], continuity_offset[node + 1]
-            neighbor = continuity_neighbor[edge_begin:edge_end]
+            edge_begin, edge_end = topology_offset[node], topology_offset[node + 1]
+            neighbor = topology_neighbor[edge_begin:edge_end]
             active_neighbor = neighbor[selected[neighbor]]
             active_component = np.unique(component[active_neighbor])
             active_component = active_component[active_component >= 0]
@@ -677,7 +735,8 @@ def optimize_physical_ribbon_configuration(
         if added == 0:
             break
 
-    selected_edge = selected[first] & selected[second]
+    support_selected_edge = selected[first] & selected[second]
+    selected_edge = support_selected_edge & topology_edge_mask
     selected_crossing = selected[crossing_first] & selected[crossing_second]
     if np.any(selected_crossing):
         raise RuntimeError("configuration optimization retained crossing profiles")
@@ -686,13 +745,16 @@ def optimize_physical_ribbon_configuration(
     endpoint = np.concatenate((selected_source, selected_target))
     if len(np.unique(endpoint)) != len(endpoint):
         raise RuntimeError("configuration assigns one interface more than once")
-    component, component_size = _component_labels(selected, first, second)
+    component, component_size = _component_labels(
+        selected, topology_first, topology_second
+    )
     arrays = {
         **crossings,
         "nodeUnaryScore": unary,
         "initialSelected": initial.astype(np.uint8),
         "selected": selected.astype(np.uint8),
         "component": component,
+        "supportEdgeSelected": support_selected_edge.astype(np.uint8),
         "edgeSelected": selected_edge.astype(np.uint8),
     }
     stats = {
@@ -702,6 +764,9 @@ def optimize_physical_ribbon_configuration(
         "selectedRibbonCount": int(np.count_nonzero(selected)),
         "selectedMutualFirstHitCount": int(np.count_nonzero(selected & mutual)),
         "selectedInterfaceCount": int(len(endpoint)),
+        "selectedSupportEdgeCount": int(
+            np.count_nonzero(support_selected_edge)
+        ),
         "selectedContinuityEdgeCount": int(np.count_nonzero(selected_edge)),
         "selectedCrossingConflictCount": int(np.count_nonzero(selected_crossing)),
         "configurationObjective": round(
@@ -737,6 +802,30 @@ def _load_npz(path: Path, expected_sha256: str) -> dict[str, np.ndarray]:
         raise ValueError(f"artifact data hash differs from manifest: {path}")
     with np.load(path) as values:
         return {name: np.asarray(values[name]) for name in values.files}
+
+
+def _load_continuity_artifact(
+    root: str | Path,
+) -> tuple[Path, dict[str, Any], dict[str, np.ndarray]]:
+    value = Path(root).resolve()
+    manifest_path = (
+        value
+        if value.is_file()
+        else value / "physical-ribbon-continuity-v1.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("schema") != PHYSICAL_RIBBON_CONTINUITY_SCHEMA
+        or manifest.get("state") != "complete"
+        or manifest.get("method", {}).get("identityLabelsUsed") is not False
+    ):
+        raise ValueError("topology continuity must be complete and label-free")
+    data_path = manifest_path.parent / str(manifest["data"]["path"])
+    return (
+        manifest_path,
+        manifest,
+        _load_npz(data_path, manifest["data"]["sha256"]),
+    )
 
 
 def _load_inputs(
@@ -823,6 +912,7 @@ def run_physical_ribbon_configuration(
     continuity_root: str | Path,
     output_root: str | Path,
     *,
+    topology_continuity_root: str | Path | None = None,
     settings: PhysicalRibbonConfigurationSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -838,6 +928,28 @@ def run_physical_ribbon_configuration(
         interface_manifest,
         interfaces,
     ) = _load_inputs(continuity_root)
+    topology_continuity = continuity
+    topology_identity: dict[str, Any] | None = None
+    if topology_continuity_root is not None:
+        (
+            topology_path,
+            topology_manifest,
+            topology_continuity,
+        ) = _load_continuity_artifact(topology_continuity_root)
+        topology_ribbon = topology_manifest.get("identity", {}).get(
+            "ribbonBank", {}
+        )
+        if topology_ribbon.get("dataSha256") != ribbon_manifest["data"]["sha256"]:
+            raise ValueError(
+                "topology continuity was not built from the support ribbon bank"
+            )
+        if topology_manifest.get("geometry") != continuity_manifest.get("geometry"):
+            raise ValueError("support and topology continuity geometry differs")
+        topology_identity = {
+            "manifestPath": str(topology_path),
+            "manifestSha256": sha256_file(topology_path),
+            "dataSha256": topology_manifest["data"]["sha256"],
+        }
     identity: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_CONFIGURATION_SCHEMA,
         "version": PHYSICAL_RIBBON_CONFIGURATION_VERSION,
@@ -859,6 +971,8 @@ def run_physical_ribbon_configuration(
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
+    if topology_identity is not None:
+        identity["topologyContinuity"] = topology_identity
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -908,6 +1022,7 @@ def run_physical_ribbon_configuration(
         continuity,
         crossings,
         settings=resolved,
+        topology_continuity=topology_continuity,
     )
     solved = time.monotonic()
     _write_npz(data_path, optimized)
@@ -963,6 +1078,12 @@ def run_physical_ribbon_configuration(
             ),
             "alternatives": (
                 "all rejected candidates remain in the immutable ribbon bank"
+            ),
+            "topology": (
+                "support continuity votes in the configuration objective; a "
+                "separate strict continuity graph defines component identity"
+                if topology_identity is not None
+                else "support and topology use the same continuity graph"
             ),
             "identityLabelsUsed": False,
         },

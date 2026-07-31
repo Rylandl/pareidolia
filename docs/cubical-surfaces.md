@@ -251,11 +251,34 @@ rasterizes candidate thickness profiles, verifies their closest interior
 approach geometrically, and forbids intersecting profiles. A local factor solve
 then trades alternatives using boundary evidence, inward-ray rank, and
 simultaneous two-face continuation. Rejected alternatives remain in the bank.
-The pilot contains 30,501 exact crossing relationships; its selected solution
-uses 37,019 ribbons and 74,038 distinct faces with zero crossings or reused
-interfaces. Three component-conditioned hole sweeps add 199 surrounded samples
-without relaxing those invariants. The full configuration pass takes about
-10.4 seconds.
+Support and topology can be separate immutable continuity artifacts: the wider
+graph contributes votes to the configuration objective, while only the strict
+graph defines component identity. This prevents one permissive support edge
+from silently fusing otherwise distinct sheets. The current two-scale pilot
+selects 37,889 ribbons and 75,778 distinct faces with zero crossings or reused
+interfaces. The strict graph forms 4,307 components.
+
+`analyze-physical-ribbon-patch-holes` replaces candidate-at-a-time gap growth
+with a surface-level diagnostic. It integrates every eligible strict component
+into an intrinsic chart, triangulates only supported edges, and extracts closed
+interior boundary loops. A loop is the decision unit. Affine and regularized
+quadratic patches are fitted from its complete boundary plus a two-hop context,
+then sampled directly from native CT. The predicted layer must reproduce the
+context's air-material-air profile and beat copies translated along the page
+normal by half and one local ribbon thickness.
+
+Candidate repair is an alternating interface re-pairing, not an additive cell
+vote. Every geometrically compatible ribbon and every incumbent that owns one
+of its interfaces enter one local factor graph. Shared interfaces and exact
+profile crossings are hard exclusions; strict continuation and support from
+fixed neighbors are pair factors. The command rebuilds components, charts, and
+triangles counterfactually but never mutates its source configuration. On the
+current slab, 34 closed holes contain three multi-ribbon gaps. The two gaps
+with 0.97--0.99 context-profile correlation close after joint re-pairing. The
+weaker 0.62-correlation proposal remains open and is therefore not mistaken for
+a successful repair. The replay adds 14 supported triangles while preserving
+all 4,307 component identities, with no interface collision, crossing, or
+cross-component fusion.
 
 The reproducible commands are:
 
@@ -270,6 +293,12 @@ python -m backend.cubical solve-physical-ribbon-continuity \
   --settings-json examples/physical-ribbon-continuity-broad.json
 
 python -m backend.cubical optimize-physical-ribbon-configuration \
-  --continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-broad-v1 \
-  --output work/multiseam-2x2-b00c03c/physical-ribbon-configuration-v1
+  --continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-bridge-search-v1 \
+  --topology-continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-broad-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1
+
+python -m backend.cubical analyze-physical-ribbon-patch-holes \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-v1 \
+  --settings-json examples/physical-ribbon-patch-holes.json
 ```

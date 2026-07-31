@@ -107,6 +107,14 @@ from .physical_ribbon_configuration import (
     PhysicalRibbonConfigurationSettings,
     run_physical_ribbon_configuration,
 )
+from .physical_ribbon_bridging import (
+    PhysicalRibbonBridgingSettings,
+    run_physical_ribbon_bridging,
+)
+from .physical_ribbon_patch_holes import (
+    PhysicalRibbonPatchHoleSettings,
+    run_physical_ribbon_patch_holes,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -762,7 +770,39 @@ def _physical_ribbon_configuration(args: argparse.Namespace) -> None:
     summary = run_physical_ribbon_configuration(
         args.continuity,
         args.output,
+        topology_continuity_root=args.topology_continuity,
         settings=PhysicalRibbonConfigurationSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_bridging(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_bridging(
+        args.configuration,
+        args.output,
+        bridge_continuity_root=args.bridge_continuity,
+        settings=PhysicalRibbonBridgingSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_patch_holes(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_patch_holes(
+        args.configuration,
+        args.output,
+        settings=PhysicalRibbonPatchHoleSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2308,12 +2348,66 @@ def main() -> None:
         "--continuity", type=Path, required=True
     )
     physical_ribbon_configuration.add_argument(
+        "--topology-continuity",
+        type=Path,
+        help=(
+            "Optional stricter continuity graph used to define component "
+            "identity while --continuity supplies broader support votes."
+        ),
+    )
+    physical_ribbon_configuration.add_argument(
         "--output", type=Path, required=True
     )
     physical_ribbon_configuration.add_argument("--settings-json", type=Path)
     physical_ribbon_configuration.add_argument("--force", action="store_true")
     physical_ribbon_configuration.set_defaults(
         handler=_physical_ribbon_configuration
+    )
+    physical_ribbon_bridging = subparsers.add_parser(
+        "bridge-physical-ribbon-components",
+        description=(
+            "Merge label-free ribbon fragments only through connected bundles "
+            "of multiple two-face bridge candidates while preserving interface "
+            "exclusivity and exact profile non-intersection."
+        ),
+    )
+    physical_ribbon_bridging.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_bridging.add_argument(
+        "--bridge-continuity",
+        type=Path,
+        help=(
+            "Optional broader continuation graph used only to propose guarded "
+            "multi-path bridges."
+        ),
+    )
+    physical_ribbon_bridging.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_bridging.add_argument("--settings-json", type=Path)
+    physical_ribbon_bridging.add_argument("--force", action="store_true")
+    physical_ribbon_bridging.set_defaults(
+        handler=_physical_ribbon_bridging
+    )
+    physical_ribbon_patch_holes = subparsers.add_parser(
+        "analyze-physical-ribbon-patch-holes",
+        description=(
+            "Construct intrinsic meshes for selected physical ribbons, identify "
+            "closed multi-ribbon holes, and test jointly fitted surface patches "
+            "against native CT and normal-offset competing layers."
+        ),
+    )
+    physical_ribbon_patch_holes.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_patch_holes.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_patch_holes.add_argument("--settings-json", type=Path)
+    physical_ribbon_patch_holes.add_argument("--force", action="store_true")
+    physical_ribbon_patch_holes.set_defaults(
+        handler=_physical_ribbon_patch_holes
     )
     gap_census = subparsers.add_parser(
         "gap-census",

@@ -1,0 +1,15 @@
+{
+  "minimum_component_ribbon_count": 32,
+  "minimum_hole_boundary_vertex_count": 6,
+  "minimum_hole_diameter_boundary_edges": 1.5,
+  "minimum_hole_area_boundary_edges_squared": 1.0,
+  "context_graph_hops": 2,
+  "patch_pixel_step_voxels": 1.0,
+  "maximum_patch_pixels": 4096,
+  "maximum_candidate_height_thicknesses": 0.25,
+  "maximum_candidate_tangent_raster_steps": 1.75,
+  "maximum_candidate_normal_degrees": 35.0,
+  "maximum_candidate_thickness_ratio": 1.65,
+  "surface_alignment_weight": 0.35,
+  "configuration_beam_width": 16384
+}
