@@ -40,6 +40,7 @@ from .continuity import JoinContinuitySettings, run_join_continuity_refinement
 from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
 from .clear_ribbon import ClearRibbonSettings, run_clear_ribbon_bank
 from .clear_ribbon_feedback import run_clear_ribbon_feedback
+from .clear_ribbon_paired_feedback import run_clear_ribbon_paired_feedback
 from .clear_ribbon_selection import (
     ClearRibbonSelectionSettings,
     run_clear_ribbon_selection,
@@ -683,6 +684,15 @@ def _clear_ribbon_selection(args: argparse.Namespace) -> None:
 def _clear_ribbon_feedback(args: argparse.Namespace) -> None:
     summary = run_clear_ribbon_feedback(
         args.selection,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _clear_ribbon_paired_feedback(args: argparse.Namespace) -> None:
+    summary = run_clear_ribbon_paired_feedback(
+        args.feedback,
         args.output,
         force=args.force,
     )
@@ -2145,6 +2155,24 @@ def main() -> None:
     clear_ribbon_feedback.add_argument("--output", type=Path, required=True)
     clear_ribbon_feedback.add_argument("--force", action="store_true")
     clear_ribbon_feedback.set_defaults(handler=_clear_ribbon_feedback)
+    clear_ribbon_paired_feedback = subparsers.add_parser(
+        "grow-clear-ribbon-paired-profiles",
+        description=(
+            "Use interface-validated new clear cores as seeds in the full "
+            "physical paired-profile graph while freezing every baseline "
+            "selection and deferring multi-label free components."
+        ),
+    )
+    clear_ribbon_paired_feedback.add_argument(
+        "--feedback", type=Path, required=True
+    )
+    clear_ribbon_paired_feedback.add_argument(
+        "--output", type=Path, required=True
+    )
+    clear_ribbon_paired_feedback.add_argument("--force", action="store_true")
+    clear_ribbon_paired_feedback.set_defaults(
+        handler=_clear_ribbon_paired_feedback
+    )
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

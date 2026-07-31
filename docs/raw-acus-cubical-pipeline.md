@@ -1138,6 +1138,10 @@ python3 -m backend.cubical select-clear-ribbons \
 python3 -m backend.cubical grow-clear-ribbon-interfaces \
   --selection /path/to/clear-ribbon-selection \
   --output /path/to/clear-ribbon-interface-feedback
+
+python3 -m backend.cubical grow-clear-ribbon-paired-profiles \
+  --feedback /path/to/clear-ribbon-interface-feedback \
+  --output /path/to/clear-ribbon-paired-feedback
 ```
 
 This stage is an evidence bank and component census, not a selector.  In
@@ -1208,6 +1212,26 @@ would drop 66 prior assignments, so the feedback invariant rejects it.  The
 1.0 / 20 setting is therefore the widest demonstrated safe rung on this
 block, while the preservation check remains mandatory on every future block.
 
+The final feedback pass returns those interface-validated identities to the
+complete physical paired-profile graph.  This is not a second CT detector and
+does not invent geometry: all candidates and continuity edges come from the
+persisted paired bank.  Every one of the 95,041 baseline selections and its
+occupied sampling-lattice key is immutable.  Baseline-occupied keys are
+removed before free components are labeled, a free component reached by more
+than one new identity is deferred in full, and source-key mutual exclusion is
+enforced globally during maximum-bottleneck growth.
+
+On the current core, the 395 clear-ribbon seeds occupy 37 distinct free graph
+components, so there are no multi-identity components or cross-identity key
+conflicts.  Conservative growth adds 1,817 already-measured paired profiles,
+for 2,212 selected profiles across the 37 new identities, while preserving all
+95,041 baseline profiles exactly.  The seeded free components contain 17--212
+candidates with a median of 61.  Added profiles have a median path bottleneck
+of 0.583 and median same-label graph degree of six; 92.74% have at least two
+same-label neighbors.  The complete solve and visual audits take 0.68 seconds
+on CPU.  These larger patches are still evidence-bounded clear cores, not a
+claim that the unresolved dense block has been partitioned into sheets.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;
@@ -1235,6 +1259,7 @@ python3 -m unittest \
   backend.test_clear_ribbon \
   backend.test_clear_ribbon_selection \
   backend.test_clear_ribbon_feedback \
+  backend.test_clear_ribbon_paired_feedback \
   backend.test_raw_acus_pipeline -v
 ```
 
@@ -1248,4 +1273,5 @@ ambiguity-preserving boundary growth, bilateral seed association, and
 exact two-face ribbon de-duplication, collision-aware component census, and
 collision-safe ribbon selection, minimum-size rollback, contested-component
 deferral, cross-representation seed validation, baseline-preserving ribbon
-feedback, and hierarchical assembly.
+feedback, immutable-baseline paired-profile feedback, free-component ambiguity
+deferral, spatial-key mutual exclusion, and hierarchical assembly.
