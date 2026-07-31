@@ -38,6 +38,9 @@ from .continuation_search import run_continuation_search
 from .continuation_variant import run_continuation_variant
 from .continuity import JoinContinuitySettings, run_join_continuity_refinement
 from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
+from .clear_core_interface_refinement import (
+    run_clear_core_interface_refinement,
+)
 from .clear_ribbon import ClearRibbonSettings, run_clear_ribbon_bank
 from .clear_ribbon_feedback import run_clear_ribbon_feedback
 from .clear_ribbon_paired_feedback import run_clear_ribbon_paired_feedback
@@ -693,6 +696,15 @@ def _clear_ribbon_feedback(args: argparse.Namespace) -> None:
 def _clear_ribbon_paired_feedback(args: argparse.Namespace) -> None:
     summary = run_clear_ribbon_paired_feedback(
         args.feedback,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _clear_core_interface_refinement(args: argparse.Namespace) -> None:
+    summary = run_clear_core_interface_refinement(
+        args.paired_feedback,
         args.output,
         force=args.force,
     )
@@ -2172,6 +2184,26 @@ def main() -> None:
     clear_ribbon_paired_feedback.add_argument("--force", action="store_true")
     clear_ribbon_paired_feedback.set_defaults(
         handler=_clear_ribbon_paired_feedback
+    )
+    clear_core_interface_refinement = subparsers.add_parser(
+        "grow-paired-feedback-interfaces",
+        description=(
+            "Freeze all current signed-interface assignments, add only safe "
+            "unowned endpoints from paired-profile feedback, and grow "
+            "unambiguous interface components."
+        ),
+    )
+    clear_core_interface_refinement.add_argument(
+        "--paired-feedback", type=Path, required=True
+    )
+    clear_core_interface_refinement.add_argument(
+        "--output", type=Path, required=True
+    )
+    clear_core_interface_refinement.add_argument(
+        "--force", action="store_true"
+    )
+    clear_core_interface_refinement.set_defaults(
+        handler=_clear_core_interface_refinement
     )
     gap_census = subparsers.add_parser(
         "gap-census",

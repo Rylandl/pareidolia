@@ -1142,6 +1142,10 @@ python3 -m backend.cubical grow-clear-ribbon-interfaces \
 python3 -m backend.cubical grow-clear-ribbon-paired-profiles \
   --feedback /path/to/clear-ribbon-interface-feedback \
   --output /path/to/clear-ribbon-paired-feedback
+
+python3 -m backend.cubical grow-paired-feedback-interfaces \
+  --paired-feedback /path/to/clear-ribbon-paired-feedback \
+  --output /path/to/clear-core-interface-refinement
 ```
 
 This stage is an evidence bank and component census, not a selector.  In
@@ -1249,6 +1253,24 @@ at least two same-label neighbors.  The complete solve and visual audits take
 cores, not a claim that the unresolved dense block has been partitioned into
 sheets.
 
+The paired-to-interface refinement closes the first monotone feedback loop.
+It freezes every selected interface from the preceding state, groups all
+unowned endpoint observations by exact interface and intended identity, and
+adds only conflict-free groups as seeds.  Multiple labels for one interface,
+an original seed conflict, or an unexpectedly occupied interface are recorded
+and deferred.  Rebuilding the signed graph is necessary because a newly seeded
+interface may previously have been below the ordinary evidence threshold.
+
+On the current core, 519 endpoint observations reduce to 397 unique new
+interface seeds across 35 of the 37 clear identities, with no label conflicts;
+106 of those interfaces were previously below the evidence gate.  They unlock
+1,000 additional interfaces, so the round adds 1,397 assignments while
+preserving all 141,597 prior assignments and labels exactly.  Median new-growth
+bottleneck is 0.699, median same-label degree is two, and 88.20% of additions
+have at least two same-label neighbors.  Unseeded eligible interfaces fall
+from 161,445 to 160,149, while five additional interfaces become contested and
+remain deferred.  The complete CPU round and visual audits take 1.46 seconds.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;
@@ -1277,6 +1299,7 @@ python3 -m unittest \
   backend.test_clear_ribbon_selection \
   backend.test_clear_ribbon_feedback \
   backend.test_clear_ribbon_paired_feedback \
+  backend.test_clear_core_interface_refinement \
   backend.test_raw_acus_pipeline -v
 ```
 
@@ -1291,4 +1314,5 @@ exact two-face ribbon de-duplication, collision-aware component census, and
 collision-safe ribbon selection, minimum-size rollback, contested-component
 deferral, cross-representation seed validation, baseline-preserving ribbon
 feedback, immutable-baseline paired-profile feedback, free-component ambiguity
-deferral, spatial-key mutual exclusion, and hierarchical assembly.
+deferral, spatial-key mutual exclusion, cross-representation ownership vetoes,
+monotone paired-endpoint interface refinement, and hierarchical assembly.
