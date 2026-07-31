@@ -93,6 +93,90 @@ class FaceAlignment:
     order_axis_xyz: tuple[float, float, float] | None
 
 
+def trace_tangent_side_offsets(
+    first: ClippedPatch,
+    second: ClippedPatch,
+    match: TraceMatch,
+) -> tuple[float, float] | None:
+    """Return signed sheet-interior offsets from one matched trace.
+
+    The sign is expressed in the common tangent plane, perpendicular to the
+    matched trace.  It is invariant to the arbitrary signs of the axial normal
+    and trace direction because either flip changes both returned signs.  A
+    regular local surface crossing has opposite signs; equal signs identify a
+    fold-back adjacency whose two interiors leave the shared edge on the same
+    side in tangent coordinates.
+    """
+
+    if (
+        first.patch_id != match.first_patch_id
+        or second.patch_id != match.second_patch_id
+    ):
+        raise ValueError("tangent-side patches do not match the join ordering")
+    first_trace = first.trace_on(match.face)
+    second_trace = second.trace_on(match.face)
+    if first_trace is None or second_trace is None:
+        raise ValueError("tangent-side join is absent from one patch")
+    first_by_edge = {
+        value.edge: value
+        for value in (first_trace.first, first_trace.second)
+    }
+    second_by_edge = {
+        value.edge: value
+        for value in (second_trace.first, second_trace.second)
+    }
+    paired_points = []
+    for agreement in match.endpoint_agreements:
+        if (
+            agreement.first_edge not in first_by_edge
+            or agreement.second_edge not in second_by_edge
+        ):
+            raise ValueError("tangent-side endpoint agreement is absent")
+        paired_points.append(
+            0.5
+            * (
+                np.asarray(
+                    first_by_edge[agreement.first_edge].point_xyz,
+                    dtype=np.float64,
+                )
+                + np.asarray(
+                    second_by_edge[agreement.second_edge].point_xyz,
+                    dtype=np.float64,
+                )
+            )
+        )
+    if len(paired_points) != 2:
+        return None
+    first_normal = np.asarray(first.estimate.normal_xyz, dtype=np.float64)
+    second_normal = np.asarray(second.estimate.normal_xyz, dtype=np.float64)
+    if float(np.dot(first_normal, second_normal)) < 0.0:
+        second_normal = -second_normal
+    normal = first_normal + second_normal
+    normal_length = float(np.linalg.norm(normal))
+    if normal_length <= 1.0e-10:
+        return None
+    normal /= normal_length
+    trace_direction = paired_points[1] - paired_points[0]
+    trace_direction -= normal * float(np.dot(trace_direction, normal))
+    trace_length = float(np.linalg.norm(trace_direction))
+    if trace_length <= 1.0e-10:
+        return None
+    trace_direction /= trace_length
+    conormal = np.cross(normal, trace_direction)
+    conormal /= max(float(np.linalg.norm(conormal)), 1.0e-12)
+    midpoint = 0.5 * (paired_points[0] + paired_points[1])
+    first_centroid = np.mean(
+        np.asarray([value.point_xyz for value in first.vertices]), axis=0
+    )
+    second_centroid = np.mean(
+        np.asarray([value.point_xyz for value in second.vertices]), axis=0
+    )
+    return (
+        float(np.dot(first_centroid - midpoint, conormal)),
+        float(np.dot(second_centroid - midpoint, conormal)),
+    )
+
+
 def _transported_fiber_angle(
     first: PlaneEstimate, second: PlaneEstimate
 ) -> float | None:

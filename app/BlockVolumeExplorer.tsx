@@ -30,6 +30,11 @@ type BlockComponent = {
   meanConfidence: number;
   boundsMinimumXYZ: Point3;
   boundsMaximumXYZ: Point3;
+  joinAngles: {
+    normal: { count: number; p90Degrees: number; maximumDegrees: number };
+    strictFiber: { count: number; p90Degrees: number; maximumDegrees: number };
+    quarterTurnResidual: { count: number; p90Degrees: number; maximumDegrees: number };
+  };
   curvature?: {
     flaggedJoins: number;
     maximumPressure: number;
@@ -63,6 +68,11 @@ type BlockSheetResult = {
     layerConflictsAfter: number;
     modeledLayerRepulsionPairs: number;
     internalLayerRepulsionCost: number;
+    foldbackExclusionPairs: number;
+    acceptedFoldbackPairs: number;
+    maximumNormalJoinAngleDegrees: number;
+    maximumStrictFiberJoinAngleDegrees: number;
+    maximumQuarterTurnResidualDegrees: number;
   };
   components: BlockComponent[];
   patches: BlockPatch[];
@@ -762,7 +772,7 @@ export function BlockVolumeExplorer() {
         </div>
         <p className="block-volume-summary">
           {result
-            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.layerConflictsAfter}/${result.stats.layerConflictsBefore} strong layer conflicts · ${result.stats.internalLayerRepulsionCost.toFixed(1)} residual stack cost`
+            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.maximumNormalJoinAngleDegrees.toFixed(1)}° max axial hinge · ${result.stats.acceptedFoldbackPairs}/${result.stats.foldbackExclusionPairs} foldbacks · ${result.stats.layerConflictsAfter}/${result.stats.layerConflictsBefore} strong layer conflicts`
             : message}
         </p>
       </header>
@@ -925,6 +935,11 @@ export function BlockVolumeExplorer() {
                     {selected.curvature.flaggedJoins} abrupt seams
                   </small>
                 ) : null}
+                <small>
+                  join normal p90/max {selected.joinAngles.normal.p90Degrees.toFixed(1)}°/{selected.joinAngles.normal.maximumDegrees.toFixed(1)}° ·
+                  strict fiber max {selected.joinAngles.strictFiber.maximumDegrees.toFixed(1)}° ·
+                  quarter-turn residual max {selected.joinAngles.quarterTurnResidual.maximumDegrees.toFixed(1)}°
+                </small>
               </div>
               <button
                 type="button"

@@ -702,6 +702,18 @@ def _restitch_block_sheets(args: argparse.Namespace) -> None:
             ),
             curvature_round_count=args.curvature_rounds,
             curvature_cut_penalty_weight=args.curvature_cut_penalty_weight,
+            strict_normal_angle_cap_degrees=(
+                args.strict_normal_angle_cap_degrees
+            ),
+            strict_fiber_angle_cap_degrees=(
+                args.strict_fiber_angle_cap_degrees
+            ),
+            angle_calibration_robust_standard_deviations=(
+                args.angle_calibration_robust_standard_deviations
+            ),
+            angle_calibration_minimum_joins=(
+                args.angle_calibration_minimum_joins
+            ),
             layer_partition_enabled=args.layer_partition,
             stack_transport_enabled=args.stack_transport,
             signed_partition_enabled=not args.no_signed_partition,
@@ -2130,6 +2142,34 @@ def main() -> None:
     sheet_restitch.add_argument("--curvature-rounds", type=int, default=3)
     sheet_restitch.add_argument(
         "--curvature-cut-penalty-weight", type=float, default=1.0
+    )
+    sheet_restitch.add_argument(
+        "--strict-normal-angle-cap-degrees",
+        type=float,
+        default=0.0,
+        help=(
+            "absolute axial normal cap for strict continuations; zero derives "
+            "a robust cap from retained joins"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--strict-fiber-angle-cap-degrees",
+        type=float,
+        default=0.0,
+        help=(
+            "absolute transported axial fiber cap for strict continuations; "
+            "zero derives a robust cap from retained strict joins"
+        ),
+    )
+    sheet_restitch.add_argument(
+        "--angle-calibration-robust-standard-deviations",
+        type=float,
+        default=3.0,
+    )
+    sheet_restitch.add_argument(
+        "--angle-calibration-minimum-joins",
+        type=int,
+        default=32,
     )
     sheet_restitch.add_argument(
         "--layer-partition",

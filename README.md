@@ -265,6 +265,28 @@ resolved into smooth fragments, while the two convincing large components remain
 from 63.93% to 59.93% until later configuration-level gap recovery can add genuinely
 supported geometry.
 
+Face matching now also freezes absolute angular validity before graph solving.
+Plane normals use the axial angle `acos(abs(n1 dot n2))`; fiber axes are first
+transported by the minimal normal-frame rotation and then compared axially.
+The orthogonal-fiber family is separate: its score is the residual to 90
+degrees and it can never turn a perpendicular fiber into a strict continuation.
+Zero-valued `--strict-normal-angle-cap-degrees` and
+`--strict-fiber-angle-cap-degrees` derive robust median-plus-MAD limits from
+the retained population, with the declared policy and physical uncertainty
+floors still acting as bounds. This keeps the policy block-adaptive rather than
+tuned to one scroll crop.
+
+Unsigned normals alone cannot distinguish a smooth continuation from a facet
+folded back over the same shared trace. Each candidate therefore also projects
+both polygon interiors onto the trace conormal in their common tangent frame.
+A valid continuation must leave the trace on opposite sides. Same-sided pairs
+are persisted as hard foldback exclusions, so an indirect graph path cannot
+reconnect them. On the owned 12 x 12 x 10 core the current solve calibrates a
+26.258-degree normal cap and a 15-degree strict-fiber cap. It retains 5,160
+joins with 57.952% endpoint utilization; the maximum accepted axial hinge is
+26.213 degrees. All 206 detected foldback pairs remain in different final
+components, including those previously reconnected by short transitive loops.
+
 The optional layer partition compiles fixed active sheetlets into a persisted
 typed graph. Continuations retain raw likelihood plus exact whole-face matching
 marginals. High-confidence local collisions remain hard constraints, while a
@@ -273,13 +295,16 @@ component-level partition: a shear bridge must outweigh every repulsive
 relation it would pull into one sheet, not merely look plausible at one face.
 Same-cell returns and the narrower high-confidence collision set remain hard:
 no indirect path or loop can reconnect their endpoints. The resulting cluster
-is replayed through the exact topology validator. On the 4,784-node owned core,
-the hybrid solve retains 5,577 joins in 600 components, eliminates all 101
-strong transitive layer conflicts, and leaves 6,654 open endpoints. An
-experimental `--stack-transport` audit enforces a single integer cell-stack
-gauge, but is deliberately off by default because incomplete stacks require
-partial monotone correspondences. This fixed-node stage can reorganize or split
-selected sheetlets but cannot activate unused Acus candidates to fill holes.
+is replayed through the exact topology validator. The signed partition is also
+reversible: deterministic attractive min-cuts seeded by internal repulsive
+pairs split a completed component whenever separated layer evidence outweighs
+the continuity edges being cut. On the current 4,784-node owned core no such
+post-solve split has positive gain, which is recorded rather than silently
+forcing fragmentation. An experimental `--stack-transport` audit enforces an
+independent integer cell-stack gauge in each connected sheet component, but is
+deliberately off by default because incomplete stacks require partial monotone
+correspondences. This fixed-node stage can reorganize or split selected
+sheetlets but cannot activate unused Acus candidates to fill holes.
 
 `audit-sheet-core` writes the complete reusable
 evidence/configuration/topology failure decomposition.
@@ -908,12 +933,14 @@ npm run dev
 Open `http://127.0.0.1:3000/`.
 
 The solved owned-core block is available at `/block-volume`. It registers the
-exact clipped polygons from the current pure-likelihood retained graph against
-a stride-2 texture of the corresponding 384 × 384 × 320 native CT block. The
-viewer can orbit and trackpad-zoom the combined scene, select or isolate a
-sheet component, filter by component size, and cut the volume and polygons with
-the same X, Y, or Z plane. The default artifacts can be overridden without
-changing the webpage:
+exact clipped polygons from the current angle-calibrated, tangent-sided
+retained graph against a stride-2 texture of the corresponding 384 × 384 ×
+320 native CT block. The viewer can orbit and trackpad-zoom the combined scene,
+select or isolate a sheet component, filter by component size, and cut the
+volume and polygons with the same X, Y, or Z plane. It reports global and
+selected-component join-angle tails plus the number of accepted/excluded
+foldback pairs. The default artifacts can be overridden without changing the
+webpage:
 
 ```bash
 PAREIDOLIA_BLOCK_SHEET_ROOT=/path/to/retained-graph \

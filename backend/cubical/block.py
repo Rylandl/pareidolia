@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Hashable, Iterable, Mapping
 
 import numpy as np
 
@@ -189,15 +189,15 @@ class _ParityDisjointSet:
 
 
 class _IntegerPotentialDisjointSet:
-    """Disjoint set carrying an integer gauge difference between cells."""
+    """Disjoint set carrying an integer gauge difference between nodes."""
 
-    def __init__(self, values: Iterable[Int3]) -> None:
+    def __init__(self, values: Iterable[Hashable]) -> None:
         self.parent = {value: value for value in values}
         # potential[value] = gauge(value) - gauge(parent(value)).
         self.potential = {value: 0 for value in self.parent}
         self.size = {value: 1 for value in self.parent}
 
-    def find(self, value: Int3) -> tuple[Int3, int]:
+    def find(self, value: Hashable) -> tuple[Hashable, int]:
         parent = self.parent[value]
         if parent != value:
             root, relative = self.find(parent)
@@ -206,7 +206,7 @@ class _IntegerPotentialDisjointSet:
         return self.parent[value], self.potential[value]
 
     def compatible(
-        self, first: Int3, second: Int3, required_difference: int
+        self, first: Hashable, second: Hashable, required_difference: int
     ) -> bool:
         """Test gauge(second) - gauge(first) == required_difference."""
 
@@ -217,13 +217,13 @@ class _IntegerPotentialDisjointSet:
         )
 
     def union(
-        self, first: Int3, second: Int3, required_difference: int
+        self, first: Hashable, second: Hashable, required_difference: int
     ) -> None:
         first_root, first_potential = self.find(first)
         second_root, second_potential = self.find(second)
         if first_root == second_root:
             if second_potential - first_potential != required_difference:
-                raise ValueError("integer potential union contradicts cell gauge")
+                raise ValueError("integer potential union contradicts node gauge")
             return
         if self.size[first_root] >= self.size[second_root]:
             self.parent[second_root] = first_root
@@ -309,7 +309,7 @@ def _select_consistent_joins(
     for patch in patches:
         patches_by_cell[patch.cell_xyz].append(patch)
     stack_transport = (
-        _IntegerPotentialDisjointSet(patches_by_cell)
+        _IntegerPotentialDisjointSet(patch_by_id)
         if stack_rank_by_patch is not None
         else None
     )
@@ -362,7 +362,7 @@ def _select_consistent_joins(
 
     def stack_transport_relation(
         match: TraceMatch,
-    ) -> tuple[Int3, Int3, int]:
+    ) -> tuple[int, int, int]:
         if stack_rank_by_patch is None:
             raise RuntimeError("stack transport relation was not configured")
         lower, upper = match.face.adjacent_cells()
@@ -377,8 +377,8 @@ def _select_consistent_joins(
         else:
             raise ValueError("join does not cross its declared adjacent cells")
         return (
-            lower,
-            upper,
+            lower_patch,
+            upper_patch,
             int(stack_rank_by_patch[lower_patch])
             - int(stack_rank_by_patch[upper_patch]),
         )
@@ -491,7 +491,7 @@ def _select_consistent_joins(
         ):
             deferred.append(DeferredJoin(match, "component-layer-exclusion"))
             continue
-        transport_relation: tuple[Int3, Int3, int] | None = None
+        transport_relation: tuple[int, int, int] | None = None
         if stack_transport is not None:
             transport_relation = stack_transport_relation(match)
             if not stack_transport.compatible(*transport_relation):
@@ -880,8 +880,9 @@ def select_surface_joins(
     remain exact. ``fixed_join_keys`` are replayed first and must all survive.
     ``incompatible_patch_pairs`` are lifted graph constraints: no transitive
     component may contain both endpoints of one pair.  ``stack_rank_by_patch``
-    activates a shared integer gauge over cells: every retained continuation
-    must transport the complete local layer order consistently around loops.
+    activates a component-local integer gauge: every retained continuation
+    must transport local layer order consistently around loops within that
+    sheet, without coupling unrelated sheets through one global cell gauge.
     """
 
     patch_values = tuple(patches)

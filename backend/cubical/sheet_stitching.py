@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .block import (
+    DeferredJoin,
     SurfaceBlock,
     SurfaceJoinSelection,
     select_surface_joins,
@@ -25,6 +26,7 @@ from .matching import (
     TraceMatchSettings,
     face_patch_ranks,
     match_face_traces,
+    trace_tangent_side_offsets,
 )
 from .sheet_curvature import SheetCurvatureAnalysis, analyze_sheet_curvature
 from .sheet_lamination import (
@@ -33,7 +35,12 @@ from .sheet_lamination import (
     enumerate_layer_exclusions,
 )
 from .sheet_stack import OrderedMatchEvidence, ordered_stack_posterior
-from .sheet_signed_graph import SignedEdge, SignedPartition, signed_graph_partition
+from .sheet_signed_graph import (
+    SignedEdge,
+    SignedPartition,
+    refine_signed_components,
+    signed_graph_partition,
+)
 from .sheet_transport import patch_stack_ranks
 from .surface_graph import (
     component_statistics,
@@ -121,6 +128,10 @@ class SheetStitchingSettings:
     curvature_minimum_calibration_joins: int = 32
     curvature_round_count: int = 3
     curvature_cut_penalty_weight: float = 1.0
+    strict_normal_angle_cap_degrees: float = 0.0
+    strict_fiber_angle_cap_degrees: float = 0.0
+    angle_calibration_robust_standard_deviations: float = 3.0
+    angle_calibration_minimum_joins: int = 32
     layer_partition_enabled: bool = False
     stack_transport_enabled: bool = False
     signed_partition_enabled: bool = True
@@ -180,6 +191,23 @@ class SheetStitchingSettings:
             or self.curvature_cut_penalty_weight < 0.0
         ):
             raise ValueError("curvature cut penalty must be finite and nonnegative")
+        for name, value in (
+            ("strict normal angle cap", self.strict_normal_angle_cap_degrees),
+            ("strict fiber angle cap", self.strict_fiber_angle_cap_degrees),
+        ):
+            if not math.isfinite(value) or not 0.0 <= value <= 90.0:
+                raise ValueError(f"{name} must lie in [0, 90]")
+        if (
+            not math.isfinite(
+                self.angle_calibration_robust_standard_deviations
+            )
+            or self.angle_calibration_robust_standard_deviations <= 0.0
+        ):
+            raise ValueError(
+                "angle calibration deviations must be finite and positive"
+            )
+        if self.angle_calibration_minimum_joins < 1:
+            raise ValueError("minimum angle calibration joins must be positive")
         if not isinstance(self.layer_partition_enabled, bool):
             raise ValueError("layer-partition enabled state must be boolean")
         if not isinstance(self.stack_transport_enabled, bool):
@@ -232,6 +260,167 @@ class SheetStitchingSettings:
         return asdict(self)
 
 
+def _robust_angle_record(
+    values: tuple[float, ...],
+    *,
+    standard_deviations: float,
+) -> dict[str, Any]:
+    samples = np.asarray(values, dtype=np.float64)
+    if not len(samples):
+        return {
+            "sampleCount": 0,
+            "medianDegrees": None,
+            "madDegrees": None,
+            "robustStandardDeviationDegrees": None,
+            "upperLimitDegrees": None,
+        }
+    median = float(np.median(samples))
+    mad = float(np.median(np.abs(samples - median)))
+    robust_standard_deviation = 1.4826 * mad
+    return {
+        "sampleCount": len(samples),
+        "medianDegrees": round(median, 6),
+        "madDegrees": round(mad, 6),
+        "robustStandardDeviationDegrees": round(
+            robust_standard_deviation, 6
+        ),
+        "upperLimitDegrees": round(
+            median + standard_deviations * robust_standard_deviation,
+            6,
+        ),
+    }
+
+
+def calibrate_sheet_matching_policy(
+    block: SurfaceBlock,
+    policy: SheetMatchingPolicy,
+    settings: SheetStitchingSettings,
+) -> tuple[SheetMatchingPolicy, dict[str, Any]]:
+    """Freeze absolute axial angle caps from the input retained population.
+
+    Uncertainty-normalized residuals remain useful inside the locally linear
+    regime, but a very broad Acus covariance must not make a perpendicular
+    plane or fiber direction a plausible strict continuation.  Zero configured
+    caps mean robust median-plus-MAD calibration.  Small graphs without enough
+    retained joins preserve the declared input policy.
+    """
+
+    deviations = settings.angle_calibration_robust_standard_deviations
+    minimum_joins = settings.angle_calibration_minimum_joins
+    normal_values = tuple(
+        math.degrees(value.normal_angle_radians) for value in block.joins
+    )
+    strict_fiber_values = tuple(
+        math.degrees(value.fiber_angle_radians)
+        for value in block.joins
+        if value.fiber_angle_radians is not None
+        and value.fiber_quarter_turn is not True
+    )
+    normal_record = _robust_angle_record(
+        normal_values,
+        standard_deviations=deviations,
+    )
+    fiber_record = _robust_angle_record(
+        strict_fiber_values,
+        standard_deviations=deviations,
+    )
+    source_normal = math.degrees(
+        policy.strict_settings.maximum_absolute_normal_angle_radians
+    )
+    source_fiber = math.degrees(
+        policy.strict_settings.maximum_absolute_fiber_residual_radians
+    )
+
+    def resolve(
+        configured: float,
+        source: float,
+        record: Mapping[str, Any],
+        absolute_floor_degrees: float,
+    ) -> tuple[float, str]:
+        if configured > 0.0:
+            return min(configured, source), "configured absolute cap"
+        if int(record["sampleCount"]) < minimum_joins:
+            return source, "insufficient calibration; declared policy preserved"
+        robust = float(record["upperLimitDegrees"])
+        return (
+            min(max(robust, absolute_floor_degrees), source),
+            "robust retained-join calibration with physical floor",
+        )
+
+    normal_limit, normal_source = resolve(
+        settings.strict_normal_angle_cap_degrees,
+        source_normal,
+        normal_record,
+        max(
+            deviations
+            * math.degrees(
+                policy.strict_settings.normal_standard_deviation_floor_radians
+            ),
+            (
+                policy.maximum_quarter_turn_normal_degrees
+                if policy.quarter_turn_enabled
+                else 0.0
+            ),
+        ),
+    )
+    fiber_limit, fiber_source = resolve(
+        settings.strict_fiber_angle_cap_degrees,
+        source_fiber,
+        fiber_record,
+        max(
+            deviations
+            * math.degrees(
+                policy.strict_settings.fiber_standard_deviation_floor_radians
+            ),
+            (
+                policy.maximum_quarter_turn_fiber_degrees
+                if policy.quarter_turn_enabled
+                else 0.0
+            ),
+        ),
+    )
+    effective_settings = replace(
+        policy.strict_settings,
+        maximum_absolute_normal_angle_radians=math.radians(normal_limit),
+        maximum_absolute_fiber_residual_radians=math.radians(fiber_limit),
+    )
+    effective = replace(policy, strict_settings=effective_settings)
+    return effective, {
+        "directions": {
+            "normal": "axial acos(abs(n1 dot n2))",
+            "fiber": (
+                "axial fiber angle after minimal normal-frame transport"
+            ),
+            "quarterTurn": (
+                "explicit residual to 90 degrees; never strict equivalence"
+            ),
+        },
+        "standardDeviations": deviations,
+        "minimumCalibrationJoins": minimum_joins,
+        "normal": {
+            **normal_record,
+            "declaredPolicyLimitDegrees": round(source_normal, 6),
+            "appliedLimitDegrees": round(normal_limit, 6),
+            "source": normal_source,
+        },
+        "strictFiber": {
+            **fiber_record,
+            "declaredPolicyLimitDegrees": round(source_fiber, 6),
+            "appliedLimitDegrees": round(fiber_limit, 6),
+            "source": fiber_source,
+        },
+        "quarterTurn": {
+            "enabled": policy.quarter_turn_enabled,
+            "maximumNormalAngleDegrees": (
+                policy.maximum_quarter_turn_normal_degrees
+            ),
+            "maximumFiberFrameResidualDegrees": (
+                policy.maximum_quarter_turn_fiber_degrees
+            ),
+        },
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class SheetJoinCandidate:
     match: TraceMatch
@@ -269,6 +458,8 @@ class SheetJoinCatalog:
     candidates: tuple[SheetJoinCandidate, ...]
     interior_face_count: int
     unstable_face_count: int
+    rejected_retained_join_count: int = 0
+    foldback_exclusion_pairs: frozenset[tuple[int, int]] = frozenset()
 
     def by_key(self) -> dict[JoinKey, SheetJoinCandidate]:
         return {value.key: value for value in self.candidates}
@@ -302,6 +493,8 @@ class SheetJoinCatalog:
             "currentlyRetainedCandidates": sum(
                 value.currently_retained for value in self.candidates
             ),
+            "rejectedRetainedJoins": self.rejected_retained_join_count,
+            "foldbackExclusions": len(self.foldback_exclusion_pairs),
             "traceResources": len(degrees),
             "candidateDegreeQuantiles": {
                 name: round(float(value), 4)
@@ -333,6 +526,7 @@ def match_sheet_join_candidate(
     policy: SheetMatchingPolicy,
     *,
     grid: Any,
+    require_opposed_sides: bool = True,
 ) -> tuple[TraceMatch, str] | None:
     first_trace = first.trace_on(face)
     second_trace = second.trace_on(face)
@@ -347,7 +541,11 @@ def match_sheet_join_candidate(
         grid=grid,
     )
     if strict.accepted:
-        return strict, "strict"
+        if not require_opposed_sides or _trace_interiors_are_opposed(
+            first, second, strict
+        ):
+            return strict, "strict"
+        return None
     if not policy.quarter_turn_enabled:
         return None
     quarter = match_face_traces(
@@ -366,9 +564,22 @@ def match_sheet_join_candidate(
         and quarter.fiber_angle_radians is not None
         and math.degrees(quarter.fiber_angle_radians)
         <= policy.maximum_quarter_turn_fiber_degrees
+        and (
+            not require_opposed_sides
+            or _trace_interiors_are_opposed(first, second, quarter)
+        )
     ):
         return None
     return quarter, "quarter-turn"
+
+
+def _trace_interiors_are_opposed(
+    first: ClippedPatch,
+    second: ClippedPatch,
+    match: TraceMatch,
+) -> bool:
+    offsets = trace_tangent_side_offsets(first, second, match)
+    return offsets is not None and offsets[0] * offsets[1] < 0.0
 
 
 def enumerate_sheet_join_catalog(
@@ -376,6 +587,7 @@ def enumerate_sheet_join_catalog(
     policy: SheetMatchingPolicy,
     *,
     settings: SheetStitchingSettings | None = None,
+    allow_retained_policy_rejection: bool = False,
 ) -> SheetJoinCatalog:
     """Enumerate every pair-gated correspondence between selected patches.
 
@@ -397,6 +609,7 @@ def enumerate_sheet_join_catalog(
         )
     retained = {join_key(value) for value in block.joins}
     candidates: dict[JoinKey, SheetJoinCandidate] = {}
+    foldback_pairs: set[tuple[int, int]] = set()
     interior_faces = 0
     unstable_faces = 0
     for lower in sorted(by_cell, key=lambda value: (value[2], value[1], value[0])):
@@ -435,10 +648,19 @@ def enumerate_sheet_join_catalog(
                         face,
                         policy,
                         grid=block.grid,
+                        require_opposed_sides=False,
                     )
                     if matched is None:
                         continue
                     match, family = matched
+                    if not _trace_interiors_are_opposed(first, second, match):
+                        foldback_pairs.add(
+                            (
+                                min(first.patch_id, second.patch_id),
+                                max(first.patch_id, second.patch_id),
+                            )
+                        )
+                        continue
                     benefit = (
                         2.0
                         * policy.strict_settings.unmatched_negative_log_likelihood
@@ -459,7 +681,7 @@ def enumerate_sheet_join_catalog(
                         key in retained,
                     )
     missing = retained - set(candidates)
-    if missing:
+    if missing and not allow_retained_policy_rejection:
         raise ValueError(
             "current retained graph contains joins absent from the complete "
             f"policy catalog: {sorted(missing)[:2]}"
@@ -468,6 +690,8 @@ def enumerate_sheet_join_catalog(
         tuple(sorted(candidates.values(), key=lambda value: value.key)),
         interior_faces,
         unstable_faces,
+        len(missing),
+        frozenset(foldback_pairs),
     )
 
 
@@ -545,6 +769,8 @@ def contextualize_sheet_join_catalog(
         candidates,
         catalog.interior_face_count,
         catalog.unstable_face_count,
+        catalog.rejected_retained_join_count,
+        catalog.foldback_exclusion_pairs,
     )
     return contextual_catalog, {
         "enabled": True,
@@ -1853,12 +2079,101 @@ def _signed_partition_proposal(
     }
 
 
+def _signed_split_refine_selection(
+    block: SurfaceBlock,
+    initial: SurfaceJoinSelection,
+    candidate_by_key: Mapping[JoinKey, SheetJoinCandidate],
+    layer_repulsion_penalties: Mapping[tuple[int, int], float],
+    unmatched_trace_penalty: float,
+) -> tuple[SurfaceJoinSelection, dict[str, Any]]:
+    """Undo completed-sheet fusions with positive total signed cut gain.
+
+    The initial signed proposal reasons over the dense candidate graph before
+    the topology validator chooses realizable joins.  Topology realization and
+    neighborhood exchange can change connectivity enough that the completed
+    sheet has a profitable cut which did not exist in that earlier graph.  This
+    pass scores exactly the retained continuity edges and the lifted layer
+    evidence inside each completed component.  It can only split; it cannot
+    invent a new bridge or fuse two existing components.
+    """
+
+    if not layer_repulsion_penalties:
+        return initial, {
+            "enabled": False,
+            "applied": False,
+            "reason": "no signed layer-repulsion evidence",
+        }
+    _, members = _component_partition(block.patches, initial.joins)
+    retained_join_reward = 2.0 * unmatched_trace_penalty
+    partition = refine_signed_components(
+        (value.patch_id for value in block.patches),
+        members.values(),
+        (
+            SignedEdge(
+                value.first_patch_id,
+                value.second_patch_id,
+                candidate_by_key[join_key(value)].benefit
+                + retained_join_reward,
+            )
+            for value in initial.joins
+        ),
+        (
+            SignedEdge(first, second, penalty)
+            for (first, second), penalty in layer_repulsion_penalties.items()
+        ),
+    )
+    kept = tuple(
+        value
+        for value in initial.joins
+        if partition.component_by_node[value.first_patch_id]
+        == partition.component_by_node[value.second_patch_id]
+    )
+    removed = tuple(
+        value
+        for value in initial.joins
+        if partition.component_by_node[value.first_patch_id]
+        != partition.component_by_node[value.second_patch_id]
+    )
+    proposal = SurfaceJoinSelection(
+        kept,
+        initial.deferred_joins
+        + tuple(DeferredJoin(value, "signed-layer-split") for value in removed),
+    )
+    before_quality = _selection_quality(
+        initial,
+        block.patches,
+        candidate_by_key,
+        unmatched_trace_penalty,
+        layer_repulsion_penalties,
+    )
+    after_quality = _selection_quality(
+        proposal,
+        block.patches,
+        candidate_by_key,
+        unmatched_trace_penalty,
+        layer_repulsion_penalties,
+    )
+    accepted = after_quality > before_quality
+    if not accepted:
+        proposal = initial
+    return proposal, {
+        **partition.record(),
+        "enabled": True,
+        "applied": accepted and bool(removed),
+        "removedJoins": len(removed) if accepted else 0,
+        "topologyObjectiveGain": round(
+            max(after_quality[0] - before_quality[0], 0.0), 6
+        ),
+    }
+
+
 def restitch_sheet_graph(
     block: SurfaceBlock,
     catalog: SheetJoinCatalog,
     policy: SheetMatchingPolicy,
     *,
     settings: SheetStitchingSettings | None = None,
+    angle_calibration: Mapping[str, Any] | None = None,
 ) -> SheetRestitchResult:
     """Rebuild and then non-monotonically exchange whole sheet neighborhoods."""
 
@@ -1869,6 +2184,15 @@ def restitch_sheet_graph(
             catalog
         )
     by_key = catalog.by_key()
+    declared_input_joins = tuple(
+        value for value in block.joins if join_key(value) in by_key
+    )
+    declared_input_block = surface_block_from_retained_joins(
+        block.grid,
+        block.bounds,
+        block.patches,
+        declared_input_joins,
+    )
     raw_eligible = tuple(
         value
         for value in catalog.candidates
@@ -1887,8 +2211,8 @@ def restitch_sheet_graph(
         layer_partition_statistics,
     ) = _compile_layer_partition_constraints(block, resolved)
     incompatible_patch_pairs = frozenset(
-        value.pair for value in layer_exclusions
-    )
+        (value.pair for value in layer_exclusions)
+    ) | catalog.foldback_exclusion_pairs
     (
         layer_repulsions,
         layer_repulsion_penalties,
@@ -1948,11 +2272,11 @@ def restitch_sheet_graph(
     if incompatible_patch_pairs or stack_rank_by_patch is not None:
         declared = select_surface_joins(
             block.patches,
-            block.joins,
+            declared_input_joins,
             candidate_priorities={
                 join_key(value): by_key[join_key(value)].objective_benefit
                 + retained_join_reward
-                for value in block.joins
+                for value in declared_input_joins
             },
             incompatible_patch_pairs=incompatible_patch_pairs,
             stack_rank_by_patch=stack_rank_by_patch,
@@ -1961,8 +2285,8 @@ def restitch_sheet_graph(
             "declared-input + lifted layer and stack-transport constraints"
         )
     else:
-        declared = SurfaceJoinSelection(tuple(block.joins), tuple())
-        declared_name = "declared-topology-safe-input"
+        declared = SurfaceJoinSelection(declared_input_joins, tuple())
+        declared_name = "angle-admissible declared-topology-safe-input"
     proposals.append(
         (
             declared,
@@ -2094,7 +2418,7 @@ def restitch_sheet_graph(
         }
         proposals.append((selection, record))
     baseline = _block_record(
-        block,
+        declared_input_block,
         by_key,
         policy.strict_settings.unmatched_negative_log_likelihood,
         resolved.unmatched_trace_penalty,
@@ -2140,6 +2464,38 @@ def restitch_sheet_graph(
             layer_repulsion_penalties,
         ),
     }
+    if signed_partition_statistics["enabled"]:
+        split_refined, signed_split_statistics = _signed_split_refine_selection(
+            block,
+            exchanged,
+            by_key,
+            layer_repulsion_penalties,
+            resolved.unmatched_trace_penalty,
+        )
+    else:
+        split_refined = exchanged
+        signed_split_statistics = {
+            "enabled": False,
+            "applied": False,
+        }
+    split_suffix = (
+        " + completed-sheet signed split refinement"
+        if signed_split_statistics.get("applied")
+        else ""
+    )
+    split_refined_record = {
+        "proposalIndex": int(best_record["proposalIndex"]),
+        "proposal": f"{exchanged_record['proposal']}{split_suffix}",
+        **_selection_record(
+            block.patches,
+            split_refined,
+            by_key,
+            policy.strict_settings.unmatched_negative_log_likelihood,
+            interior_endpoint_count,
+            resolved.unmatched_trace_penalty,
+            layer_repulsion_penalties,
+        ),
+    }
     if resolved.curvature_refinement_enabled:
         (
             refined,
@@ -2150,7 +2506,7 @@ def restitch_sheet_graph(
             block,
             refinement_candidates,
             by_key,
-            exchanged,
+            split_refined,
             resolved,
             refinement_incompatible_pairs,
             stack_rank_by_patch,
@@ -2159,7 +2515,7 @@ def restitch_sheet_graph(
         final_record = {
             "proposalIndex": int(best_record["proposalIndex"]),
             "proposal": (
-                f"{best_record['proposal']} + sheet-neighborhood-exchange "
+                f"{split_refined_record['proposal']} "
                 "+ curvature-aware topology refinement"
             ),
             **_selection_record(
@@ -2178,8 +2534,8 @@ def restitch_sheet_graph(
             "after": curvature_after.record(),
         }
     else:
-        final_selection = exchanged
-        final_record = exchanged_record
+        final_selection = split_refined
+        final_record = split_refined_record
         curvature_summary = {
             "enabled": False,
             "applied": False,
@@ -2245,27 +2601,56 @@ def restitch_sheet_graph(
             0 if stack_rank_by_patch is not None else None
         ),
         "constraint": (
-            "all sheet components share one integer cell gauge"
+            "each sheet component has an independent path-consistent integer layer gauge"
             if stack_rank_by_patch is not None
             else None
         ),
     }
+    accepted_component_by_patch = dict(best_block.component_by_patch)
     summary = {
         "baseline": {
             **baseline,
-            "gapCensus": _gap_census(block, catalog),
+            "gapCensus": _gap_census(declared_input_block, catalog),
         },
         "best": {
             **final_record,
             "gapCensus": _gap_census(best_block, catalog),
         },
         "initialGlobalProposal": best_record,
-        "preCurvatureRefinement": exchanged_record,
+        "preSignedLayerSplitRefinement": exchanged_record,
+        "signedLayerSplitRefinement": signed_split_statistics,
+        "preCurvatureRefinement": split_refined_record,
         "sheetNeighborhoodExchange": {
             **exchange_statistics,
             "trials": list(exchange_records),
         },
         "sheetCurvatureRefinement": curvature_summary,
+        "angleCalibration": {
+            **dict(angle_calibration or {}),
+            "inputRetainedJoinsRejected": (
+                len(block.joins) - len(declared_input_joins)
+            ),
+        },
+        "tangentSidedness": {
+            "semantics": (
+                "matched sheet interiors occupy opposite sides of their shared trace"
+            ),
+            "directions": "axial normal and unoriented trace; product is sign-invariant",
+            "foldbackExclusions": len(catalog.foldback_exclusion_pairs),
+            "inputRetainedFoldbackJoins": sum(
+                (
+                    min(value.first_patch_id, value.second_patch_id),
+                    max(value.first_patch_id, value.second_patch_id),
+                )
+                in catalog.foldback_exclusion_pairs
+                for value in block.joins
+            ),
+            "acceptedGraphFoldbackPairs": sum(
+                accepted_component_by_patch[first]
+                == accepted_component_by_patch[second]
+                for first, second in catalog.foldback_exclusion_pairs
+            ),
+        },
         "orderedFacePartition": face_partition_statistics,
         "stackTransport": stack_transport_summary,
         "signedLayerRepulsion": signed_partition_statistics,
@@ -2534,6 +2919,14 @@ def _write_typed_sheetlet_graph(
                 ],
                 dtype=np.float32,
             ),
+            foldbackFirstPatchId=np.asarray(
+                [value[0] for value in sorted(catalog.foldback_exclusion_pairs)],
+                dtype=np.uint64,
+            ),
+            foldbackSecondPatchId=np.asarray(
+                [value[1] for value in sorted(catalog.foldback_exclusion_pairs)],
+                dtype=np.uint64,
+            ),
             exclusionFirstPatchId=np.asarray(
                 [value.first_patch_id for value in exclusions], dtype=np.uint64
             ),
@@ -2611,6 +3004,10 @@ def _write_typed_sheetlet_graph(
                 "repulsive lifted pair that cannot share one local surface "
                 "chart"
             ),
+            "foldback": (
+                "hard lifted pair whose otherwise plausible shared-face join "
+                "places both sheet interiors on the same tangent side"
+            ),
             "repulsion": (
                 "soft lifted distinct-layer evidence charged once when both "
                 "nodes enter one component"
@@ -2619,6 +3016,7 @@ def _write_typed_sheetlet_graph(
         "counts": {
             "nodes": len(patches),
             "continuationEdges": len(candidates),
+            "foldbackEdges": len(catalog.foldback_exclusion_pairs),
             "exclusionEdges": len(exclusions),
             "repulsionEdges": len(repulsions),
         },
@@ -2649,7 +3047,14 @@ def run_block_sheet_restitching(
     output = Path(output_root).resolve()
     if output == materialized:
         raise ValueError("sheet restitch output must differ from its input graph")
-    policy = SheetMatchingPolicy.from_cluster_root(cluster)
+    declared_policy = SheetMatchingPolicy.from_cluster_root(cluster)
+    block = read_surface_graph(materialized, verify=True)
+    loaded = time.monotonic()
+    policy, angle_calibration = calibrate_sheet_matching_policy(
+        block,
+        declared_policy,
+        resolved,
+    )
     module_root = Path(__file__).resolve().parent
     identity: dict[str, Any] = {
         "schema": SHEET_RESTITCH_SCHEMA,
@@ -2671,7 +3076,9 @@ def run_block_sheet_restitching(
         "surfaceGraphDataSha256": sha256_file(
             materialized / "surface-graph-v1.npz"
         ),
+        "declaredPolicy": declared_policy.record(),
         "policy": policy.record(),
+        "angleCalibration": angle_calibration,
         "settings": resolved.record(),
         "implementationSha256": {
             name: sha256_file(module_root / name)
@@ -2706,12 +3113,11 @@ def run_block_sheet_restitching(
         "identity": identity,
     }
     atomic_json(manifest_path, manifest)
-    block = read_surface_graph(materialized, verify=True)
-    loaded = time.monotonic()
     catalog = enumerate_sheet_join_catalog(
         block,
         policy,
         settings=resolved,
+        allow_retained_policy_rejection=True,
     )
     cataloged = time.monotonic()
     manifest["state"] = "solving"
@@ -2721,6 +3127,7 @@ def run_block_sheet_restitching(
         catalog,
         policy,
         settings=resolved,
+        angle_calibration=angle_calibration,
     )
     solved = time.monotonic()
     catalog_manifest = _write_catalog(
@@ -2751,7 +3158,8 @@ def run_block_sheet_restitching(
         result.block,
         semantics=(
             "fixed Acus patch geometry with complete face correspondence "
-            "catalog, dense collision-cut segmentation, exact topology "
+            "catalog, opposite-sided trace adjacency, dense collision-cut "
+            "segmentation, exact topology "
             "validation, whole-sheet neighborhood exchanges, and optional "
             "axial curvature-aware hinge refinement"
             ", and optional lifted layer-exclusion partitioning"
@@ -2785,8 +3193,9 @@ def run_block_sheet_restitching(
             ),
             "hardConstraints": [
                 "one join per patch trace",
+                "opposite tangent-sided interiors across every shared trace",
                 "order-preserving face correspondences",
-                "path-independent integer transport of the full cell stack",
+                "optional component-local path-independent layer transport",
                 "one patch per sheet component per cell",
                 "crossing-feature consistency",
                 "orientable polygon parity",

@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c/sheet-halo-core-12x12x10-v1/halo-1"
-    / "owned-bp32-c10-u010-signed-hard-hybrid-v5"
+    / "owned-bp32-c10-u010-opposed-sides-transitive-v11"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -44,6 +44,7 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     patch_manifest_path = root / "selected-patches-v1.json"
     patch_data_path = root / "selected-patches-v1.npz"
     graph_data_path = root / "surface-graph-v1.npz"
+    typed_graph_data_path = root / "sheetlet-graph-v1.npz"
     summary_path = root / "summary.json"
     if not patch_manifest_path.is_file() or not patch_data_path.is_file():
         raise FileNotFoundError(f"block sheet geometry is unavailable at {root}")
@@ -64,7 +65,13 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     with np.load(graph_data_path, allow_pickle=False) as stored:
         graph_patch_id = _required(stored, "patchId").astype(np.uint64, copy=False)
         graph_component_id = _required(stored, "componentId").astype(np.uint64, copy=False)
-        retained_join_count = len(_required(stored, "firstPatchId"))
+        retained_first_patch_id = _required(stored, "firstPatchId").astype(
+            np.uint64, copy=False
+        )
+        retained_second_patch_id = _required(stored, "secondPatchId").astype(
+            np.uint64, copy=False
+        )
+        retained_join_count = len(retained_first_patch_id)
 
     if len(patch_id) != len(cell_xyz) or len(vertex_offset) != len(patch_id) + 1:
         raise ValueError("block sheet patch arrays have inconsistent lengths")
@@ -75,6 +82,24 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
         int(current_patch): int(current_component)
         for current_patch, current_component in zip(graph_patch_id, graph_component_id)
     }
+    angle_by_pair: dict[tuple[int, int], tuple[float, float, bool]] = {}
+    if typed_graph_data_path.is_file():
+        with np.load(typed_graph_data_path, allow_pickle=False) as stored:
+            first = _required(stored, "continuationFirstPatchId")
+            second = _required(stored, "continuationSecondPatchId")
+            normal = _required(stored, "continuationNormalAngleDegrees")
+            fiber = _required(stored, "continuationFiberAngleDegrees")
+            family = _required(stored, "continuationFamily")
+            angle_by_pair = {
+                (min(int(a), int(b)), max(int(a), int(b))): (
+                    float(normal_angle),
+                    float(fiber_angle),
+                    bool(int(family_value)),
+                )
+                for a, b, normal_angle, fiber_angle, family_value in zip(
+                    first, second, normal, fiber, family
+                )
+            }
     try:
         patch_component = np.asarray(
             [component_by_patch[int(value)] for value in patch_id], dtype=np.uint64
@@ -110,6 +135,9 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
             "confidenceTotal": 0.0,
             "boundsMinimum": np.full(3, np.inf, dtype=np.float64),
             "boundsMaximum": np.full(3, -np.inf, dtype=np.float64),
+            "normalJoinAngles": [],
+            "strictFiberJoinAngles": [],
+            "quarterTurnResiduals": [],
         }
         for component, count in ranked_components
     }
@@ -142,6 +170,42 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
             }
         )
 
+    for first_patch_id, second_patch_id in zip(
+        retained_first_patch_id, retained_second_patch_id
+    ):
+        first_value = int(first_patch_id)
+        second_value = int(second_patch_id)
+        component = component_by_patch[first_value]
+        if component_by_patch[second_value] != component:
+            raise ValueError("retained sheet join crosses component identities")
+        angles = angle_by_pair.get(
+            (min(first_value, second_value), max(first_value, second_value))
+        )
+        if angles is None:
+            continue
+        normal_angle, fiber_angle, quarter_turn = angles
+        accumulator = component_accumulators[component]
+        if np.isfinite(normal_angle):
+            accumulator["normalJoinAngles"].append(normal_angle)
+        if np.isfinite(fiber_angle):
+            accumulator[
+                "quarterTurnResiduals"
+                if quarter_turn
+                else "strictFiberJoinAngles"
+            ].append(fiber_angle)
+
+    def angle_statistics(values: list[float]) -> dict[str, float | int]:
+        samples = np.asarray(values, dtype=np.float64)
+        return {
+            "count": len(samples),
+            "p90Degrees": round(float(np.percentile(samples, 90)), 4)
+            if len(samples)
+            else 0.0,
+            "maximumDegrees": round(float(np.max(samples)), 4)
+            if len(samples)
+            else 0.0,
+        }
+
     components: list[dict[str, Any]] = []
     for component, _count in ranked_components:
         accumulator = component_accumulators[component]
@@ -156,6 +220,17 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
                 ),
                 "boundsMinimumXYZ": _round_list(accumulator["boundsMinimum"]),
                 "boundsMaximumXYZ": _round_list(accumulator["boundsMaximum"]),
+                "joinAngles": {
+                    "normal": angle_statistics(
+                        accumulator["normalJoinAngles"]
+                    ),
+                    "strictFiber": angle_statistics(
+                        accumulator["strictFiberJoinAngles"]
+                    ),
+                    "quarterTurnResidual": angle_statistics(
+                        accumulator["quarterTurnResiduals"]
+                    ),
+                },
             }
         )
 
@@ -169,6 +244,9 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     )
     signed_partition = summary.get("restitch", {}).get(
         "signedLayerRepulsion", {}
+    )
+    tangent_sidedness = summary.get("restitch", {}).get(
+        "tangentSidedness", {}
     )
     curvature_by_component = {
         str(value["componentId"]): value
@@ -236,6 +314,35 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
             ),
             "internalLayerRepulsionCost": float(
                 best.get("totalLayerRepulsion", 0.0)
+            ),
+            "foldbackExclusionPairs": int(
+                tangent_sidedness.get("foldbackExclusions", 0)
+            ),
+            "acceptedFoldbackPairs": int(
+                tangent_sidedness.get("acceptedGraphFoldbackPairs", 0)
+            ),
+            "maximumNormalJoinAngleDegrees": max(
+                (
+                    component["joinAngles"]["normal"]["maximumDegrees"]
+                    for component in components
+                ),
+                default=0.0,
+            ),
+            "maximumStrictFiberJoinAngleDegrees": max(
+                (
+                    component["joinAngles"]["strictFiber"]["maximumDegrees"]
+                    for component in components
+                ),
+                default=0.0,
+            ),
+            "maximumQuarterTurnResidualDegrees": max(
+                (
+                    component["joinAngles"]["quarterTurnResidual"][
+                        "maximumDegrees"
+                    ]
+                    for component in components
+                ),
+                default=0.0,
             ),
         },
         "components": components,

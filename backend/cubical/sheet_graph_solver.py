@@ -15,7 +15,7 @@ from .block import (
     surface_block_from_retained_joins,
 )
 from .contracts import atomic_json, canonical_json_hash, sha256_file
-from .matching import face_patch_ranks
+from .matching import face_patch_ranks, trace_tangent_side_offsets
 from .sheet_configuration_solver import SHEET_CONFIGURATION_SOLVER_SCHEMA
 from .sheet_evidence import read_block_sheet_evidence
 from .sheet_stitching import (
@@ -123,6 +123,7 @@ def _active_join_catalog(
         by_cell[patch.cell_xyz].append(patch)
     rank_cache: dict[GridFace, tuple[dict[int, int], dict[int, int]]] = {}
     candidates: list[SheetJoinCandidate] = []
+    foldback_pairs: set[tuple[int, int]] = set()
     for completed, index_value in enumerate(indices, start=1):
         index = int(index_value)
         first_id = int(first_ids[index])
@@ -142,10 +143,17 @@ def _active_join_catalog(
             face,
             policy,
             grid=evidence.grid,
+            require_opposed_sides=False,
         )
         if matched is None or matched[1] != family:
             raise ValueError("persisted mode correspondence changed during replay")
         match, _ = matched
+        offsets = trace_tangent_side_offsets(
+            patch_by_id[first_id], patch_by_id[second_id], match
+        )
+        if offsets is None or offsets[0] * offsets[1] >= 0.0:
+            foldback_pairs.add((min(first_id, second_id), max(first_id, second_id)))
+            continue
         stored_nll = float(correspondence_arrays["negativeLogLikelihood"][index])
         if abs(match.negative_log_likelihood - stored_nll) > 2.0e-4:
             raise ValueError("persisted mode correspondence likelihood changed")
@@ -179,7 +187,13 @@ def _active_join_catalog(
             progress(completed, len(indices))
     candidates.sort(key=lambda value: value.key)
     faces = {value.match.face for value in candidates}
-    return patches, SheetJoinCatalog(tuple(candidates), len(faces), 0)
+    return patches, SheetJoinCatalog(
+        tuple(candidates),
+        len(faces),
+        0,
+        0,
+        frozenset(foldback_pairs),
+    )
 
 
 def replay_joint_sheet_graph(
@@ -329,6 +343,8 @@ def replay_joint_sheet_graph(
         candidates,
         provisional_catalog.interior_face_count,
         provisional_catalog.unstable_face_count,
+        provisional_catalog.rejected_retained_join_count,
+        provisional_catalog.foldback_exclusion_pairs,
     )
     baseline_block = (
         seed_block

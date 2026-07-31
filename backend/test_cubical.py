@@ -67,6 +67,7 @@ from backend.cubical.matching import (
     TraceMatchSettings,
     align_face_patches,
     match_face_traces,
+    trace_tangent_side_offsets,
 )
 from backend.cubical.sheet_curvature import analyze_sheet_curvature
 from backend.cubical.sheet_lamination import enumerate_layer_exclusions
@@ -120,10 +121,12 @@ from backend.cubical.sheet_ownership import (
     finalize_sheet_halo_experiment,
 )
 from backend.cubical.sheet_stitching import (
+    SheetJoinCatalog,
     SheetMatchingPolicy,
     SheetStitchingSettings,
     _minimum_undirected_join_cut,
     enumerate_sheet_join_catalog,
+    match_sheet_join_candidate,
     restitch_sheet_graph,
 )
 from backend.cubical.sheet_topology_refinement import (
@@ -384,6 +387,31 @@ class CubicalGeometryTests(unittest.TestCase):
         )
         self.assertEqual(len(result.members_by_component), 2)
         self.assertAlmostEqual(result.internal_attractive_weight, 5.0)
+
+    def test_signed_partition_reverses_a_historically_profitable_shear_merge(self) -> None:
+        result = signed_graph_partition(
+            ("a0", "a1", "b0", "b1"),
+            (
+                # This locally strongest bridge merges first.  Each track can
+                # then join the mixed component at positive incremental gain,
+                # although the completed partition is better split in two.
+                SignedEdge("a1", "b0", 6.0),
+                SignedEdge("a0", "a1", 5.0),
+                SignedEdge("b0", "b1", 5.0),
+            ),
+            (
+                SignedEdge("a0", "b0", 4.0),
+                SignedEdge("a1", "b1", 4.0),
+            ),
+        )
+
+        self.assertEqual(len(result.members_by_component), 2)
+        self.assertEqual(result.component_by_node["a0"], result.component_by_node["a1"])
+        self.assertEqual(result.component_by_node["b0"], result.component_by_node["b1"])
+        self.assertNotEqual(result.component_by_node["a0"], result.component_by_node["b0"])
+        self.assertEqual(len(result.splits), 1)
+        self.assertAlmostEqual(result.splits[0].gain, 2.0)
+        self.assertAlmostEqual(result.objective, 10.0)
 
     def test_structural_saturation_uses_unsigned_fiber_and_residual_gating(self) -> None:
         assignment = classify_cell_structural_evidence(
@@ -2760,6 +2788,48 @@ class CubicalGeometryTests(unittest.TestCase):
             ["component-layer-exclusion"],
         )
 
+    def test_foldback_exclusion_blocks_an_indirect_sheet_path(self) -> None:
+        grid = GridSpec((3, 1, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, 0, 0), 0.0, x + 1)
+            for x in range(3)
+        )
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        policy = SheetMatchingPolicy(TraceMatchSettings(), False, 15.0, 15.0)
+        catalog = enumerate_sheet_join_catalog(block, policy)
+        constrained = SheetJoinCatalog(
+            catalog.candidates,
+            catalog.interior_face_count,
+            catalog.unstable_face_count,
+            catalog.rejected_retained_join_count,
+            frozenset(((1, 3),)),
+        )
+
+        result = restitch_sheet_graph(
+            block,
+            constrained,
+            policy,
+            settings=SheetStitchingSettings(
+                restart_count=2,
+                exchange_round_count=0,
+                collision_cut_enabled=False,
+            ),
+        )
+
+        self.assertEqual(len(result.block.joins), 1)
+        self.assertNotEqual(
+            result.block.component_for_patch(1),
+            result.block.component_for_patch(3),
+        )
+        self.assertEqual(
+            result.summary["tangentSidedness"]["acceptedGraphFoldbackPairs"],
+            0,
+        )
+
     def test_face_trace_crossing_is_a_typed_port_conflict(self) -> None:
         grid = GridSpec((2, 1, 1))
         patches = tuple(
@@ -2804,6 +2874,164 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(marginal.probability, 1.0 / (1.0 + math.exp(-2.0)))
         self.assertAlmostEqual(marginal.log_odds, 2.0)
         self.assertAlmostEqual(marginal.maximum_score_regret, 0.0)
+
+    def test_tangent_sidedness_rejects_an_axially_plausible_foldback(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        shared_point = np.asarray((1.0, 0.5, 0.5), dtype=np.float64)
+
+        def patch(cell, patch_id: int, slope: float) -> ClippedPatch:
+            raw_normal = np.asarray((-slope, 0.0, 1.0), dtype=np.float64)
+            raw_normal /= np.linalg.norm(raw_normal)
+            height = float(
+                np.dot(raw_normal, shared_point - grid.cell_center_world(cell))
+            )
+            value = clip_plane_to_cell(
+                grid,
+                cell,
+                PlaneEstimate.isotropic(
+                    raw_normal,
+                    height,
+                    math.radians(10.0),
+                    0.01,
+                    fiber_xyz=(0.0, 1.0, 0.0),
+                    fiber_angular_std_radians=math.radians(1.0),
+                ),
+                patch_id=patch_id,
+            )
+            assert value is not None
+            return value
+
+        first = patch((0, 0, 0), 1, 10.0)
+        second = patch((1, 0, 0), 2, -10.0)
+        face = GridFace(0, (1, 0, 0))
+        settings = TraceMatchSettings(
+            maximum_absolute_normal_angle_radians=math.radians(25.0),
+            maximum_absolute_fiber_residual_radians=math.radians(10.0),
+        )
+        pairwise = match_face_traces(
+            first.trace_on(face),
+            first.estimate,
+            second.trace_on(face),
+            second.estimate,
+            settings,
+            grid=grid,
+        )
+        self.assertTrue(pairwise.accepted)
+        self.assertLess(math.degrees(pairwise.normal_angle_radians), 12.0)
+        offsets = trace_tangent_side_offsets(first, second, pairwise)
+        self.assertIsNotNone(offsets)
+        assert offsets is not None
+        self.assertGreater(offsets[0] * offsets[1], 0.0)
+
+        matched = match_sheet_join_candidate(
+            first,
+            second,
+            face,
+            SheetMatchingPolicy(settings, True, 15.0, 15.0),
+            grid=grid,
+        )
+
+        self.assertIsNone(matched)
+
+    def test_strict_angle_cap_rejects_uncertain_perpendicular_normals(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        angle = math.radians(80.0)
+        first = clip_plane_to_cell(
+            grid,
+            (0, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                0.0,
+                math.radians(60.0),
+                0.02,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=1,
+        )
+        second = clip_plane_to_cell(
+            grid,
+            (1, 0, 0),
+            PlaneEstimate.isotropic(
+                (math.sin(angle), 0.0, math.cos(angle)),
+                -0.5 * math.sin(angle),
+                math.radians(60.0),
+                0.02,
+                fiber_xyz=(0.0, 1.0, 0.0),
+                fiber_angular_std_radians=math.radians(2.0),
+            ),
+            patch_id=2,
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        policy = SheetMatchingPolicy(
+            TraceMatchSettings(
+                maximum_absolute_normal_angle_radians=math.radians(25.0),
+                maximum_absolute_fiber_residual_radians=math.radians(10.0),
+            ),
+            True,
+            15.0,
+            15.0,
+        )
+
+        matched = match_sheet_join_candidate(
+            first,
+            second,
+            GridFace(0, (1, 0, 0)),
+            policy,
+            grid=grid,
+        )
+
+        self.assertIsNone(matched)
+
+    def test_strict_fiber_cap_routes_orthogonal_frame_to_packet_family(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        angle = math.radians(80.0)
+
+        def patch(cell: tuple[int, int, int], patch_id: int, fiber) -> ClippedPatch:
+            value = clip_plane_to_cell(
+                grid,
+                cell,
+                PlaneEstimate.isotropic(
+                    (0.0, 0.0, 1.0),
+                    0.0,
+                    math.radians(1.0),
+                    0.02,
+                    fiber_xyz=fiber,
+                    fiber_angular_std_radians=math.radians(60.0),
+                ),
+                patch_id=patch_id,
+            )
+            assert value is not None
+            return value
+
+        policy = SheetMatchingPolicy(
+            TraceMatchSettings(
+                maximum_absolute_normal_angle_radians=math.radians(25.0),
+                maximum_absolute_fiber_residual_radians=math.radians(8.0),
+            ),
+            True,
+            15.0,
+            15.0,
+        )
+        matched = match_sheet_join_candidate(
+            patch((0, 0, 0), 1, (1.0, 0.0, 0.0)),
+            patch(
+                (1, 0, 0),
+                2,
+                (math.cos(angle), math.sin(angle), 0.0),
+            ),
+            GridFace(0, (1, 0, 0)),
+            policy,
+            grid=grid,
+        )
+
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        match, family = matched
+        self.assertEqual(family, "quarter-turn")
+        self.assertTrue(match.fiber_quarter_turn)
+        self.assertAlmostEqual(math.degrees(match.fiber_angle_radians), 10.0)
 
     def test_ordered_stack_marginals_reject_crossing_shear_alternatives(self) -> None:
         posterior = ordered_stack_posterior(
