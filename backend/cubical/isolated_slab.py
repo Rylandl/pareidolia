@@ -322,6 +322,7 @@ def detect_isolated_slab_pairs(
     class_contrast: float,
     voxel_size_microns: float,
     settings: IsolatedSlabSettings,
+    retain_physical_profiles: bool = False,
 ) -> tuple[dict[str, int], dict[str, np.ndarray]]:
     """Pair opposing air/material interfaces on one downsampled CT field.
 
@@ -366,8 +367,10 @@ def detect_isolated_slab_pairs(
             "thickness_steps",
             "confidence",
             "air_margin",
+            "air_sample_fraction",
             "material_margin",
             "opposing_cosine",
+            "conservative",
         )
     }
     counts = {
@@ -506,7 +509,9 @@ def detect_isolated_slab_pairs(
             1.0,
         )
         confidence = profile_score * (0.5 + 0.5 * opposing_score)
-        selected = np.flatnonzero(opposing)
+        selected = np.flatnonzero(
+            physical if retain_physical_profiles else opposing
+        )
         counts["pairedProfileCountBeforeDeduplication"] += int(len(selected))
         if not len(selected):
             continue
@@ -519,16 +524,32 @@ def detect_isolated_slab_pairs(
         result["thickness_steps"].append(thickness_steps[selected])
         result["confidence"].append(confidence[selected])
         result["air_margin"].append(air_margin[selected])
+        result["air_sample_fraction"].append(air_fraction[selected])
         result["material_margin"].append(material_margin[selected])
         result["opposing_cosine"].append(opposing_cosine[selected])
+        result["conservative"].append(opposing[selected].astype(np.uint8))
 
     arrays = {
         name: (
-            np.concatenate(values).astype(np.float32, copy=False)
+            np.concatenate(values).astype(
+                np.uint8 if name == "conservative" else np.float32,
+                copy=False,
+            )
             if values
-            else np.empty((0, 3) if name in {
-                "midpoint", "normal", "boundary_first", "boundary_second"
-            } else (0,), dtype=np.float32)
+            else np.empty(
+                (
+                    (0, 3)
+                    if name
+                    in {
+                        "midpoint",
+                        "normal",
+                        "boundary_first",
+                        "boundary_second",
+                    }
+                    else (0,)
+                ),
+                dtype=(np.uint8 if name == "conservative" else np.float32),
+            )
         )
         for name, values in result.items()
     }

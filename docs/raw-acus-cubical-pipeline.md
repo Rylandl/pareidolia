@@ -1005,6 +1005,68 @@ stretches nevertheless establish that sparse needle sampling cannot be the
 sole carrier of surface continuity.  Acus remains valuable as directional
 fiber evidence to attach after dense CT sheets are seeded.
 
+### Paired-interface bank and contextual growth
+
+The conservative detector is a seed generator, not the full clear-slab
+representation.  `build-paired-surface-bank` repeats the same source-aligned
+CT preparation but retains every profile with exactly two threshold crossings
+and physically plausible papyrus thickness.  Air clearance, material
+interior, and opposing-gradient tests become persisted unary evidence rather
+than irreversible rejection gates.  Reciprocal boundary detections are
+suppressed geometrically, while up to four genuinely distinct paired-interface
+hypotheses may remain at one sampling-lattice key.  Existing conservative
+samples are immutable anchors and always win duplicate suppression.
+
+```bash
+python3 -m backend.cubical build-paired-surface-bank \
+  --slabs /path/to/isolated-slabs \
+  --output /path/to/paired-surface-bank
+
+python3 -m backend.cubical grow-paired-surfaces \
+  --bank /path/to/paired-surface-bank \
+  --output /path/to/paired-surface-growth
+```
+
+The growth graph compares the lower and upper CT interfaces separately after
+unsigned-normal alignment.  A candidate edge must satisfy midpoint distance,
+normal angle, midpoint height, both boundary-height residuals, and thickness
+difference before it receives an affinity.  Thus a midpoint-plausible jump
+whose physical faces do not continue is rejected.  Growth is a
+maximum-bottleneck forest with one selected hypothesis per source-lattice key;
+it never moves a boundary or invents a missing CT profile.
+
+Clear seed fragmentation is handled before that final ownership solve.  A
+two-source pass stores the two strongest seed-component explanations for each
+candidate.  Foreign support may reach an immutable seed profile, but cannot
+cross it.  Two seed components share an identity only when a spatially broad
+set of candidates supports both and each component reaches multiple seed
+samples of the other in both directions.  Consequently one plausible shear
+edge cannot create a transitive union.  The emitted audit image shows the four
+largest multi-seed assemblies in all three projections, coloring their
+original seed patches separately over the selected contextual surface.
+
+On the current core, bank construction takes about 8.0 seconds on CPU.  It reduces
+353,450 owned physical profiles to 309,672 candidates at 268,523 spatial keys;
+35,542 keys retain multiple hypotheses, with a maximum of four.  All 62,661
+original isolated samples are recovered exactly (maximum normalized matching
+cost 0.002795), and the compressed bank is 22 MB.
+
+The contextual solve evaluates 1,922,114 candidate pairs, retains 1,244,658
+strict two-boundary edges, and completes graph construction, reciprocal seed
+association, growth, compressed output, and previews in about 4.8 seconds.  Of
+309,672 bank candidates, 95,041 are selected: all 38,309 eligible immutable
+seeds plus 56,732 contextual additions.  Fifty-nine reciprocally supported
+seed-patch pairs reduce 937 seed components to 878 identities; no current
+identity contains more than three seed patches.  The largest selected surface
+has 1,859 profiles, versus 1,605 before association, without changing total
+coverage.  Added profiles are not predominantly single chains: their median
+seed-parent depth is four, median growth-eligible same-label graph degree is
+six, and 92.97% have at least two such continuity neighbors.  These are
+deterministic in-slab measurements, not proof of page identity.  Profiles in
+dense material without a physical air--papyrus--air interval remain
+deliberately unresolved
+for a later boundary-evidence stage.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;
@@ -1025,6 +1087,8 @@ python3 -m unittest \
   backend.test_rectify \
   backend.test_cubical \
   backend.test_isolated_slab \
+  backend.test_paired_surface_bank \
+  backend.test_paired_surface_growth \
   backend.test_raw_acus_pipeline -v
 ```
 

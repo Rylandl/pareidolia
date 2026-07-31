@@ -69,6 +69,14 @@ from .needle_topology import (
     run_block_needle_topology,
 )
 from .pipeline import run_raw_acus_pipeline
+from .paired_surface_bank import (
+    PairedSurfaceBankSettings,
+    run_paired_surface_bank,
+)
+from .paired_surface_growth import (
+    PairedSurfaceGrowthSettings,
+    run_paired_surface_growth,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -563,6 +571,36 @@ def _audit_isolated_slab_acus(args: argparse.Namespace) -> None:
         args.field,
         args.output,
         settings=IsolatedSlabAcusAuditSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _paired_surface_bank(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_paired_surface_bank(
+        args.slabs,
+        args.output,
+        settings=PairedSurfaceBankSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _paired_surface_growth(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_paired_surface_growth(
+        args.bank,
+        args.output,
+        settings=PairedSurfaceGrowthSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1906,6 +1944,40 @@ def main() -> None:
     )
     isolated_slab_acus_audit.add_argument("--force", action="store_true")
     isolated_slab_acus_audit.set_defaults(handler=_audit_isolated_slab_acus)
+    paired_surface_bank = subparsers.add_parser(
+        "build-paired-surface-bank",
+        description=(
+            "Reify every physically bounded CT profile behind conservative "
+            "isolated slabs, retaining distinct paired-interface alternatives "
+            "without selecting sheet identities."
+        ),
+    )
+    paired_surface_bank.add_argument("--slabs", type=Path, required=True)
+    paired_surface_bank.add_argument("--output", type=Path, required=True)
+    paired_surface_bank.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PairedSurfaceBankSettings keyword object",
+    )
+    paired_surface_bank.add_argument("--force", action="store_true")
+    paired_surface_bank.set_defaults(handler=_paired_surface_bank)
+    paired_surface_growth = subparsers.add_parser(
+        "grow-paired-surfaces",
+        description=(
+            "Grow immutable isolated-slab seeds through the broader paired CT "
+            "candidate bank using lower/upper boundary continuity, thickness, "
+            "curvature, and source-lattice mutual exclusion."
+        ),
+    )
+    paired_surface_growth.add_argument("--bank", type=Path, required=True)
+    paired_surface_growth.add_argument("--output", type=Path, required=True)
+    paired_surface_growth.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PairedSurfaceGrowthSettings keyword object",
+    )
+    paired_surface_growth.add_argument("--force", action="store_true")
+    paired_surface_growth.set_defaults(handler=_paired_surface_growth)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(
