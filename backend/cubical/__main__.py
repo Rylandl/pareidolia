@@ -39,6 +39,7 @@ from .continuation_variant import run_continuation_variant
 from .continuity import JoinContinuitySettings, run_join_continuity_refinement
 from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
 from .clear_ribbon import ClearRibbonSettings, run_clear_ribbon_bank
+from .clear_ribbon_feedback import run_clear_ribbon_feedback
 from .clear_ribbon_selection import (
     ClearRibbonSelectionSettings,
     run_clear_ribbon_selection,
@@ -674,6 +675,15 @@ def _clear_ribbon_selection(args: argparse.Namespace) -> None:
         args.bank,
         args.output,
         settings=ClearRibbonSelectionSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _clear_ribbon_feedback(args: argparse.Namespace) -> None:
+    summary = run_clear_ribbon_feedback(
+        args.selection,
+        args.output,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2121,6 +2131,20 @@ def main() -> None:
     )
     clear_ribbon_selection.add_argument("--force", action="store_true")
     clear_ribbon_selection.set_defaults(handler=_clear_ribbon_selection)
+    clear_ribbon_feedback = subparsers.add_parser(
+        "grow-clear-ribbon-interfaces",
+        description=(
+            "Feed genuinely new two-face ribbon cores back into the dense "
+            "signed-interface graph, rebuild seed eligibility, and grow only "
+            "where all prior assignments remain unchanged."
+        ),
+    )
+    clear_ribbon_feedback.add_argument(
+        "--selection", type=Path, required=True
+    )
+    clear_ribbon_feedback.add_argument("--output", type=Path, required=True)
+    clear_ribbon_feedback.add_argument("--force", action="store_true")
+    clear_ribbon_feedback.set_defaults(handler=_clear_ribbon_feedback)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

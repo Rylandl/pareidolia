@@ -1134,6 +1134,10 @@ python3 -m backend.cubical build-clear-ribbon-bank \
 python3 -m backend.cubical select-clear-ribbons \
   --bank /path/to/clear-ribbon-bank \
   --output /path/to/clear-ribbon-selection
+
+python3 -m backend.cubical grow-clear-ribbon-interfaces \
+  --selection /path/to/clear-ribbon-selection \
+  --output /path/to/clear-ribbon-interface-feedback
 ```
 
 This stage is an evidence bank and component census, not a selector.  In
@@ -1141,39 +1145,68 @@ particular it records competing ribbons at the same source-lattice key so a
 later solve cannot accidentally select an entire connected component and
 violate local mutual exclusion.
 
-On the current core, 20,141 of 309,672 physically bounded candidates match
-both strict signed faces.  They reduce to 19,303 unique ribbons, including
-838 exact face-pair alternatives.  Projecting the persisted paired graph
-produces 49,496 unique strict continuity edges and 4,320 components.  The
-largest components contain 240 and 239 ribbons.  Of all components, 2,395
-touch exactly one trusted assembly, 1,923 are unseeded, and only two touch
-multiple assemblies; the contested population is just 16 ribbons.  Twelve
-unseeded components contain at least eight ribbons and the largest contains
-27, providing a small but concrete population of entirely new clear sheet
-cores.  There are also 794 same-key alternatives across 401 components, which
-is why the bank deliberately stops before selection.  Construction and both
-PNG audits take about 1.2 seconds; a verified cached read takes about half a
-second including Python startup.
+On the current core, 43,297 of 309,672 physically bounded candidates match
+both signed faces within one sampling step and 20 degrees.  They reduce to
+41,451 unique ribbons, including 1,846 duplicate face-pair profiles.
+Projecting the persisted paired graph produces 134,855 unique strict
+continuity edges and 7,137 components.  The largest components contain 764
+and 557 ribbons.  Of all components, 2,651 touch exactly one trusted assembly,
+4,480 are unseeded, and six touch multiple assemblies; the contested
+population is 633 ribbons and is deferred in full.  Ninety-two unseeded
+components contain at least eight ribbons and the largest contains 34.  There
+are also 3,762 same-key alternatives across 967 components, which is why the
+bank deliberately stops before selection.  Construction and both PNG audits
+take about 1.5 seconds.
 
 The following selection stage treats every previously selected paired surface
 as an immutable anchor.  Within a component that touches exactly one trusted
 assembly it grows a maximum-bottleneck forest over strict two-face continuity
 edges.  Components touching multiple assemblies retain their anchors but
 defer their interiors.  Entirely unseeded components receive a new identity
-only when at least eight ribbons remain after global source-lattice mutual
-exclusion.  The hard constraint is therefore one selected ribbon per source
-lattice key, including across otherwise disconnected components.
+only when both of every candidate ribbon's signed-interface components are
+also unseeded and at least eight ribbons remain after global source-lattice
+mutual exclusion.  This cross-representation check matters: absence from the
+paired-ribbon selection alone does not prove that a physical boundary is
+unowned.  The hard constraint remains one selected ribbon per source-lattice
+key, including across otherwise disconnected components.
 
-On the current core, selection takes about 0.1 seconds and retains all 15,155
-anchors, adds 474 collision-safe ribbons to anchored assemblies, and admits
-104 ribbons as ten entirely new clear cores.  The new cores contain 8--24
-ribbons, with a median of 8.5.  Two candidate cores fall below the minimum
-after exclusivity and are rolled back; 768 individual alternatives are marked
-as collision-rejected.  The median path bottleneck is 0.809 for anchored
-growth and 0.798 for new cores.  Including compressed output and both PNG
-audits, the stage takes about 0.26 seconds and writes a 50 KB selection table.
-This is intentionally a high-confidence scaffold rather than an attempt to
-claim utilization in unresolved dense material.
+On the current core, selection retains all 28,774 anchors, adds 824
+collision-safe ribbons to anchored assemblies, and admits 395 ribbons as 37
+entirely new clear cores.  Of 8,232 ribbons in components without a
+paired-surface assembly, 4,521 also have two unseeded signed components and
+3,711 are excluded as already claimed or contested boundary evidence.  The
+37 surviving cores contain 8--26 ribbons, with a median of nine.  Eleven
+candidate cores fall below the size minimum after mutual exclusion.  The
+median path bottleneck is 0.766 for anchored growth and 0.718 for new cores.
+Including compressed output and both PNG audits, the stage takes about 0.5
+seconds and writes a 104 KB selection table.  This is intentionally a
+high-confidence scaffold rather than an attempt to claim utilization in
+unresolved dense material.
+
+The feedback stage then adds only the 37 genuinely new identities to the
+signed-interface seeds.  It rebuilds topology because an exact ribbon face
+may have fallen below the original interface evidence gate and therefore had
+no graph edges.  Existing interface assignments are a hard invariant: any
+loss or relabel aborts the stage, and every component touched by more than one
+identity remains deferred.
+
+The 395 ribbons contribute 790 endpoint observations at 587 unique
+interfaces, with no identity conflicts.  Rebuilding raises eligible
+interfaces from 331,630 to 331,752 and continuity edges from 349,114 to
+349,215.  Conservative growth assigns 2,508 interfaces to the 37 new cores
+while preserving all 139,089 baseline assignments exactly.  The contested
+population remains 28,710 and the wholly unseeded population falls from
+163,831 to 161,445.  The complete feedback solve, 7.6 MB compressed table, and
+two visual audits take about 1.4 seconds on CPU.
+
+The endpoint caps were selected by a monotone safety sweep, not yield alone.
+The original 0.75-step / 15-degree rung recovers five cores and 323
+interfaces; 0.75 / 20 recovers 12 and 1,059; and 1.0 / 20 recovers 37 and
+2,508 while preserving the baseline exactly.  The next 1.25 / 25 rung creates
+eight seed conflicts, makes four previously owned components contested, and
+would drop 66 prior assignments, so the feedback invariant rejects it.  The
+1.0 / 20 setting is therefore the widest demonstrated safe rung on this
+block, while the preservation check remains mandatory on every future block.
 
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
@@ -1201,6 +1234,7 @@ python3 -m unittest \
   backend.test_one_sided_growth \
   backend.test_clear_ribbon \
   backend.test_clear_ribbon_selection \
+  backend.test_clear_ribbon_feedback \
   backend.test_raw_acus_pipeline -v
 ```
 
@@ -1213,4 +1247,5 @@ reselection, topology vetoes, signed interface anchoring,
 ambiguity-preserving boundary growth, bilateral seed association, and
 exact two-face ribbon de-duplication, collision-aware component census, and
 collision-safe ribbon selection, minimum-size rollback, contested-component
-deferral, and hierarchical assembly.
+deferral, cross-representation seed validation, baseline-preserving ribbon
+feedback, and hierarchical assembly.

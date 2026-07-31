@@ -39,6 +39,12 @@ def _bank(
         "componentSoleAssemblyLabel": np.asarray(
             component_sole_assembly, dtype=np.int32
         ),
+        "lowerComponentSeedLabelCount": np.zeros(
+            ribbon_count, dtype=np.uint16
+        ),
+        "upperComponentSeedLabelCount": np.zeros(
+            ribbon_count, dtype=np.uint16
+        ),
         "spatialKeyXYZ": np.asarray(key, dtype=np.int32),
         "localEvidenceScore": np.asarray(evidence, dtype=np.float32),
         "selectedPairedSurface": np.asarray(selected, dtype=np.uint8),
@@ -121,6 +127,33 @@ class ClearRibbonSelectionTests(unittest.TestCase):
             selection["selectionClass"][8:],
             np.full(8, SELECTION_CLASS_UNSELECTED),
         )
+
+    def test_new_core_requires_both_signed_components_to_be_unseeded(
+        self,
+    ) -> None:
+        bank = _bank(
+            key=tuple((x, 0, 0) for x in range(8)),
+            component=(0,) * 8,
+            component_size=(8,),
+            component_assembly_count=(0,),
+            component_sole_assembly=(-1,),
+            selected=(0,) * 8,
+            label=(-1,) * 8,
+            edges=tuple((x, x + 1, 0.9) for x in range(7)),
+        )
+        bank["upperComponentSeedLabelCount"][7] = 1
+        selection, stats = select_clear_ribbons(
+            bank,
+            processing_shape_sampling_xyz=(8, 1, 1),
+            settings=ClearRibbonSelectionSettings(
+                minimum_new_component_ribbons=8
+            ),
+        )
+        self.assertEqual(stats["newIdentityEndpointEligibleRibbonCount"], 7)
+        self.assertEqual(stats["newIdentityEndpointExcludedRibbonCount"], 1)
+        self.assertEqual(stats["newIdentityCandidateComponentCount"], 0)
+        self.assertEqual(stats["newClearCoreCount"], 0)
+        np.testing.assert_array_equal(selection["selected"], np.zeros(8))
 
     def test_contested_component_preserves_anchor_and_defers_interior(
         self,

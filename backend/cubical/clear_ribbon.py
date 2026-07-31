@@ -39,8 +39,8 @@ CLEAR_RIBBON_STEM = "clear-ribbon-bank-v1"
 
 @dataclass(frozen=True, slots=True)
 class ClearRibbonSettings:
-    maximum_endpoint_position_residual_sampling_steps: float = 0.75
-    maximum_endpoint_normal_degrees: float = 15.0
+    maximum_endpoint_position_residual_sampling_steps: float = 1.0
+    maximum_endpoint_normal_degrees: float = 20.0
     endpoint_match_normal_scale_degrees: float = 15.0
     minimum_continuity_affinity: float = 0.35
     minimum_substantial_component_size: int = 8

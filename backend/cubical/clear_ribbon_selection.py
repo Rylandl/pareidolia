@@ -24,8 +24,8 @@ from .isolated_slab import _percentile_record
 
 
 CLEAR_RIBBON_SELECTION_SCHEMA = "pareidolia.clear-ribbon-collision-safe-selection"
-CLEAR_RIBBON_SELECTION_VERSION = 1
-CLEAR_RIBBON_SELECTION_STEM = "clear-ribbon-selection-v1"
+CLEAR_RIBBON_SELECTION_VERSION = 2
+CLEAR_RIBBON_SELECTION_STEM = "clear-ribbon-selection-v2"
 
 SELECTION_CLASS_UNSELECTED = 0
 SELECTION_CLASS_UPSTREAM_ANCHOR = 1
@@ -103,6 +103,10 @@ def select_clear_ribbons(
     component_assembly_count = np.asarray(bank["componentAssemblyCount"])
     component_sole_assembly = np.asarray(
         bank["componentSoleAssemblyLabel"], dtype=np.int32
+    )
+    endpoint_components_unseeded = (
+        (np.asarray(bank["lowerComponentSeedLabelCount"]) == 0)
+        & (np.asarray(bank["upperComponentSeedLabelCount"]) == 0)
     )
     key = np.asarray(bank["spatialKeyXYZ"], dtype=np.int32)
     local_evidence = np.asarray(bank["localEvidenceScore"], dtype=np.float32)
@@ -215,19 +219,28 @@ def select_clear_ribbons(
             proposal_count += 1
 
     maximum_existing_label = int(np.max(upstream_label, initial=-1))
+    ribbon_in_unseeded_component = component_assembly_count[component] == 0
+    endpoint_eligible_new_ribbon = (
+        ribbon_in_unseeded_component & endpoint_components_unseeded
+    )
+    endpoint_eligible_component_size = np.bincount(
+        component[endpoint_eligible_new_ribbon], minlength=len(component_size)
+    ).astype(np.int32)
     unseeded_component = np.flatnonzero(
         (component_assembly_count == 0)
-        & (component_size >= settings.minimum_new_component_ribbons)
+        & (
+            endpoint_eligible_component_size
+            >= settings.minimum_new_component_ribbons
+        )
     )
     component_median_evidence = np.zeros(len(component_size), dtype=np.float32)
     for value in unseeded_component:
-        component_median_evidence[value] = float(
-            np.median(local_evidence[component == value])
-        )
+        eligible = (component == value) & endpoint_components_unseeded
+        component_median_evidence[value] = float(np.median(local_evidence[eligible]))
     new_order = sorted(
         (int(value) for value in unseeded_component),
         key=lambda value: (
-            -int(component_size[value]),
+            -int(endpoint_eligible_component_size[value]),
             -float(component_median_evidence[value]),
             value,
         ),
@@ -235,7 +248,9 @@ def select_clear_ribbons(
     new_label_by_component = np.full(len(component_size), -1, dtype=np.int32)
     rejected_new_component_count = 0
     for value in new_order:
-        candidates = np.flatnonzero(component == value)
+        candidates = np.flatnonzero(
+            (component == value) & endpoint_components_unseeded
+        )
         free = occupied[
             key[candidates, 2], key[candidates, 1], key[candidates, 0]
         ] < 0
@@ -274,7 +289,11 @@ def select_clear_ribbons(
                 int(offset[ribbon]), int(offset[ribbon + 1])
             ):
                 target = int(neighbor[adjacency_index])
-                if label[target] >= 0 or component[target] != value:
+                if (
+                    label[target] >= 0
+                    or component[target] != value
+                    or not endpoint_components_unseeded[target]
+                ):
                     continue
                 candidate_score = min(
                     score,
@@ -345,6 +364,15 @@ def select_clear_ribbons(
         "newClearCoreRibbonCount": int(np.count_nonzero(new_selected)),
         "selectedRibbonCount": int(np.count_nonzero(selected)),
         "newClearCoreCount": int(len(new_label)),
+        "newIdentityEndpointEligibleRibbonCount": int(
+            np.count_nonzero(endpoint_eligible_new_ribbon)
+        ),
+        "newIdentityEndpointExcludedRibbonCount": int(
+            np.count_nonzero(
+                ribbon_in_unseeded_component & ~endpoint_components_unseeded
+            )
+        ),
+        "newIdentityCandidateComponentCount": int(len(unseeded_component)),
         "rejectedNewComponentCount": rejected_new_component_count,
         "collisionRejectedRibbonCount": int(np.count_nonzero(collision_rejected)),
         "proposalCount": proposal_count,
@@ -628,8 +656,9 @@ def run_clear_ribbon_selection(
             "hardConstraint": "at most one ribbon per source-lattice key",
             "contestedComponentPolicy": "preserve upstream anchors; defer interior",
             "newIdentityPolicy": (
-                "unseeded strict component must retain the configured ribbon "
-                "minimum after global key exclusivity"
+                "both signed endpoint components must be unseeded, then the "
+                "strict component must retain the configured ribbon minimum "
+                "after global key exclusivity"
             ),
         },
     }
