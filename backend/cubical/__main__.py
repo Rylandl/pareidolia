@@ -95,6 +95,18 @@ from .paired_surface_growth import (
     PairedSurfaceGrowthSettings,
     run_paired_surface_growth,
 )
+from .physical_ribbon_bank import (
+    PhysicalRibbonBankSettings,
+    run_physical_ribbon_bank,
+)
+from .physical_ribbon_continuity import (
+    PhysicalRibbonContinuitySettings,
+    run_physical_ribbon_continuity,
+)
+from .physical_ribbon_configuration import (
+    PhysicalRibbonConfigurationSettings,
+    run_physical_ribbon_configuration,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -706,6 +718,51 @@ def _clear_core_interface_refinement(args: argparse.Namespace) -> None:
     summary = run_clear_core_interface_refinement(
         args.paired_feedback,
         args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_bank(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_bank(
+        args.interfaces,
+        args.output,
+        settings=PhysicalRibbonBankSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_continuity(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_continuity(
+        args.ribbons,
+        args.output,
+        settings=PhysicalRibbonContinuitySettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_configuration(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_configuration(
+        args.continuity,
+        args.output,
+        settings=PhysicalRibbonConfigurationSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2204,6 +2261,59 @@ def main() -> None:
     )
     clear_core_interface_refinement.set_defaults(
         handler=_clear_core_interface_refinement
+    )
+    physical_ribbon_bank = subparsers.add_parser(
+        "build-physical-ribbon-bank",
+        description=(
+            "Pair dense signed CT interfaces using only papyrus thickness and "
+            "opposing-boundary geometry. Prior sheet labels are ignored and "
+            "all physically plausible alternatives remain explicit."
+        ),
+    )
+    physical_ribbon_bank.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    physical_ribbon_bank.add_argument("--output", type=Path, required=True)
+    physical_ribbon_bank.add_argument("--settings-json", type=Path)
+    physical_ribbon_bank.add_argument("--force", action="store_true")
+    physical_ribbon_bank.set_defaults(handler=_physical_ribbon_bank)
+    physical_ribbon_continuity = subparsers.add_parser(
+        "solve-physical-ribbon-continuity",
+        description=(
+            "Infer label-free papyrus components from simultaneous continuity "
+            "of both physical ribbon boundaries, local two-dimensional support, "
+            "and exclusive use of observed interfaces."
+        ),
+    )
+    physical_ribbon_continuity.add_argument(
+        "--ribbons", type=Path, required=True
+    )
+    physical_ribbon_continuity.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_continuity.add_argument("--settings-json", type=Path)
+    physical_ribbon_continuity.add_argument("--force", action="store_true")
+    physical_ribbon_continuity.set_defaults(
+        handler=_physical_ribbon_continuity
+    )
+    physical_ribbon_configuration = subparsers.add_parser(
+        "optimize-physical-ribbon-configuration",
+        description=(
+            "Choose a label-free ribbon configuration under one-interface, "
+            "paired-boundary continuity, first-hit, and exact profile "
+            "non-intersection factors while retaining rejected alternatives."
+        ),
+    )
+    physical_ribbon_configuration.add_argument(
+        "--continuity", type=Path, required=True
+    )
+    physical_ribbon_configuration.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_configuration.add_argument("--settings-json", type=Path)
+    physical_ribbon_configuration.add_argument("--force", action="store_true")
+    physical_ribbon_configuration.set_defaults(
+        handler=_physical_ribbon_configuration
     )
     gap_census = subparsers.add_parser(
         "gap-census",

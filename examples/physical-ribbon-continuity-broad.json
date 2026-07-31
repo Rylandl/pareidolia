@@ -1,0 +1,12 @@
+{
+  "maximum_bidirectional_ray_rank": 5,
+  "neighbor_bucket_radius": 2,
+  "maximum_neighbor_distance_voxels": 5.5,
+  "maximum_normal_degrees": 40.0,
+  "maximum_midpoint_height_residual_voxels": 3.0,
+  "maximum_boundary_height_residual_voxels": 3.0,
+  "maximum_thickness_change_voxels": 6.0,
+  "maximum_boundary_shift_difference_voxels": 4.0,
+  "minimum_tangent_rank_ratio": 0.025,
+  "peeling_sweeps": 1
+}

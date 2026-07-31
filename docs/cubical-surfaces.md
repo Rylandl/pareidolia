@@ -222,3 +222,54 @@ components, while mapped co-component precision and recall are 90.74% and
 The geometry stages are validated independently on analytic surfaces. The
 native-CT implementation and its measured pilot are documented in
 [`raw-acus-cubical-pipeline.md`](raw-acus-cubical-pipeline.md).
+
+## Label-free physical ribbons
+
+The current dense-CT path does not use a propagated component identity to
+discover or connect papyrus. It begins with signed air-to-material interfaces
+and treats a local papyrus observation as a material ribbon bounded by two
+opposing faces. Sheet identity is an output of the geometric configuration
+solve, not an input constraint.
+
+`build-physical-ribbon-bank` casts inward from every dense signed interface
+over the configured physical thickness interval. It retains every opposing,
+inward-facing boundary pair and records mutual first hits separately from later
+ray alternatives. On the current 384 x 384 x 320 native-voxel pilot, 360,545
+interfaces produce 1,702,134 explicit ribbon alternatives in 15.1 seconds;
+282,276 interfaces participate in at least one alternative and 10,764 pairs
+are mutual first hits. No candidate is owned at this stage.
+
+`solve-physical-ribbon-continuity` connects candidates only when both boundary
+faces translate tangentially together, thickness and unsigned normal remain
+continuous, and neighbor directions span a local two-dimensional tangent
+plane. One observed interface can bound at most one ribbon in an explicit
+solution. The broad pilot evaluates 134,646 bidirectional candidates and
+1,658,589 compatible continuation edges in 5.5 seconds.
+
+`optimize-physical-ribbon-configuration` adds exact physical conflicts. It
+rasterizes candidate thickness profiles, verifies their closest interior
+approach geometrically, and forbids intersecting profiles. A local factor solve
+then trades alternatives using boundary evidence, inward-ray rank, and
+simultaneous two-face continuation. Rejected alternatives remain in the bank.
+The pilot contains 30,501 exact crossing relationships; its selected solution
+uses 37,019 ribbons and 74,038 distinct faces with zero crossings or reused
+interfaces. Three component-conditioned hole sweeps add 199 surrounded samples
+without relaxing those invariants. The full configuration pass takes about
+10.4 seconds.
+
+The reproducible commands are:
+
+```bash
+python -m backend.cubical build-physical-ribbon-bank \
+  --interfaces work/multiseam-2x2-b00c03c/one-sided-interface-bank-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-bank-v1
+
+python -m backend.cubical solve-physical-ribbon-continuity \
+  --ribbons work/multiseam-2x2-b00c03c/physical-ribbon-bank-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-continuity-broad-v1 \
+  --settings-json examples/physical-ribbon-continuity-broad.json
+
+python -m backend.cubical optimize-physical-ribbon-configuration \
+  --continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-broad-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-configuration-v1
+```
