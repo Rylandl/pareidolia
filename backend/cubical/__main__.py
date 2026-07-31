@@ -41,6 +41,14 @@ from .contextual_growth import ContextualGrowthSettings, run_contextual_growth
 from .export import write_block_obj, write_block_projection_png
 from .flatten import run_component_flattening
 from .gaps import analyze_component_gaps, write_gap_census
+from .isolated_slab import (
+    IsolatedSlabSettings,
+    run_isolated_slab_detection,
+)
+from .isolated_slab_audit import (
+    IsolatedSlabAcusAuditSettings,
+    run_isolated_slab_acus_audit,
+)
 from .mode_bank import run_mode_bank
 from .multiseam import run_multiseam_audit
 from .needle_field import (
@@ -521,6 +529,40 @@ def _block_needle_bundles(args: argparse.Namespace) -> None:
         args.surfaces,
         args.output,
         settings=BlockNeedleBundleSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _isolated_slabs(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_isolated_slab_detection(
+        args.source,
+        args.output,
+        world_start_xyz=tuple(args.world_start),
+        world_stop_xyz_exclusive=tuple(args.world_stop),
+        metadata_path=args.metadata,
+        settings=IsolatedSlabSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _audit_isolated_slab_acus(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_isolated_slab_acus_audit(
+        args.slabs,
+        args.field,
+        args.output,
+        settings=IsolatedSlabAcusAuditSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1826,6 +1868,44 @@ def main() -> None:
     )
     needle_bundles.add_argument("--force", action="store_true")
     needle_bundles.set_defaults(handler=_block_needle_bundles)
+    isolated_slabs = subparsers.add_parser(
+        "detect-isolated-slabs",
+        description=(
+            "Detect dense, high-confidence air-papyrus-air slabs directly from "
+            "native CT by pairing opposing interfaces with physical thickness "
+            "and external-air checks. This stage is intentionally independent "
+            "of Acus needles."
+        ),
+    )
+    isolated_slabs.add_argument("--source", type=Path, required=True)
+    isolated_slabs.add_argument("--metadata", type=Path)
+    isolated_slabs.add_argument("--world-start", nargs=3, type=int, required=True)
+    isolated_slabs.add_argument("--world-stop", nargs=3, type=int, required=True)
+    isolated_slabs.add_argument("--output", type=Path, required=True)
+    isolated_slabs.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional IsolatedSlabSettings keyword object",
+    )
+    isolated_slabs.add_argument("--force", action="store_true")
+    isolated_slabs.set_defaults(handler=_isolated_slabs)
+    isolated_slab_acus_audit = subparsers.add_parser(
+        "audit-isolated-slabs-with-acus",
+        description=(
+            "Measure how densely the finite Acus needles sample conservative "
+            "CT-derived isolated slabs, without modifying either artifact."
+        ),
+    )
+    isolated_slab_acus_audit.add_argument("--slabs", type=Path, required=True)
+    isolated_slab_acus_audit.add_argument("--field", type=Path, required=True)
+    isolated_slab_acus_audit.add_argument("--output", type=Path, required=True)
+    isolated_slab_acus_audit.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional IsolatedSlabAcusAuditSettings keyword object",
+    )
+    isolated_slab_acus_audit.add_argument("--force", action="store_true")
+    isolated_slab_acus_audit.set_defaults(handler=_audit_isolated_slab_acus)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

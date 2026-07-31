@@ -933,6 +933,78 @@ sheet or the closest ply of an adjacent sheet.  The complete association pass
 takes 0.36 seconds and leaves that page-pairing decision available to a later
 stack-order optimization.
 
+## Dense isolated-slab seeds
+
+The needle surface experiment exposes a representation limit as well as useful
+fiber evidence: a missing Acus sample cannot be recovered by repeatedly
+relaxing graph topology without risking an invented layer jump.  The
+complementary isolated-slab stage therefore starts again from native CT and is
+deliberately Acus-independent.  It detects the simplest trustworthy geometry
+first: one material interval with clear air beyond both faces.
+
+The stage block-averages CT onto a source-aligned two-voxel sampling lattice,
+smooths by a declared native-voxel scale, and calibrates air/material classes
+with an Otsu split over the owned block.  Every sufficiently strong
+air-to-material interface is followed along its inward gradient.  A retained
+profile must have a second material-to-air transition, physical thickness in
+the declared 80--400 micrometre range, at least 50 micrometres of independently
+clear air on both sides, material-bearing interior samples, and an opposing
+exit gradient.  Its two subvoxel boundaries, midpoint, unsigned normal,
+thickness, and all confidence terms are persisted.  The processing region has
+a thickness-plus-clearance halo, but only midpoint-owned pairs are emitted, so
+the stage composes over adjacent blocks.
+
+```bash
+python3 -m backend.cubical detect-isolated-slabs \
+  --source /path/to/native-ct.npy \
+  --metadata /path/to/native-ct.json \
+  --world-start 3456 2720 7264 \
+  --world-stop 3840 3104 7584 \
+  --output /path/to/isolated-slabs
+```
+
+Low-confidence physical pairs remain in the immutable array.  The default 0.5
+threshold only controls a descriptive component graph whose edges require
+local coplanarity, aligned unsigned normals, and compatible thickness.  It
+never fills a missing profile or alters either interface.  This lets later
+growth lower a confidence threshold under independent sheet context without
+rebaking CT.
+
+On the current 384 x 384 x 320 source-voxel core, the CPU reference run takes
+5.19 seconds.  It tests 1,494,785 candidate boundary samples, retains 175,073
+opposing profiles before reciprocal/spatial de-duplication, and writes 62,661
+unique midpoint-owned pairs.  Of those, 47,384 pass the conservative seed
+threshold.  They form 280 components with at least 32 samples; the largest has
+1,073.  Retained thickness is 15.81 voxels / 148.04 micrometres at the median
+and 33.00 voxels / 308.90 micrometres at p90.  The artifact includes native CT
+cross sections, orthographic component projections, and a binary PLY point
+cloud, making the accepted and deliberately unresolved regions directly
+inspectable.
+
+The evidence-only comparison with the existing block needle field uses the
+actual finite 16-voxel Acus segments rather than pretending their centers are
+points of surface coverage:
+
+```bash
+python3 -m backend.cubical audit-isolated-slabs-with-acus \
+  --slabs /path/to/isolated-slabs \
+  --field /path/to/block-needle-field \
+  --output /path/to/isolated-slab-acus-audit
+```
+
+Only 37.38% of conservative slab seeds lie within four voxels of any finite
+needle segment; 65.36% lie within six and 84.58% within eight.  At the old
+center-distance interpretation, 59.72% lie within half a needle length.  Among
+the 280 substantial slab components, nominal four-voxel segment coverage is
+37.16% at the median and seven components have zero coverage.  At the closest
+finite segment the Acus fiber is 13.78 degrees out of the CT slab plane at the
+median, while the inferred Acus page normal differs by 28.72 degrees.  A
+nearest segment can belong to an adjacent ply in dense regions, so these angle
+figures are diagnostics rather than ground truth.  The coherent uncovered
+stretches nevertheless establish that sparse needle sampling cannot be the
+sole carrier of surface continuity.  Acus remains valuable as directional
+fiber evidence to attach after dense CT sheets are seeded.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;
@@ -952,6 +1024,7 @@ python3 -m backend.cubical audit-sheet-resolution \
 python3 -m unittest \
   backend.test_rectify \
   backend.test_cubical \
+  backend.test_isolated_slab \
   backend.test_raw_acus_pipeline -v
 ```
 
