@@ -310,6 +310,29 @@ collision, profile crossing, or prior-component fusion. Flattened actual-CT
 views of every accepted component are written alongside the corridor evidence
 montage.
 
+`analyze-physical-ribbon-corridor-variants` removes one remaining local-choice
+assumption from that result. Rather than sending only the highest-factor-score
+matching to replay, it retains four diverse, complete, conflict-free matchings
+for every CT-supported corridor. Every matching must cover the patch and anchor
+both boundary arcs. It is then reconstructed inside the complete source sheet;
+exact edge-connected closure, no sheet split, non-increasing triangle-region
+count, and at least 98% supported-area retention are hard requirements. Surface
+region reduction and retained area outrank the original local factor score.
+Enumeration and exact screening are immutable cached stages, so later replay or
+visualization iterations do not repeat the expensive reconstructions.
+
+On the current slab, 775,621 beam states yield 236 complete variants for the 59
+CT-supported corridors. Sixty variants exactly connect their boundary arcs and
+48 pass the density-preserving surface test, exposing valid closures for 20
+corridors. Only two of the 20 selected variants were locally rank zero. The
+seven original repairs are all retained, while 13 additional repairs were
+hidden by the single-best local matching. Global replay accepts all 20 at once:
+selected ribbons change from 37,889 to 37,887, supported triangles from 28,116
+to 28,175, and triangle regions from 767 to 737. All 4,307 sheet components are
+preserved with zero interface collision, profile crossing, component split, or
+prior-component fusion. Exact screening takes about 135 seconds and the global
+replay about 36 seconds on this block.
+
 The reproducible commands are:
 
 ```bash
@@ -336,4 +359,10 @@ python -m backend.cubical analyze-physical-ribbon-patch-corridors \
   --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-v1 \
   --settings-json examples/physical-ribbon-patch-corridors.json
+
+python -m backend.cubical analyze-physical-ribbon-corridor-variants \
+  --corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-v1 \
+  --settings-json examples/physical-ribbon-corridor-variants.json
 ```

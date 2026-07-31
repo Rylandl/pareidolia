@@ -33,6 +33,9 @@ from backend.cubical.physical_ribbon_patch_corridors import (
     _shifted_trace_correlation,
     _triangle_region_labels,
 )
+from backend.cubical.physical_ribbon_corridor_variants import (
+    compile_exact_variant_reconfiguration,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -412,6 +415,67 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_exact_variant_compiles_back_to_replay_contract(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray((0, 2, 3), dtype=np.int64),
+            "corridorVariantAddedFrontierIndex": np.asarray(
+                (4, 5, 7), dtype=np.int32
+            ),
+            "corridorVariantRemovedOffset": np.asarray((0, 1, 3), dtype=np.int64),
+            "corridorVariantRemovedFrontierIndex": np.asarray(
+                (1, 2, 3), dtype=np.int32
+            ),
+            "corridorVariantLocalObjective": np.asarray(
+                (2.0, 1.8), dtype=np.float32
+            ),
+            "corridorVariantLocalObjectiveDelta": np.asarray(
+                (0.4, -0.1), dtype=np.float32
+            ),
+            "corridorVariantPatchCoverage": np.asarray(
+                (0.7, 0.9), dtype=np.float32
+            ),
+            "corridorVariantFirstArcAnchorCount": np.asarray(
+                (2, 3), dtype=np.int16
+            ),
+            "corridorVariantSecondArcAnchorCount": np.asarray(
+                (1, 2), dtype=np.int16
+            ),
+            "corridorVariantRetainedBoundaryFraction": np.asarray(
+                (0.8, 0.6), dtype=np.float32
+            ),
+        }
+        exact = {
+            "corridorChosenExactVariant": np.asarray((1, -1), dtype=np.int32),
+            "corridorVariantTriangleRegionCountBefore": np.asarray(
+                (3, 4), dtype=np.int32
+            ),
+            "corridorVariantTriangleRegionCountAfter": np.asarray(
+                (2, 3), dtype=np.int32
+            ),
+            "corridorVariantTriangleAreaBefore": np.asarray(
+                (10.0, 20.0), dtype=np.float32
+            ),
+            "corridorVariantTriangleAreaAfter": np.asarray(
+                (12.0, 21.0), dtype=np.float32
+            ),
+        }
+        compiled = compile_exact_variant_reconfiguration({}, variants, exact)
+        np.testing.assert_array_equal(
+            compiled["corridorProposalAddedFrontierIndex"], (7,)
+        )
+        np.testing.assert_array_equal(
+            compiled["corridorProposalRemovedFrontierIndex"], (2, 3)
+        )
+        np.testing.assert_array_equal(
+            compiled["corridorProposalAddedOffset"], (0, 1, 1)
+        )
+        np.testing.assert_array_equal(
+            compiled["corridorEvidenceEligible"], (1, 0)
+        )
+        self.assertGreater(
+            float(compiled["corridorProposalObjectiveDelta"][0]), 100.0
+        )
+
     def test_arc_alignment_discards_crossing_edge_hypothesis(self) -> None:
         records = [
             (0, 4, 2.0, 0.0, 2.0),
