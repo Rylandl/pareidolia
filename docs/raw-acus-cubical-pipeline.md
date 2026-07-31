@@ -838,6 +838,61 @@ local selected-edge normal angle is 7.38° median / 17.24° p90 and its global
 fiber projector has 95.95% of its mass on one axis.  Orthogonal plies remain
 separate by design and are the next level of papyrus-sheet association.
 
+The surface stage converts those graph carriers into explicit ordered geometry
+without treating a graph component as a finished mesh.  Unsigned normal and
+fiber axes receive deterministic transport signs solely to define local
+coordinates.  A branch-free predecessor/successor solve first exposes ordered
+fiber traces and monotone cross-trace strip evidence.  Meshing then freezes the
+topology carrier identities and re-evaluates every within-radius pair inside
+each carrier through the same curvature, layer-shift, fiber, and stack-
+fingerprint gates.  This removes the fixed maximum-neighbor count as a meshing
+artifact without making any new cross-carrier merge.
+
+Each accepted local chord contributes a signed `(fiber, cross-fiber)` increment.
+A matrix-free, Jacobi-preconditioned conjugate-gradient solve per carrier
+integrates those weighted increments into an intrinsic chart, so a 3D hairpin
+may unroll into an ordinary 2D strip.  The chart solve stores only graph edges
+and vectors rather than a dense node-by-node Laplacian, keeping its memory
+linear in the carrier graph.
+Delaunay faces are mapped back to the exact 3D needle centers and retained only
+when all three edges independently pass the physical continuation gates.  Mesh
+components are connected through shared edges, not merely a shared vertex;
+this prevents a bow-tie contact from masquerading as one surface.
+
+```bash
+python3 -m backend.cubical solve-block-needle-surfaces \
+  --topology /path/to/block-needle-topology \
+  --output /path/to/block-needle-surfaces
+
+python3 -m backend.cubical flatten-block-needle-surfaces \
+  --surfaces /path/to/block-needle-surfaces \
+  --pixel-step 0.5 --maximum-pixels 768 \
+  --depth-min -12 --depth-max 12 --depth-step 1 \
+  --output /path/to/block-needle-flattening
+```
+
+On the current core, complete within-carrier evaluation considers 325,665
+pairs, keeps 119,824, and recovers 18,056 valid pairs omitted by the original
+fixed-degree neighbor graph.  All 1,096 carriers of at least eight needles
+converge, requiring 9 iterations at the median and 46 at worst.  Their
+chord-integration residual is 0.44 voxels median / 1.60 p90 / 3.66 p99.  The
+final physically gated atlas has 12,828 triangles, no edge with more than two
+incident faces, and a leading edge-connected patch of 72 needles / 93
+triangles.  The complete stage takes 6.89 seconds on the reference block.  The
+original 245-needle graph carrier splits where a chart edge fails the physical
+gates; that is an explicit remaining continuity question rather than a hidden
+triangulation shortcut.
+
+`flatten-block-needle-surfaces` rasterizes those intrinsic charts and samples
+the immutable native CT at fixed normal offsets.  On the twelve leading
+patches, eleven select the exact zero-offset needle plane as the strongest
+texture slice at half-voxel raster spacing; their center-plane texture score is
+typically 1.4--2.7 times the stronger of the two ±12-voxel endpoint scores.
+Eleven have zero nonadjacent chart-overlap pixels and one has a single pixel.
+This is a qualitative physical check, not independent ground truth, but it
+shows that the recovered surfaces follow CT-dense papyrus rather than only a
+visually plausible graph projection.
+
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
 corner, and ordering constraints while relaxing only normal and fiber gates;

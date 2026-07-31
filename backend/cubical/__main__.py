@@ -47,6 +47,11 @@ from .needle_field import (
     BlockNeedleFieldSettings,
     run_block_needle_field,
 )
+from .needle_flatten import run_block_needle_flattening
+from .needle_surface import (
+    BlockNeedleSurfaceSettings,
+    run_block_needle_surfaces,
+)
 from .needle_topology import (
     BlockNeedleTopologySettings,
     run_block_needle_topology,
@@ -466,6 +471,36 @@ def _block_needle_topology(args: argparse.Namespace) -> None:
         args.field,
         args.output,
         settings=BlockNeedleTopologySettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _block_needle_surfaces(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_block_needle_surfaces(
+        args.topology,
+        args.output,
+        settings=BlockNeedleSurfaceSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _block_needle_flattening(args: argparse.Namespace) -> None:
+    summary = run_block_needle_flattening(
+        args.surfaces,
+        args.output,
+        maximum_components=args.maximum_components,
+        pixel_step_voxels=args.pixel_step,
+        maximum_pixels=args.maximum_pixels,
+        depth_min_voxels=args.depth_min,
+        depth_max_voxels=args.depth_max,
+        depth_step_voxels=args.depth_step,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1716,6 +1751,39 @@ def main() -> None:
     )
     needle_topology.add_argument("--force", action="store_true")
     needle_topology.set_defaults(handler=_block_needle_topology)
+    needle_surfaces = subparsers.add_parser(
+        "solve-block-needle-surfaces",
+        description=(
+            "Integrate one block-global needle topology into ordered fiber traces, "
+            "intrinsic carrier charts, and physically gated manifold triangle meshes."
+        ),
+    )
+    needle_surfaces.add_argument("--topology", type=Path, required=True)
+    needle_surfaces.add_argument("--output", type=Path, required=True)
+    needle_surfaces.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional BlockNeedleSurfaceSettings keyword object",
+    )
+    needle_surfaces.add_argument("--force", action="store_true")
+    needle_surfaces.set_defaults(handler=_block_needle_surfaces)
+    needle_flattening = subparsers.add_parser(
+        "flatten-block-needle-surfaces",
+        description=(
+            "Rasterize leading intrinsic needle surfaces and sample their native "
+            "CT depth stacks for qualitative physical validation."
+        ),
+    )
+    needle_flattening.add_argument("--surfaces", type=Path, required=True)
+    needle_flattening.add_argument("--output", type=Path, required=True)
+    needle_flattening.add_argument("--maximum-components", type=int, default=12)
+    needle_flattening.add_argument("--pixel-step", type=float, default=0.5)
+    needle_flattening.add_argument("--maximum-pixels", type=int, default=768)
+    needle_flattening.add_argument("--depth-min", type=float, default=-12.0)
+    needle_flattening.add_argument("--depth-max", type=float, default=12.0)
+    needle_flattening.add_argument("--depth-step", type=float, default=1.0)
+    needle_flattening.add_argument("--force", action="store_true")
+    needle_flattening.set_defaults(handler=_block_needle_flattening)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

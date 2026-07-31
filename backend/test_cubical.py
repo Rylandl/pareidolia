@@ -96,6 +96,14 @@ from backend.cubical.needle_topology import (
     _fixed_point_packet_growth,
     score_stack_fingerprint_pairs,
 )
+from backend.cubical.needle_flatten import _texture_score
+from backend.cubical.needle_surface import (
+    BlockNeedleSurfaceSettings,
+    build_complete_component_pair_graph,
+    integrate_intrinsic_surface_charts,
+    select_ordered_fiber_traces,
+    triangulate_intrinsic_surface_charts,
+)
 from backend.cubical.continuation import discover_mode_continuations
 from backend.cubical.gaps import analyze_component_gaps
 from backend.cubical.flatten import (
@@ -414,6 +422,181 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertNotEqual(component[0], component[4])
         self.assertFalse(bool(selected[4]))
         self.assertGreaterEqual(sum(value["mergedComponentPairs"] for value in records), 2)
+
+    def test_ordered_needle_traces_never_branch_across_neighboring_fibers(
+        self,
+    ) -> None:
+        center = np.asarray(
+            [
+                (x, y, 0.0)
+                for y in (0.0, 4.0)
+                for x in (0.0, 4.0, 8.0)
+            ],
+            dtype=np.float32,
+        )
+        first = np.asarray((0, 1, 3, 4, 0, 1, 2), dtype=np.int32)
+        second = np.asarray((1, 2, 4, 5, 3, 4, 5), dtype=np.int32)
+        result = select_ordered_fiber_traces(
+            center,
+            np.tile((1.0, 0.0, 0.0), (len(center), 1)),
+            np.tile((0.0, 0.0, 1.0), (len(center), 1)),
+            first,
+            second,
+            np.ones(len(first), dtype=np.float32),
+            np.ones(len(first), dtype=bool),
+            np.full(len(center), len(center), dtype=np.int32),
+            depth_kernel_voxels=2.5,
+            settings=BlockNeedleSurfaceSettings(
+                minimum_topology_component_needles=1
+            ),
+        )
+        selected = result["longitudinalEdge"]
+        degree = np.bincount(
+            np.concatenate((first[selected], second[selected])),
+            minlength=len(center),
+        )
+        self.assertLessEqual(int(np.max(degree)), 2)
+        self.assertEqual(
+            sorted(len(value) for value in result["traces"] if len(value) > 1),
+            [3, 3],
+        )
+
+    def test_complete_component_pair_graph_recovers_fixed_degree_omissions(
+        self,
+    ) -> None:
+        center = np.asarray(
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
+            dtype=np.float32,
+        )
+        graph, summary = build_complete_component_pair_graph(
+            center,
+            np.tile((1.0, 0.0, 0.0), (4, 1)).astype(np.float32),
+            np.tile((0.0, 0.0, 1.0), (4, 1)).astype(np.float32),
+            np.ones((4, 3), dtype=np.float32),
+            np.ones((4, 3), dtype=np.float32),
+            np.zeros(4, dtype=np.int32),
+            np.full(4, 4, dtype=np.int32),
+            np.asarray((0,), dtype=np.int32),
+            np.asarray((1,), dtype=np.int32),
+            np.asarray((True,)),
+            np.asarray((True,)),
+            minimum_component_needles=4,
+            neighbor_radius_voxels=2.0,
+            tangent_compatibility_sigma_voxels=1.0,
+            minimum_curvature_radius_voxels=1.0,
+            minimum_curved_affinity=0.3,
+            growth_caps={
+                "midpointLayerShiftVoxels": 1.0,
+                "bendModelResidualVoxels": 1.0,
+                "fiberResidualDegrees": 10.0,
+                "stackFingerprintMismatch": 0.5,
+            },
+        )
+        self.assertEqual(len(graph["first"]), 6)
+        self.assertEqual(summary["existingGrowthPairs"], 1)
+        self.assertEqual(summary["recoveredPairsOmittedByFixedDegreeGraph"], 5)
+        self.assertEqual(int(np.count_nonzero(graph["selectedAnchor"])), 1)
+
+    def test_intrinsic_needle_chart_unrolls_a_hairpin_into_one_manifold_mesh(
+        self,
+    ) -> None:
+        u_values = np.linspace(-8.0, 8.0, 5)
+        theta_values = np.linspace(-0.45 * math.pi, 0.45 * math.pi, 7)
+        radius = 20.0
+        center = []
+        normal = []
+        fiber = []
+        grid_index = []
+        for cross_index, theta in enumerate(theta_values):
+            for fiber_index, u_value in enumerate(u_values):
+                center.append(
+                    (
+                        u_value,
+                        radius * math.sin(theta),
+                        radius * (1.0 - math.cos(theta)),
+                    )
+                )
+                normal.append((0.0, -math.sin(theta), math.cos(theta)))
+                fiber.append((1.0, 0.0, 0.0))
+                grid_index.append((fiber_index, cross_index))
+        center_array = np.asarray(center, dtype=np.float32)
+        normal_array = np.asarray(normal, dtype=np.float32)
+        fiber_array = np.asarray(fiber, dtype=np.float32)
+        first = []
+        second = []
+        for left, (left_u, left_v) in enumerate(grid_index):
+            for right in range(left + 1, len(grid_index)):
+                right_u, right_v = grid_index[right]
+                if max(abs(left_u - right_u), abs(left_v - right_v)) == 1:
+                    first.append(left)
+                    second.append(right)
+        first_array = np.asarray(first, dtype=np.int32)
+        second_array = np.asarray(second, dtype=np.int32)
+        displacement = center_array[second_array] - center_array[first_array]
+        middle_normal = normal_array[first_array] + normal_array[second_array]
+        middle_normal /= np.linalg.norm(middle_normal, axis=1, keepdims=True)
+        cross_axis = np.cross(middle_normal, fiber_array[first_array])
+        along = np.einsum(
+            "ij,ij->i", displacement, fiber_array[first_array]
+        )
+        across = np.einsum("ij,ij->i", displacement, cross_axis)
+        count = len(center_array)
+        component = np.zeros(count, dtype=np.int32)
+        component_size = np.full(count, count, dtype=np.int32)
+        chart, residual, summary = integrate_intrinsic_surface_charts(
+            center_array,
+            first_array,
+            second_array,
+            np.ones(len(first_array), dtype=np.float32),
+            np.ones(len(first_array), dtype=bool),
+            component,
+            component_size,
+            along,
+            across,
+            minimum_component_needles=8,
+        )
+        theta_by_node = np.repeat(theta_values, len(u_values))
+        correlation = float(np.corrcoef(chart[:, 1], theta_by_node)[0, 1])
+        triangles, _areas, _normal_residual, mesh_summary = (
+            triangulate_intrinsic_surface_charts(
+                center_array,
+                normal_array,
+                chart,
+                first_array,
+                second_array,
+                np.ones(len(first_array), dtype=np.float32),
+                np.ones(len(first_array), dtype=bool),
+                np.ones(len(first_array), dtype=bool),
+                component,
+                component_size,
+                minimum_component_needles=8,
+                minimum_chart_separation_voxels=0.01,
+                maximum_edge_voxels=15.0,
+                maximum_normal_residual_degrees=45.0,
+                minimum_area_voxels_squared=0.1,
+            )
+        )
+        edge_incidence: dict[tuple[int, int], int] = {}
+        for triangle in triangles:
+            for index, left in enumerate(triangle):
+                right = int(triangle[(index + 1) % 3])
+                edge = (min(int(left), right), max(int(left), right))
+                edge_incidence[edge] = edge_incidence.get(edge, 0) + 1
+        self.assertEqual(summary["singularLeastSquaresComponents"], 0)
+        self.assertLess(summary["edgeIntegrationResidualVoxels"]["p90"], 0.2)
+        self.assertGreater(abs(correlation), 0.99)
+        self.assertGreaterEqual(mesh_summary["retainedTriangles"], 40)
+        self.assertLessEqual(max(edge_incidence.values()), 2)
+
+    def test_native_ct_texture_score_prefers_a_structured_center_plane(self) -> None:
+        mask = np.ones((12, 12), dtype=bool)
+        flat = np.full((12, 12), 128, dtype=np.uint8)
+        structured = np.indices((12, 12)).sum(axis=0) % 2
+        structured = (64 + 128 * structured).astype(np.uint8)
+        self.assertGreater(
+            _texture_score(structured, mask),
+            _texture_score(flat, mask),
+        )
 
     def _write_analytic_candidate_boundary(
         self,
