@@ -96,7 +96,12 @@ from backend.cubical.needle_topology import (
     _fixed_point_packet_growth,
     score_stack_fingerprint_pairs,
 )
-from backend.cubical.needle_flatten import _texture_score
+from backend.cubical.needle_flatten import _texture_score, _triangle_group_ids
+from backend.cubical.needle_bundle import (
+    BlockNeedleBundleSettings,
+    associate_orthogonal_surface_packets,
+    build_shadow_bridge_evidence,
+)
 from backend.cubical.needle_surface import (
     BlockNeedleSurfaceSettings,
     build_complete_component_pair_graph,
@@ -597,6 +602,151 @@ class CubicalGeometryTests(unittest.TestCase):
             _texture_score(structured, mask),
             _texture_score(flat, mask),
         )
+
+    def test_needle_flattening_can_group_disconnected_meshes_by_ply(self) -> None:
+        surfaces = {
+            "triangleNeedle": np.asarray(((0, 1, 2), (3, 4, 5)), dtype=np.int32),
+            "triangleSurfaceComponentId": np.asarray((11, 12), dtype=np.int32),
+        }
+        topology = {
+            "plyComponentId": np.asarray((7, 7, 7, 9, 9, 9), dtype=np.int32)
+        }
+        np.testing.assert_array_equal(
+            _triangle_group_ids(surfaces, topology, "surface-component"),
+            (11, 12),
+        )
+        np.testing.assert_array_equal(
+            _triangle_group_ids(surfaces, topology, "topology-carrier"),
+            (7, 9),
+        )
+        topology["plyComponentId"][4] = 7
+        with self.assertRaisesRegex(ValueError, "crosses topology ply"):
+            _triangle_group_ids(surfaces, topology, "topology-carrier")
+
+    def test_crossed_ply_packets_require_orthogonal_physical_support(self) -> None:
+        center = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (4.0, 0.0, 0.0),
+                (8.0, 0.0, 0.0),
+                (0.0, 0.0, 6.0),
+                (4.0, 0.0, 6.0),
+                (8.0, 0.0, 6.0),
+            ),
+            dtype=np.float32,
+        )
+        first = np.repeat(np.arange(3, dtype=np.int32), 3)
+        second = np.tile(np.arange(3, 6, dtype=np.int32), 3)
+        settings = BlockNeedleBundleSettings()
+        summary, arrays = associate_orthogonal_surface_packets(
+            center,
+            np.tile((0.0, 0.0, 1.0), (6, 1)).astype(np.float32),
+            np.ones(6, dtype=np.int8),
+            np.ones(6, dtype=np.float32),
+            np.asarray((10, 10, 10, 20, 20, 20), dtype=np.int32),
+            np.asarray(((0, 1, 2), (3, 4, 5)), dtype=np.int32),
+            np.asarray((100, 200), dtype=np.int32),
+            first,
+            second,
+            np.zeros(9, dtype=np.float32),
+            np.full(9, 90.0, dtype=np.float32),
+            np.full(9, 0.1, dtype=np.float32),
+            minimum_layer_separation_voxels=3.5,
+            maximum_sheet_thickness_voxels=40.0,
+            orthogonal_ply_sigma_degrees=22.0,
+            needle_length_voxels=16.0,
+            depth_kernel_voxels=2.5,
+            settings=settings,
+        )
+        self.assertEqual(summary["candidatePackets"], 1)
+        self.assertEqual(summary["selectedPackets"], 1)
+        self.assertEqual(int(arrays["packetEdgeCount"][0]), 9)
+        self.assertAlmostEqual(float(arrays["packetSeparationVoxels"][0]), 6.0)
+
+        rejected, _arrays = associate_orthogonal_surface_packets(
+            center,
+            np.tile((0.0, 0.0, 1.0), (6, 1)).astype(np.float32),
+            np.ones(6, dtype=np.int8),
+            np.ones(6, dtype=np.float32),
+            np.asarray((10, 10, 10, 20, 20, 20), dtype=np.int32),
+            np.asarray(((0, 1, 2), (3, 4, 5)), dtype=np.int32),
+            np.asarray((100, 200), dtype=np.int32),
+            first,
+            second,
+            np.zeros(9, dtype=np.float32),
+            np.full(9, 20.0, dtype=np.float32),
+            np.full(9, 0.1, dtype=np.float32),
+            minimum_layer_separation_voxels=3.5,
+            maximum_sheet_thickness_voxels=40.0,
+            orthogonal_ply_sigma_degrees=22.0,
+            needle_length_voxels=16.0,
+            depth_kernel_voxels=2.5,
+            settings=settings,
+        )
+        self.assertEqual(rejected["candidatePackets"], 0)
+
+    def test_crossed_ply_shadow_support_never_mutates_surface_meshes(self) -> None:
+        center = np.asarray(
+            [(float(index), 0.0, 0.0) for index in range(9)],
+            dtype=np.float32,
+        )
+        chart = center[:, :2]
+        summary, arrays = build_shadow_bridge_evidence(
+            center,
+            chart,
+            np.asarray(((0, 1, 2), (3, 4, 5), (6, 7, 8)), dtype=np.int32),
+            np.asarray((1, 2, 3), dtype=np.int32),
+            np.asarray((1, 2, 3), dtype=np.int32),
+            np.asarray((10, 10, 20), dtype=np.int32),
+            np.asarray((0, 3, 6, 9), dtype=np.int64),
+            np.arange(9, dtype=np.int32),
+            np.asarray((1, 2), dtype=np.int32),
+            np.asarray((3, 3), dtype=np.int32),
+            np.asarray((0.9, 0.8), dtype=np.float32),
+            np.asarray((1, 1), dtype=np.uint8),
+            maximum_chart_gap_voxels=4.0,
+        )
+        self.assertEqual(summary["candidateBridges"], 1)
+        self.assertEqual(summary["selectedBridges"], 1)
+        self.assertEqual(summary["largestSupportGroupComponents"], 2)
+        self.assertEqual(
+            int(arrays["surfaceComponentSupportGroupId"][0]),
+            int(arrays["surfaceComponentSupportGroupId"][1]),
+        )
+        self.assertNotIn("triangleNeedle", arrays)
+
+    def test_shadow_support_can_use_one_frozen_orthogonal_carrier(self) -> None:
+        center = np.asarray(
+            [(float(index), 0.0, 0.0) for index in range(12)],
+            dtype=np.float32,
+        )
+        summary, arrays = build_shadow_bridge_evidence(
+            center,
+            center[:, :2],
+            np.asarray(
+                ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11)),
+                dtype=np.int32,
+            ),
+            np.asarray((1, 2, 3, 4), dtype=np.int32),
+            np.asarray((1, 2, 3, 4), dtype=np.int32),
+            np.asarray((10, 10, 20, 20), dtype=np.int32),
+            np.asarray((0, 3, 6, 9, 12), dtype=np.int64),
+            np.arange(12, dtype=np.int32),
+            np.asarray((1, 2), dtype=np.int32),
+            np.asarray((3, 4), dtype=np.int32),
+            np.asarray((0.9, 0.8), dtype=np.float32),
+            np.asarray((1, 1), dtype=np.uint8),
+            maximum_chart_gap_voxels=4.0,
+        )
+        pairs = set(
+            zip(
+                arrays["shadowBridgeFirstSurfaceComponent"].tolist(),
+                arrays["shadowBridgeSecondSurfaceComponent"].tolist(),
+            )
+        )
+        self.assertEqual(pairs, {(1, 2), (3, 4)})
+        self.assertEqual(summary["selectedBridges"], 2)
+        self.assertEqual(summary["selectedBridgesWithOneIntactPartnerIsland"], 0)
 
     def _write_analytic_candidate_boundary(
         self,

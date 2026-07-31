@@ -47,6 +47,10 @@ from .needle_field import (
     BlockNeedleFieldSettings,
     run_block_needle_field,
 )
+from .needle_bundle import (
+    BlockNeedleBundleSettings,
+    run_block_needle_bundles,
+)
 from .needle_flatten import run_block_needle_flattening
 from .needle_surface import (
     BlockNeedleSurfaceSettings,
@@ -495,12 +499,28 @@ def _block_needle_flattening(args: argparse.Namespace) -> None:
     summary = run_block_needle_flattening(
         args.surfaces,
         args.output,
+        grouping=args.grouping,
         maximum_components=args.maximum_components,
         pixel_step_voxels=args.pixel_step,
         maximum_pixels=args.maximum_pixels,
         depth_min_voxels=args.depth_min,
         depth_max_voxels=args.depth_max,
         depth_step_voxels=args.depth_step,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _block_needle_bundles(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_block_needle_bundles(
+        args.surfaces,
+        args.output,
+        settings=BlockNeedleBundleSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1776,6 +1796,12 @@ def main() -> None:
     )
     needle_flattening.add_argument("--surfaces", type=Path, required=True)
     needle_flattening.add_argument("--output", type=Path, required=True)
+    needle_flattening.add_argument(
+        "--grouping",
+        choices=("surface-component", "topology-carrier"),
+        default="surface-component",
+        help="flatten individual mesh islands or all islands in one ply carrier",
+    )
     needle_flattening.add_argument("--maximum-components", type=int, default=12)
     needle_flattening.add_argument("--pixel-step", type=float, default=0.5)
     needle_flattening.add_argument("--maximum-pixels", type=int, default=768)
@@ -1784,6 +1810,22 @@ def main() -> None:
     needle_flattening.add_argument("--depth-step", type=float, default=1.0)
     needle_flattening.add_argument("--force", action="store_true")
     needle_flattening.set_defaults(handler=_block_needle_flattening)
+    needle_bundles = subparsers.add_parser(
+        "associate-block-needle-surfaces",
+        description=(
+            "Build evidence-only orthogonal-ply packets and shadow bridges between "
+            "disconnected surface islands without changing their meshes."
+        ),
+    )
+    needle_bundles.add_argument("--surfaces", type=Path, required=True)
+    needle_bundles.add_argument("--output", type=Path, required=True)
+    needle_bundles.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional BlockNeedleBundleSettings keyword object",
+    )
+    needle_bundles.add_argument("--force", action="store_true")
+    needle_bundles.set_defaults(handler=_block_needle_bundles)
     gap_census = subparsers.add_parser(
         "gap-census",
         description=(

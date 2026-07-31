@@ -19,6 +19,7 @@ from .flatten import (
 from .needle_surface import (
     BLOCK_NEEDLE_SURFACE_SCHEMA,
     BLOCK_NEEDLE_SURFACE_STEM,
+    _load_topology_artifact,
 )
 from .needle_topology import _load_field_artifact
 
@@ -81,18 +82,15 @@ def _resolve_native_source(field_manifest: Mapping[str, Any]) -> VolumeSource:
     return VolumeSource.open(path, metadata_path)
 
 
-def _component_mesh_and_chart(
-    component_id: int,
+def _selected_mesh_and_chart(
+    group_id: int,
+    selected: np.ndarray,
     field_arrays: Mapping[str, np.ndarray],
     surface_arrays: Mapping[str, np.ndarray],
 ) -> tuple[ComponentMesh, SurfaceChart, np.ndarray, np.ndarray]:
     triangles_global = np.asarray(surface_arrays["triangleNeedle"], dtype=np.int32)
-    triangle_component = np.asarray(
-        surface_arrays["triangleSurfaceComponentId"], dtype=np.int32
-    )
-    selected = np.flatnonzero(triangle_component == component_id)
     if not len(selected):
-        raise KeyError(f"surface component {component_id} is absent")
+        raise KeyError(f"surface group {group_id} is absent")
     selected_triangles = triangles_global[selected]
     nodes = np.unique(selected_triangles)
     local = {int(node): index for index, node in enumerate(nodes)}
@@ -117,7 +115,7 @@ def _component_mesh_and_chart(
     triangle_normal_xyz = np.asarray(triangle_normal, dtype=np.float64)
     triangle_ids = np.arange(len(triangles), dtype=np.uint64)
     mesh = ComponentMesh(
-        component_id=component_id,
+        component_id=group_id,
         patch_ids=tuple(int(value) for value in triangle_ids),
         vertex_xyz=vertex_xyz,
         polygons=tuple(tuple(int(node) for node in value) for value in triangles),
@@ -133,6 +131,45 @@ def _component_mesh_and_chart(
         {"solver": "block-global weighted intrinsic chord integration"},
     )
     return mesh, chart, nodes, selected
+
+
+def _component_mesh_and_chart(
+    component_id: int,
+    field_arrays: Mapping[str, np.ndarray],
+    surface_arrays: Mapping[str, np.ndarray],
+) -> tuple[ComponentMesh, SurfaceChart, np.ndarray, np.ndarray]:
+    triangle_component = np.asarray(
+        surface_arrays["triangleSurfaceComponentId"], dtype=np.int32
+    )
+    return _selected_mesh_and_chart(
+        component_id,
+        np.flatnonzero(triangle_component == component_id),
+        field_arrays,
+        surface_arrays,
+    )
+
+
+def _triangle_group_ids(
+    surface_arrays: Mapping[str, np.ndarray],
+    topology_arrays: Mapping[str, np.ndarray] | None,
+    grouping: str,
+) -> np.ndarray:
+    if grouping == "surface-component":
+        return np.asarray(
+            surface_arrays["triangleSurfaceComponentId"], dtype=np.int32
+        )
+    if grouping != "topology-carrier":
+        raise ValueError(
+            "needle flattening grouping must be surface-component or topology-carrier"
+        )
+    if topology_arrays is None:
+        raise ValueError("topology-carrier grouping requires needle topology")
+    triangles = np.asarray(surface_arrays["triangleNeedle"], dtype=np.int32)
+    component = np.asarray(topology_arrays["plyComponentId"], dtype=np.int32)
+    triangle_component = component[triangles]
+    if np.any(triangle_component != triangle_component[:, :1]):
+        raise ValueError("one surface triangle crosses topology ply carriers")
+    return triangle_component[:, 0]
 
 
 def _texture_score(image: np.ndarray, mask: np.ndarray) -> float:
@@ -247,6 +284,7 @@ def run_block_needle_flattening(
     surface_root: str | Path,
     output_root: str | Path,
     *,
+    grouping: str = "surface-component",
     maximum_components: int = 12,
     pixel_step_voxels: float = 1.0,
     maximum_pixels: int = 512,
@@ -257,6 +295,8 @@ def run_block_needle_flattening(
 ) -> dict[str, Any]:
     """Flatten and native-CT sample leading block-global needle surfaces."""
 
+    if grouping not in ("surface-component", "topology-carrier"):
+        raise ValueError("unknown needle flattening grouping")
     if maximum_components < 1 or pixel_step_voxels <= 0.0 or maximum_pixels < 64:
         raise ValueError("needle flattening raster settings are invalid")
     if depth_step_voxels <= 0.0 or depth_max_voxels < depth_min_voxels:
@@ -272,6 +312,15 @@ def run_block_needle_flattening(
         != surface_manifest["source"]["fieldIdentitySha256"]
     ):
         raise ValueError("needle surfaces reference another block needle field")
+    topology_manifest_path = Path(surface_manifest["source"]["topologyManifest"])
+    topology_path, topology_manifest, topology_arrays = _load_topology_artifact(
+        topology_manifest_path
+    )
+    if (
+        topology_manifest["identity"]["identitySha256"]
+        != surface_manifest["source"]["topologyIdentitySha256"]
+    ):
+        raise ValueError("needle surfaces reference another block needle topology")
     source = _resolve_native_source(field_manifest)
     depth_offsets = np.arange(
         depth_min_voxels,
@@ -279,12 +328,16 @@ def run_block_needle_flattening(
         depth_step_voxels,
         dtype=np.float32,
     )
-    triangle_component = surface_arrays["triangleSurfaceComponentId"]
-    component_values, component_sizes = np.unique(
-        triangle_component, return_counts=True
+    triangle_group = _triangle_group_ids(
+        surface_arrays,
+        topology_arrays,
+        grouping,
     )
-    ranking = np.lexsort((component_values, -component_sizes))[:maximum_components]
-    selected_components = component_values[ranking]
+    group_values, group_sizes = np.unique(
+        triangle_group, return_counts=True
+    )
+    ranking = np.lexsort((group_values, -group_sizes))[:maximum_components]
+    selected_groups = group_values[ranking]
     identity: dict[str, Any] = {
         "schema": BLOCK_NEEDLE_FLATTENING_SCHEMA,
         "version": BLOCK_NEEDLE_FLATTENING_VERSION,
@@ -295,6 +348,7 @@ def run_block_needle_flattening(
             "identitySha256": surface_manifest["identity"]["identitySha256"],
         },
         "settings": {
+            "grouping": grouping,
             "maximumComponents": maximum_components,
             "pixelStepVoxels": pixel_step_voxels,
             "maximumPixels": maximum_pixels,
@@ -314,9 +368,16 @@ def run_block_needle_flattening(
     output.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     montage_images: list[np.ndarray] = []
-    for rank, component in enumerate(selected_components, start=1):
-        mesh, chart, nodes, selected_triangles = _component_mesh_and_chart(
-            int(component), field_arrays, surface_arrays
+    triangle_surface_component = np.asarray(
+        surface_arrays["triangleSurfaceComponentId"], dtype=np.int32
+    )
+    file_group = grouping.replace("-", "_")
+    for rank, group in enumerate(selected_groups, start=1):
+        mesh, chart, nodes, selected_triangles = _selected_mesh_and_chart(
+            int(group),
+            np.flatnonzero(triangle_group == group),
+            field_arrays,
+            surface_arrays,
         )
         raster = rasterize_chart(
             mesh,
@@ -332,11 +393,11 @@ def run_block_needle_flattening(
         best_index = int(np.argmax(scores))
         best_rgb = _contrast_rgb(stack[best_index], raster.mask)
         cropped = _crop_to_mask(best_rgb, raster.mask)
-        preview_path = output / f"rank-{rank:02d}-component-{int(component)}.png"
+        preview_path = output / f"rank-{rank:02d}-{file_group}-{int(group)}.png"
         temporary_preview = preview_path.with_suffix(preview_path.suffix + ".tmp")
         temporary_preview.write_bytes(rgb_png(cropped))
         temporary_preview.replace(preview_path)
-        data_path = output / f"rank-{rank:02d}-component-{int(component)}.npz"
+        data_path = output / f"rank-{rank:02d}-{file_group}-{int(group)}.npz"
         temporary_data = data_path.with_suffix(data_path.suffix + ".tmp")
         with temporary_data.open("wb") as handle:
             np.savez_compressed(
@@ -348,30 +409,43 @@ def run_block_needle_flattening(
                 normalXYZ=raster.normal_xyz,
                 sourceNeedle=nodes,
                 sourceTriangle=selected_triangles,
+                sourceSurfaceComponent=triangle_surface_component[
+                    selected_triangles
+                ],
                 chartUV=chart.uv.astype(np.float32),
                 textureScore=scores.astype(np.float32),
             )
         temporary_data.replace(data_path)
         montage_images.append(cropped)
-        records.append(
-            {
-                "rank": rank,
-                "componentId": int(component),
-                "needles": len(nodes),
-                "triangles": len(mesh.triangles),
-                "bestDepthOffsetVoxels": float(depth_offsets[best_index]),
-                "bestTextureScore": round(float(scores[best_index]), 6),
-                "raster": raster.statistics,
-                "sampling": sampling,
-                "preview": preview_path.name,
-                "data": {
-                    "path": data_path.name,
-                    "bytes": data_path.stat().st_size,
-                    "sha256": sha256_file(data_path),
-                },
-            }
-        )
-    montage_path = _write_montage(montage_images, output / "top-surfaces-flattened.png")
+        record = {
+            "rank": rank,
+            "grouping": grouping,
+            "groupId": int(group),
+            "surfaceComponents": int(
+                len(np.unique(triangle_surface_component[selected_triangles]))
+            ),
+            "needles": len(nodes),
+            "triangles": len(mesh.triangles),
+            "bestDepthOffsetVoxels": float(depth_offsets[best_index]),
+            "bestTextureScore": round(float(scores[best_index]), 6),
+            "raster": raster.statistics,
+            "sampling": sampling,
+            "preview": preview_path.name,
+            "data": {
+                "path": data_path.name,
+                "bytes": data_path.stat().st_size,
+                "sha256": sha256_file(data_path),
+            },
+        }
+        if grouping == "surface-component":
+            record["componentId"] = int(group)
+        else:
+            record["topologyPlyComponentId"] = int(group)
+        records.append(record)
+    montage_path = _write_montage(
+        montage_images,
+        output / f"top-{file_group}-flattened.png",
+    )
     payload = {
         "schema": BLOCK_NEEDLE_FLATTENING_SCHEMA,
         "version": BLOCK_NEEDLE_FLATTENING_VERSION,
@@ -379,6 +453,7 @@ def run_block_needle_flattening(
         "identity": identity,
         "source": {
             "surfaceManifest": str(surface_path),
+            "topologyManifest": str(topology_path),
             "fieldManifest": str(field_manifest_path),
             "nativeCT": source.source_identity,
         },

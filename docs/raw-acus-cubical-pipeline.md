@@ -866,9 +866,14 @@ python3 -m backend.cubical solve-block-needle-surfaces \
 
 python3 -m backend.cubical flatten-block-needle-surfaces \
   --surfaces /path/to/block-needle-surfaces \
+  --grouping topology-carrier \
   --pixel-step 0.5 --maximum-pixels 768 \
   --depth-min -12 --depth-max 12 --depth-step 1 \
   --output /path/to/block-needle-flattening
+
+python3 -m backend.cubical associate-block-needle-surfaces \
+  --surfaces /path/to/block-needle-surfaces \
+  --output /path/to/block-needle-bundles
 ```
 
 On the current core, complete within-carrier evaluation considers 325,665
@@ -892,6 +897,41 @@ Eleven have zero nonadjacent chart-overlap pixels and one has a single pixel.
 This is a qualitative physical check, not independent ground truth, but it
 shows that the recovered surfaces follow CT-dense papyrus rather than only a
 visually plausible graph projection.
+
+The flattening command can rank either individual edge-connected mesh islands
+or every island already belonging to one frozen topology carrier.  Carrier
+grouping does not fill a hole: it uses the common intrinsic chart to expose the
+hole.  The largest current carrier has 217 meshed needles / 233 triangles in
+20 islands, versus 72 / 93 for its largest island.  It has zero nonadjacent
+raster overlaps, and eleven of the twelve leading carrier views prefer native
+CT depth zero; one prefers +10 voxels and remains an explicit nearby-ply
+ambiguity.
+
+`associate-block-needle-surfaces` then builds a separate evidence artifact for
+that ambiguity.  A cross-ply packet must have aligned normals, nearly
+orthogonal unsigned fibers, physical layer separation, at least three
+independent endpoints on each side, half a needle length of spatial span, a
+consistent normal side, and low separation dispersion.  Its geometric gates
+are dimensionless multiples of the immutable Acus needle length, depth kernel,
+orthogonal-ply spread, layer-spacing floor, and plausible sheet-thickness
+range; endpoint counts and side consistency are declared general settings.
+None are fitted to this block.  The current solve retains 179 of 978
+component-pair hypotheses.  They have 21 edges and 12.83 voxels of span at the
+median, with 9.27-voxel median ply separation and only 0.52-voxel median
+separation MAD.  Their median normal disagreement is 9.69°, and median error
+from orthogonal fibers is 8.40°.
+
+An evidence-only shadow bridge is emitted when one intact crossed-fiber island,
+or two islands in one already-frozen crossed-fiber carrier, support two
+disconnected islands of the same ply carrier.  Ninety such bridges remain
+within one physical needle length in the current block: 80 have one intact
+partner island and ten use the broader frozen partner carrier.  The resulting
+largest support group has 41 needles / 39 triangles in five still-disconnected
+islands.  They never add graph edges or mesh triangles, so this stage does not
+yet decide whether an orthogonal neighbor is the other ply of the same papyrus
+sheet or the closest ply of an adjacent sheet.  The complete association pass
+takes 0.36 seconds and leaves that page-pairing decision available to a later
+stack-order optimization.
 
 The complementary resolution audit asks whether the existing planar cubical
 representation is locally too coarse.  It preserves shared-face endpoint,
