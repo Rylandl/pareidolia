@@ -18,12 +18,20 @@ from .topology import GridEdge, GridFace, GridSpec, Int3
 
 @dataclass(frozen=True, slots=True)
 class TraceMatchSettings:
-    """Dimensionless statistical gates for shared-face trace matching."""
+    """Dimensionless statistical and geometric shared-face matching gates.
+
+    A crossing observed on one grid edge may correspond to an observation on
+    an incident edge only at their common corner.  The default corner-snap
+    bound assigns each half-edge to its nearest endpoint, preventing large
+    covariance from moving a maximum-likelihood crossing past the edge
+    midpoint and collapsing unrelated geometry onto a cube vertex.
+    """
 
     crossing_standard_deviation_floor: float = 0.01
     normal_standard_deviation_floor_radians: float = math.radians(1.0)
     fiber_standard_deviation_floor_radians: float = math.radians(2.0)
     maximum_endpoint_z: float = 4.5
+    maximum_corner_snap_fraction: float = 0.5
     maximum_normal_z: float = 4.5
     maximum_fiber_z: float = 4.5
     maximum_absolute_normal_angle_radians: float = 0.5 * math.pi
@@ -38,6 +46,7 @@ class TraceMatchSettings:
             self.normal_standard_deviation_floor_radians,
             self.fiber_standard_deviation_floor_radians,
             self.maximum_endpoint_z,
+            self.maximum_corner_snap_fraction,
             self.maximum_normal_z,
             self.maximum_fiber_z,
             self.maximum_absolute_normal_angle_radians,
@@ -54,6 +63,8 @@ class TraceMatchSettings:
             or self.maximum_absolute_fiber_residual_radians > 0.5 * math.pi
         ):
             raise ValueError("absolute angular gates cannot exceed 90 degrees")
+        if self.maximum_corner_snap_fraction > 1.0:
+            raise ValueError("corner snap fraction cannot exceed one edge length")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +74,7 @@ class EndpointAgreement:
     z: float
     mode: str
     shared_vertex_xyz: Int3 | None
+    maximum_corner_distance_fraction: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +248,7 @@ def _endpoint_agreement(
         )
         z_value = abs(float(first.t) - float(second.t)) / math.sqrt(variance)
         return EndpointAgreement(
-            first.edge, second.edge, z_value, "same-edge", None
+            first.edge, second.edge, z_value, "same-edge", None, None
         )
     vertex = _shared_vertex(first.edge, second.edge)
     if vertex is None or grid is None:
@@ -258,9 +270,23 @@ def _endpoint_agreement(
         )
         return distance / math.sqrt(variance)
 
+    def corner_fraction(crossing: object) -> float:
+        start, stop = crossing.edge.endpoint_vertices()
+        if vertex == start:
+            return float(crossing.t)
+        if vertex == stop:
+            return 1.0 - float(crossing.t)
+        raise RuntimeError("candidate corner is not incident to its edge")
+
+    maximum_fraction = max(corner_fraction(first), corner_fraction(second))
     z_value = math.hypot(corner_z(first), corner_z(second))
     return EndpointAgreement(
-        first.edge, second.edge, z_value, "shared-corner", vertex
+        first.edge,
+        second.edge,
+        z_value,
+        "shared-corner",
+        vertex,
+        maximum_fraction,
     )
 
 
@@ -317,6 +343,12 @@ def match_face_traces(
             chi_square_terms.append(endpoint.z**2)
             if endpoint.z > resolved.maximum_endpoint_z:
                 failures.append("endpoint")
+            if (
+                endpoint.maximum_corner_distance_fraction is not None
+                and endpoint.maximum_corner_distance_fraction
+                > resolved.maximum_corner_snap_fraction
+            ):
+                failures.append("corner-snap")
 
     normal_angle = axial_angle_radians(
         first_estimate.normal_xyz, second_estimate.normal_xyz

@@ -59,6 +59,11 @@ def reconstruct_retained_join(
         second.estimate,
         TraceMatchSettings(
             orthogonal_fiber_equivalence=fiber_quarter_turn is True,
+            # A persisted graph is an immutable declaration, not a fresh
+            # candidate search.  Permit historical corner transitions here so
+            # older artifacts remain readable; every new selector applies the
+            # current physical corner-snap gate before writing a graph.
+            maximum_corner_snap_fraction=1.0,
         ),
         grid=grid,
     )

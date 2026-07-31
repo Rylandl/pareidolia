@@ -4,6 +4,7 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -144,6 +145,7 @@ from backend.cubical.stratigraphic_continuity import (
     PatchFingerprintTable,
     StratigraphicContinuitySettings,
     _calibrate_records,
+    _side_patch_gauges,
     build_patch_fingerprints,
     score_patch_fingerprints,
 )
@@ -601,6 +603,65 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertTrue(score["normalGaugeReversed"])
         self.assertAlmostEqual(score["mismatch"], 0.0, places=6)
 
+    def test_stratigraphic_fingerprint_transports_quarter_turn_fiber_gauge(
+        self,
+    ) -> None:
+        depths = np.arange(-10.0, 11.0, 5.0, dtype=np.float32)
+        density = np.asarray((0.0, 1.0, 0.25, 0.5, 0.0), dtype=np.float32)
+        moment = density * np.asarray(
+            (0.0, -1.0, 1.0, -0.5, 0.0), dtype=np.float32
+        )
+        table = PatchFingerprintTable(
+            patch_id=np.asarray((1, 2), dtype=np.uint64),
+            anchor_valid=np.asarray((True, True)),
+            anchor_shard_index=np.asarray((0, 0), dtype=np.int16),
+            anchor_mode_index=np.asarray((1, 1), dtype=np.int32),
+            anchor_height_residual_voxels=np.zeros(2, dtype=np.float32),
+            anchor_normal_residual_degrees=np.zeros(2, dtype=np.float32),
+            anchor_fiber_residual_degrees=np.zeros(2, dtype=np.float32),
+            context_mode_count=np.asarray((3, 3), dtype=np.uint16),
+            support_low_voxels=np.asarray((-10.0, -10.0), dtype=np.float32),
+            support_high_voxels=np.asarray((10.0, 10.0), dtype=np.float32),
+            normal_xyz=np.asarray(
+                ((0.0, 0.0, 1.0), (0.0, 0.0, 1.0)), dtype=np.float32
+            ),
+            depth_offsets_voxels=depths,
+            density=np.vstack((density, density)),
+            orientation_moment=np.vstack((moment, -moment)),
+        )
+        table.validate()
+        settings = StratigraphicContinuitySettings(
+            minimum_common_depth_span_voxels=5.0
+        )
+        untransported = score_patch_fingerprints(table, 0, 1, settings)
+        transported = score_patch_fingerprints(
+            table, 0, 1, settings, fiber_quarter_turn=True
+        )
+        self.assertGreater(untransported["orientationMismatch"], 0.1)
+        self.assertAlmostEqual(transported["mismatch"], 0.0, places=6)
+
+    def test_stratigraphic_neighborhood_propagates_fiber_frame_parity(
+        self,
+    ) -> None:
+        first = (1, 2, 0, (1, 0, 0))
+        second = (2, 3, 1, (1, 1, 0))
+        adjacency = {
+            1: [(2, first, True)],
+            2: [(1, first, True), (3, second, False)],
+            3: [(2, second, False)],
+        }
+        gauges = _side_patch_gauges(
+            1,
+            None,
+            2,
+            1,
+            True,
+            3,
+            adjacency,
+            {1: (0, 0, 0), 2: (1, 0, 0), 3: (1, 1, 0)},
+        )
+        self.assertEqual(gauges, {1: False, 2: True, 3: True})
+
     def test_full_mode_fingerprint_anchors_selected_plane_exactly(self) -> None:
         grid = GridSpec(
             (1, 1, 1),
@@ -696,6 +757,32 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertFalse(records[38]["rejected"])
         self.assertTrue(records[39]["rejected"])
 
+    def test_stratigraphic_gate_calibrates_on_graph_and_scores_alternatives(
+        self,
+    ) -> None:
+        records = [
+            {
+                "key": (index + 1, index + 101, 0, (index, 0, 0)),
+                "local": {"status": "scored", "mismatch": 0.1},
+                "neighborhood": {"status": "scored", "mismatch": 0.1},
+            }
+            for index in range(40)
+        ]
+        alternative = {
+            "key": (1001, 1002, 0, (41, 0, 0)),
+            "local": {"status": "scored", "mismatch": 0.9},
+            "neighborhood": {"status": "scored", "mismatch": 0.9},
+        }
+        records.append(alternative)
+        calibration = _calibrate_records(
+            records,
+            StratigraphicContinuitySettings(),
+            calibration_keys=frozenset(value["key"] for value in records[:-1]),
+        )
+        self.assertEqual(calibration["0"]["count"], 40)
+        self.assertEqual(calibration["0"]["scoredCount"], 41)
+        self.assertTrue(alternative["rejected"])
+
     def test_axis_aligned_plane_clips_to_four_edge_loop(self) -> None:
         grid = GridSpec((2, 2, 2))
         estimate = PlaneEstimate.isotropic(
@@ -720,8 +807,14 @@ class CubicalGeometryTests(unittest.TestCase):
 
     def test_tangent_atlas_preserves_a_perforated_planar_component(self) -> None:
         grid = GridSpec((3, 3, 1))
+        first_patch_id = 1 << 63
         patches = tuple(
-            self._horizontal_patch(grid, (x, y, 0), 0.0, 10 + 3 * y + x)
+            self._horizontal_patch(
+                grid,
+                (x, y, 0),
+                0.0,
+                first_patch_id + 3 * y + x,
+            )
             for y in range(3)
             for x in range(3)
             if (x, y) != (1, 1)
@@ -743,6 +836,7 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(mesh.statistics["chartCycleSeamEdges"], 1)
         self.assertEqual(chart.statistics["flippedTriangles"], 0)
         self.assertEqual(raster.statistics["nonadjacentOverlapPixels"], 0)
+        self.assertEqual(raster.patch_id.dtype, np.dtype(np.uint64))
         self.assertEqual(set(np.unique(raster.patch_id[raster.mask])), set(component.patch_ids))
 
     def test_flattened_depth_stack_uses_one_fixed_native_ct_offset(self) -> None:
@@ -1164,6 +1258,67 @@ class CubicalGeometryTests(unittest.TestCase):
         self.assertEqual(len(corner), 1)
         self.assertIsNone(corner[0].edge)
         np.testing.assert_allclose(corner[0].point_xyz, (1.0, 1.0, 1.0))
+
+    def test_uncertainty_cannot_snap_a_crossing_past_an_edge_midpoint(self) -> None:
+        grid = GridSpec((2, 1, 1))
+        first = clip_plane_to_cell(
+            grid,
+            (0, 0, 0),
+            PlaneEstimate.isotropic(
+                (0.0, 0.0, 1.0),
+                -0.3,
+                angular_std_radians=1.0,
+                height_std=1.0,
+                fiber_xyz=(1.0, 0.0, 0.0),
+                fiber_angular_std_radians=1.0,
+            ),
+            patch_id=1,
+        )
+        normal = np.asarray((0.0, -4.0, 1.0), dtype=np.float64)
+        normal /= np.linalg.norm(normal)
+        center = grid.cell_center_world((1, 0, 0))
+        point = np.asarray((1.0, 0.0, 0.2), dtype=np.float64)
+        second = clip_plane_to_cell(
+            grid,
+            (1, 0, 0),
+            PlaneEstimate.isotropic(
+                normal,
+                float(np.dot(normal, point - center)),
+                angular_std_radians=1.0,
+                height_std=1.0,
+                fiber_xyz=(1.0, 0.0, 0.0),
+                fiber_angular_std_radians=1.0,
+            ),
+            patch_id=2,
+        )
+        assert first is not None and second is not None
+        face = cell_face((0, 0, 0), 0, 1)
+        match = match_face_traces(
+            first.trace_on(face),  # type: ignore[arg-type]
+            first.estimate,
+            second.trace_on(face),  # type: ignore[arg-type]
+            second.estimate,
+            grid=grid,
+        )
+        self.assertFalse(match.accepted)
+        self.assertEqual(match.failure_reasons, ("corner-snap",))
+        corner = next(
+            value
+            for value in match.endpoint_agreements
+            if value.mode == "shared-corner"
+        )
+        self.assertAlmostEqual(
+            float(corner.maximum_corner_distance_fraction), 0.8
+        )
+        permissive = match_face_traces(
+            first.trace_on(face),  # type: ignore[arg-type]
+            first.estimate,
+            second.trace_on(face),  # type: ignore[arg-type]
+            second.estimate,
+            TraceMatchSettings(maximum_corner_snap_fraction=1.0),
+            grid=grid,
+        )
+        self.assertTrue(permissive.accepted)
 
     def test_block_assembly_welds_four_incident_cell_observations(self) -> None:
         grid = GridSpec((2, 2, 1))
@@ -2787,6 +2942,37 @@ class CubicalGeometryTests(unittest.TestCase):
             [value.reason for value in selection.deferred_joins],
             ["component-layer-exclusion"],
         )
+
+    def test_sheet_graph_rejects_odd_quarter_turn_fiber_cycle(self) -> None:
+        grid = GridSpec((2, 2, 1))
+        patches = tuple(
+            self._horizontal_patch(grid, (x, y, 0), 0.0, 1 + 2 * y + x)
+            for y in range(2)
+            for x in range(2)
+        )
+        block = assemble_surface_block(
+            grid,
+            BlockBounds((0, 0, 0), grid.shape_cells_xyz),
+            patches,
+        )
+        odd_cycle = tuple(
+            replace(value, fiber_quarter_turn=index < 3)
+            for index, value in enumerate(block.joins)
+        )
+        odd_selection = select_surface_joins(patches, odd_cycle)
+        even_cycle = tuple(
+            replace(value, fiber_quarter_turn=index < 2)
+            for index, value in enumerate(block.joins)
+        )
+        even_selection = select_surface_joins(patches, even_cycle)
+
+        self.assertEqual(len(block.joins), 4)
+        self.assertEqual(len(odd_selection.joins), 3)
+        self.assertEqual(
+            [value.reason for value in odd_selection.deferred_joins],
+            ["fiber-frame-parity-cycle"],
+        )
+        self.assertEqual(len(even_selection.joins), 4)
 
     def test_foldback_exclusion_blocks_an_indirect_sheet_path(self) -> None:
         grid = GridSpec((3, 1, 1))

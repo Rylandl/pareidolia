@@ -26,13 +26,18 @@ the geometry and composition layers operate only on their declared contracts.
   Matching preserves the ordered trace sequence and never assigns an absolute
   normal side. Endpoints normally share a global edge. Two adjacent edges may
   instead meet through their shared grid vertex when both posterior crossing
-  distributions support that corner.
+  distributions support that corner and each observation lies in the half of
+  its edge owned by that nearest endpoint. Covariance may soften the residual;
+  it may not move a crossing past the edge midpoint to a distant corner.
 - Up to four incident cells can observe one physical crossing of a global grid
   edge. Accepted face joins weld those observations into one latent crossing.
 - Pairwise-compatible corner transitions are processed in descending evidence
   order. A join is deferred if its transitive crossing group has no common edge
   or vertex, or if it would put two locally planar patches from one cell in one
   surface component.
+- Retained cycles must satisfy two independent binary gauges: polygon loops
+  remain orientable, and explicit strict/quarter-turn fiber relations are
+  path-independent. Fiber direction itself remains unsigned.
 - A macro block retains both its exterior trace graph and the mapping from each
   trace to an interior surface component. Boundary geometry alone is not a
   sufficient hierarchical summary.

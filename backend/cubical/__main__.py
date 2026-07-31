@@ -594,6 +594,7 @@ def _flatten_components(args: argparse.Namespace) -> None:
             args.maximum_chart_normal_deviation
         ),
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
+        source_root=args.source_root,
         surface_graph_root=args.surface_graph,
         join_refinement_root=args.join_refinement,
         stratigraphic_refinement_root=args.stratigraphic_refinement,
@@ -737,6 +738,7 @@ def _restitch_block_sheets(args: argparse.Namespace) -> None:
                 args.layer_exclusion_maximum_normal_angle_degrees
             ),
         ),
+        stratigraphic_candidates_root=args.stratigraphic_candidates,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -1058,6 +1060,8 @@ def _refine_stratigraphic_continuity(args: argparse.Namespace) -> None:
         args.root,
         args.mode_bank,
         args.output,
+        sheet_evidence_root=args.sheet_evidence,
+        candidate_restitch_root=args.candidate_restitch,
         settings=settings,
         join_refinement_root=args.join_refinement,
         leaf_shape_cells_xyz=tuple(args.leaf_shape),
@@ -1663,6 +1667,14 @@ def main() -> None:
         "--leaf-shape", nargs=3, type=int, default=(4, 4, 3)
     )
     flatten_components.add_argument(
+        "--source-root",
+        type=Path,
+        help=(
+            "raw-Acus pipeline or variant chain used only to resolve native "
+            "CT when the selected-patch root is a cropped or restitched graph"
+        ),
+    )
+    flatten_components.add_argument(
         "--surface-graph",
         type=Path,
         help=(
@@ -1716,8 +1728,31 @@ def main() -> None:
         ),
     )
     refine_stratigraphy.add_argument("--root", type=Path, required=True)
-    refine_stratigraphy.add_argument("--mode-bank", type=Path, required=True)
+    stratigraphic_mode_source = refine_stratigraphy.add_mutually_exclusive_group(
+        required=True
+    )
+    stratigraphic_mode_source.add_argument(
+        "--mode-bank",
+        type=Path,
+        help="complete single-pipeline Acus mode bank",
+    )
+    stratigraphic_mode_source.add_argument(
+        "--sheet-evidence",
+        type=Path,
+        help=(
+            "composed block sheet-evidence bank with stable mode IDs; supports "
+            "owned crops and multi-block graphs"
+        ),
+    )
     refine_stratigraphy.add_argument("--output", type=Path, required=True)
+    refine_stratigraphy.add_argument(
+        "--candidate-restitch",
+        type=Path,
+        help=(
+            "complete sheet-restitch candidate universe to score under the "
+            "retained graph calibration"
+        ),
+    )
     refine_stratigraphy.add_argument(
         "--join-refinement",
         type=Path,
@@ -2087,6 +2122,17 @@ def main() -> None:
     sheet_restitch.add_argument("--cluster", type=Path, required=True)
     sheet_restitch.add_argument("--materialized", type=Path, required=True)
     sheet_restitch.add_argument("--output", type=Path, required=True)
+    sheet_restitch.add_argument(
+        "--stratigraphic-candidates",
+        type=Path,
+        action="append",
+        help=(
+            "complete candidate stratigraphic refinement; jointly inconsistent "
+            "local and multicell correspondences are removed before optimization; "
+            "repeat only when an intentionally conservative intersection of "
+            "independent gates is required"
+        ),
+    )
     sheet_restitch.add_argument(
         "--minimum-join-benefit", type=float, default=0.0
     )

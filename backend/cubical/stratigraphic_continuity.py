@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Hashable, Iterable, Mapping
 
 import numpy as np
 
@@ -27,7 +28,12 @@ from .continuity import apply_join_continuity_refinement
 from .geometry import axial_angle_radians
 from .mode_bank import MODE_BANK_SCHEMA, load_mode_bank
 from .stratigraphy import LayerModeTable
+from .surface_graph import read_surface_graph, write_surface_graph
 from .tables import PatchTable, read_patch_shard
+from .topology import GridSpec
+
+if TYPE_CHECKING:
+    from .sheet_evidence import BlockSheetEvidence
 
 
 STRATIGRAPHIC_CONTINUITY_SCHEMA = (
@@ -36,6 +42,7 @@ STRATIGRAPHIC_CONTINUITY_SCHEMA = (
 STRATIGRAPHIC_CONTINUITY_VERSION = 1
 FINGERPRINT_SCHEMA = "pareidolia.cubical-stratigraphic-fingerprints"
 FINGERPRINT_VERSION = 1
+CANDIDATE_CONTINUITY_STEM = "candidate-stratigraphic-continuity-v1"
 
 JoinKey = tuple[int, int, int, tuple[int, int, int]]
 
@@ -219,6 +226,227 @@ def _mode_weight(
         1.0,
     )
     return float(np.prod(terms) ** 0.25)
+
+
+def _sheet_evidence_mode_tables(
+    evidence: BlockSheetEvidence,
+    target_grid: GridSpec,
+) -> dict[str, LayerModeTable]:
+    """Adapt one combined evidence bank into the established fingerprint input.
+
+    Sheet evidence preserves the complete Acus mode measurements, but owned
+    graph crops rebase cell indices while retaining world geometry and stable
+    mode IDs.  This adapter resolves that integer grid translation once and
+    exposes one ordinary mode table, allowing the same fingerprint algorithm
+    to operate on single-bank and composed multi-block evidence.
+    """
+
+    evidence.validate()
+    if (
+        evidence.grid.coordinate_unit != target_grid.coordinate_unit
+        or not np.allclose(
+            evidence.grid.cell_size_xyz,
+            target_grid.cell_size_xyz,
+            atol=1.0e-10,
+            rtol=0.0,
+        )
+    ):
+        raise ValueError("sheet evidence and selected graph use incompatible grids")
+    cell_size = np.asarray(target_grid.cell_size_xyz, dtype=np.float64)
+    offset_float = (
+        np.asarray(target_grid.origin_xyz, dtype=np.float64)
+        - np.asarray(evidence.grid.origin_xyz, dtype=np.float64)
+    ) / cell_size
+    offset = np.rint(offset_float).astype(np.int64)
+    if not np.allclose(offset_float, offset, atol=1.0e-7, rtol=0.0):
+        raise ValueError("sheet evidence and selected graph origins are not cell-aligned")
+
+    arrays = evidence.arrays
+    source_cells = np.asarray(arrays["modeCellXYZ"], dtype=np.int64)
+    target_cells = source_cells - offset[None, :]
+    inside = np.all(target_cells >= 0, axis=1) & np.all(
+        target_cells
+        < np.asarray(target_grid.shape_cells_xyz, dtype=np.int64)[None, :],
+        axis=1,
+    )
+    valid = inside & (np.asarray(arrays["modeGeometryStatus"]) == 0)
+    indices_by_cell: dict[tuple[int, int, int], list[int]] = defaultdict(list)
+    for mode_index in np.flatnonzero(valid):
+        cell = tuple(int(value) for value in target_cells[mode_index])
+        indices_by_cell[cell].append(int(mode_index))
+    cells = tuple(sorted(indices_by_cell))
+    indices = np.asarray(
+        [index for cell in cells for index in indices_by_cell[cell]],
+        dtype=np.int64,
+    )
+    offsets = np.zeros(len(cells) + 1, dtype=np.uint64)
+    for cell_index, cell in enumerate(cells):
+        offsets[cell_index + 1] = offsets[cell_index] + len(indices_by_cell[cell])
+    count = len(indices)
+    table = LayerModeTable(
+        cell_xyz=np.asarray(cells, dtype=np.int32).reshape(len(cells), 3),
+        mode_offset=offsets,
+        normal_hypothesis=np.asarray(
+            arrays["modeNormalHypothesis"][indices], dtype=np.int8
+        ),
+        normal_xyz=np.asarray(arrays["modeNormalXYZ"][indices], dtype=np.float32),
+        height=np.asarray(arrays["modeHeight"][indices], dtype=np.float32),
+        covariance=np.asarray(
+            arrays["modeCovariance"][indices], dtype=np.float32
+        ),
+        fiber_xyz=np.asarray(arrays["modeFiberXYZ"][indices], dtype=np.float32),
+        fiber_angular_std_radians=np.asarray(
+            arrays["modeFiberAngularStdRadians"][indices], dtype=np.float32
+        ),
+        confidence=np.asarray(
+            arrays["modeConfidence"][indices], dtype=np.float32
+        ),
+        source_depth_voxels=np.zeros(count, dtype=np.float32),
+        source_orientation_degrees=np.zeros(count, dtype=np.float32),
+        evidence_score=np.asarray(
+            arrays["modeEvidenceScore"][indices], dtype=np.float32
+        ),
+        material_probability=np.asarray(
+            arrays["modeMaterialProbability"][indices], dtype=np.float32
+        ),
+        effective_support=np.asarray(
+            arrays["modeEffectiveSupport"][indices], dtype=np.float32
+        ),
+    )
+    table.validate()
+    return {"combined-sheet-evidence": table}
+
+
+def _raw_settings_from_sheet_evidence(
+    evidence_root: Path,
+) -> tuple[RawAcusSettings, tuple[dict[str, Any], ...]]:
+    """Resolve and verify the common immutable Acus settings behind a bank.
+
+    Subblock evidence points at its parent contract; the parent records every
+    source saturation bank.  All composed inputs must use identical Acus
+    settings because their depth kernels are compared in one physical frame.
+    """
+
+    current = evidence_root.resolve()
+    visited: set[Path] = set()
+    inputs: list[Mapping[str, Any]] | None = None
+    while inputs is None:
+        if current in visited:
+            raise ValueError("sheet-evidence source chain contains a cycle")
+        visited.add(current)
+        manifest = json.loads((current / "sheet-evidence-v1.json").read_text())
+        identity = manifest.get("identity", {})
+        declared_inputs = identity.get("inputs")
+        if declared_inputs is not None:
+            inputs = list(declared_inputs)
+            break
+        parent = identity.get("sourceRoot")
+        if parent is None:
+            raise ValueError("sheet evidence does not identify its Acus sources")
+        current = Path(parent).resolve()
+
+    records: list[dict[str, Any]] = []
+    settings_records: list[dict[str, Any]] = []
+    for value in inputs:
+        candidate_root = Path(str(value["candidateRoot"])).resolve()
+        variant = json.loads((candidate_root / "variant.json").read_text())
+        variant_identity = variant.get("identity", {})
+        pipeline_root_value = (
+            variant_identity.get("pipelineRoot")
+            or variant.get("pipelineRoot")
+            or variant_identity.get("inputRoot")
+            or variant.get("inputRoot")
+        )
+        if pipeline_root_value is None:
+            raise ValueError("sheet-evidence candidate lacks a pipeline root")
+        pipeline_root, pipeline = resolve_pipeline_manifest(
+            Path(str(pipeline_root_value)).resolve()
+        )
+        settings_record = dict(pipeline["identity"]["settings"])
+        settings_records.append(settings_record)
+        records.append(
+            {
+                "candidateRoot": str(candidate_root),
+                "pipelineRoot": str(pipeline_root),
+                "pipelineIdentitySha256": pipeline["identity"]["identitySha256"],
+                "settingsSha256": canonical_json_hash(settings_record),
+            }
+        )
+    if not settings_records:
+        raise ValueError("sheet evidence contains no source Acus settings")
+    reference = canonical_json_hash(settings_records[0])
+    if any(canonical_json_hash(value) != reference for value in settings_records[1:]):
+        raise ValueError("composed sheet-evidence inputs use different Acus settings")
+    return RawAcusSettings(**settings_records[0]), tuple(records)
+
+
+def _candidate_restitch_source(
+    candidate_root: Path,
+    selected_root: Path,
+) -> dict[str, Any]:
+    """Validate and identify the complete correspondence universe to score."""
+
+    manifest_path = candidate_root / "sheet-restitch-v1.json"
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("schema") != "pareidolia.cubical-sheet-restitch"
+        or manifest.get("state") != "complete"
+    ):
+        raise ValueError("candidate source is not a complete sheet restitch")
+    selected_hashes = {
+        "manifest": sha256_file(selected_root / "selected-patches-v1.json"),
+        "data": sha256_file(selected_root / "selected-patches-v1.npz"),
+    }
+    source_hashes = {
+        "manifest": sha256_file(candidate_root / "selected-patches-v1.json"),
+        "data": sha256_file(candidate_root / "selected-patches-v1.npz"),
+    }
+    if selected_hashes != source_hashes:
+        raise ValueError(
+            "candidate restitch and stratigraphic graph have different patches"
+        )
+    candidate_manifest = candidate_root / "sheet-join-catalog-v1.json"
+    candidate_data = candidate_root / "sheet-join-catalog-v1.npz"
+    return {
+        "kind": "sheet-restitch-candidate-universe",
+        "root": str(candidate_root),
+        "manifestSha256": sha256_file(manifest_path),
+        "candidateManifestSha256": sha256_file(candidate_manifest),
+        "candidateDataSha256": sha256_file(candidate_data),
+        "selectedPatchManifestSha256": source_hashes["manifest"],
+        "selectedPatchDataSha256": source_hashes["data"],
+    }
+
+
+def _candidate_catalog_for_block(
+    candidate_root: Path,
+    block: SurfaceBlock,
+) -> Any:
+    """Reconstruct an auditable candidate catalog under its frozen policy."""
+
+    from .matching import TraceMatchSettings
+    from .sheet_stitching import (
+        SheetMatchingPolicy,
+        SheetStitchingSettings,
+        enumerate_sheet_join_catalog,
+    )
+
+    manifest = json.loads((candidate_root / "sheet-restitch-v1.json").read_text())
+    identity = manifest["identity"]
+    policy_record = identity["policy"]
+    policy = SheetMatchingPolicy(
+        TraceMatchSettings(**policy_record["strictSettings"]),
+        bool(policy_record["quarterTurnEnabled"]),
+        float(policy_record["maximumQuarterTurnNormalDegrees"]),
+        float(policy_record["maximumQuarterTurnFiberDegrees"]),
+    )
+    stitching_settings = SheetStitchingSettings(**identity["settings"])
+    return enumerate_sheet_join_catalog(
+        block,
+        policy,
+        settings=stitching_settings,
+        allow_retained_policy_rejection=False,
+    )
 
 
 def build_patch_fingerprints(
@@ -476,8 +704,16 @@ def score_patch_fingerprints(
     first_patch_index: int,
     second_patch_index: int,
     settings: StratigraphicContinuitySettings | None = None,
+    *,
+    fiber_quarter_turn: bool = False,
 ) -> dict[str, Any]:
-    """Compare two anchored distributions after resolving only their axial gauge."""
+    """Compare anchored distributions after transporting both axial gauges.
+
+    The orientation moment is expressed in each patch's local fiber frame.
+    Rotating that frame by 90 degrees negates ``cos(2 theta)``; a quarter-turn
+    continuation therefore negates the second moment before comparison.  This
+    is a frame-gauge operation, not an orientation sign choice.
+    """
 
     resolved = settings or StratigraphicContinuitySettings()
     if not (
@@ -504,6 +740,8 @@ def score_patch_fingerprints(
     if reverse:
         second_density = second_density[::-1]
         second_moment = second_moment[::-1]
+    if fiber_quarter_turn:
+        second_moment = -second_moment
     score = _score_distributions(
         table.depth_offsets_voxels,
         table.density[first_patch_index],
@@ -524,23 +762,25 @@ def score_patch_fingerprints(
     return {"status": "scored", "normalGaugeReversed": reverse, **score}
 
 
-def _side_patch_ids(
+def _side_patch_gauges(
     start_patch_id: int,
-    excluded_join_index: int,
+    excluded_join_key: Hashable | None,
     face_axis: int,
     face_coordinate: int,
     lower_side: bool,
     radius: int,
-    adjacency: Mapping[int, list[tuple[int, int]]],
+    adjacency: Mapping[int, list[tuple[int, Hashable, bool]]],
     cell_by_patch: Mapping[int, tuple[int, int, int]],
-) -> set[int]:
-    visited = {start_patch_id}
+    *,
+    start_fiber_quarter_turn: bool = False,
+) -> dict[int, bool]:
+    gauge = {start_patch_id: start_fiber_quarter_turn}
     frontier = {start_patch_id}
     for _ in range(radius):
         following: set[int] = set()
         for patch_id in frontier:
-            for neighbor_id, join_index in adjacency[patch_id]:
-                if join_index == excluded_join_index or neighbor_id in visited:
+            for neighbor_id, join_key, quarter_turn in adjacency[patch_id]:
+                if join_key == excluded_join_key:
                     continue
                 coordinate = cell_by_patch[neighbor_id][face_axis]
                 inside = (
@@ -549,22 +789,29 @@ def _side_patch_ids(
                     else coordinate >= face_coordinate
                 )
                 if inside:
+                    neighbor_gauge = gauge[patch_id] ^ quarter_turn
+                    if neighbor_id in gauge:
+                        if gauge[neighbor_id] != neighbor_gauge:
+                            raise ValueError(
+                                "sheet neighborhood has contradictory fiber-frame parity"
+                            )
+                        continue
+                    gauge[neighbor_id] = neighbor_gauge
                     following.add(neighbor_id)
-        visited.update(following)
         frontier = following
-    return visited
+    return gauge
 
 
 def _aggregate_fingerprints(
     table: PatchFingerprintTable,
-    patch_indices: list[int],
+    patch_indices_and_fiber_gauges: list[tuple[int, bool]],
     reference_normal: np.ndarray,
     settings: StratigraphicContinuitySettings,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | None:
     densities: list[np.ndarray] = []
     moments: list[np.ndarray] = []
     supports: list[np.ndarray] = []
-    for patch_index in patch_indices:
+    for patch_index, fiber_quarter_turn in patch_indices_and_fiber_gauges:
         if not bool(table.anchor_valid[patch_index]) or int(
             table.context_mode_count[patch_index]
         ) < settings.minimum_context_modes:
@@ -578,6 +825,8 @@ def _aggregate_fingerprints(
         if reverse:
             density = density[::-1]
             moment = moment[::-1]
+        if fiber_quarter_turn:
+            moment = -moment
         mass = float(np.sum(density[support]))
         if mass <= 1.0e-10:
             continue
@@ -595,15 +844,15 @@ def _aggregate_fingerprints(
 
 
 def _score_join_neighborhood(
-    join_index: int,
+    match: Any,
+    excluded_join_key: JoinKey | None,
     block: SurfaceBlock,
     fingerprint_table: PatchFingerprintTable,
     fingerprint_index_by_patch: Mapping[int, int],
-    adjacency: Mapping[int, list[tuple[int, int]]],
+    adjacency: Mapping[int, list[tuple[int, JoinKey, bool]]],
     cell_by_patch: Mapping[int, tuple[int, int, int]],
     settings: StratigraphicContinuitySettings,
 ) -> dict[str, Any]:
-    match = block.joins[join_index]
     first_cell = cell_by_patch[match.first_patch_id]
     second_cell = cell_by_patch[match.second_patch_id]
     face_coordinate = match.face.anchor_xyz[match.face.axis]
@@ -611,9 +860,9 @@ def _score_join_neighborhood(
     second_lower = second_cell[match.face.axis] < face_coordinate
     if first_lower == second_lower:
         raise ValueError("joined patches do not lie on opposite sides of their face")
-    first_ids = _side_patch_ids(
+    first_gauges = _side_patch_gauges(
         match.first_patch_id,
-        join_index,
+        excluded_join_key,
         match.face.axis,
         face_coordinate,
         first_lower,
@@ -621,28 +870,35 @@ def _score_join_neighborhood(
         adjacency,
         cell_by_patch,
     )
-    second_ids = _side_patch_ids(
+    second_gauges = _side_patch_gauges(
         match.second_patch_id,
-        join_index,
+        excluded_join_key,
         match.face.axis,
         face_coordinate,
         second_lower,
         settings.neighborhood_radius_hops,
         adjacency,
         cell_by_patch,
+        start_fiber_quarter_turn=bool(match.fiber_quarter_turn),
     )
     reference_normal = fingerprint_table.normal_xyz[
         fingerprint_index_by_patch[match.first_patch_id]
     ]
     first = _aggregate_fingerprints(
         fingerprint_table,
-        [fingerprint_index_by_patch[value] for value in sorted(first_ids)],
+        [
+            (fingerprint_index_by_patch[value], first_gauges[value])
+            for value in sorted(first_gauges)
+        ],
         reference_normal,
         settings,
     )
     second = _aggregate_fingerprints(
         fingerprint_table,
-        [fingerprint_index_by_patch[value] for value in sorted(second_ids)],
+        [
+            (fingerprint_index_by_patch[value], second_gauges[value])
+            for value in sorted(second_gauges)
+        ],
         reference_normal,
         settings,
     )
@@ -701,9 +957,18 @@ def score_stratigraphic_continuity(
     fingerprints: PatchFingerprintTable,
     settings: StratigraphicContinuitySettings | None = None,
     *,
+    matches: Iterable[Any] | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Score retained joins locally and from independent half-space neighborhoods."""
+    """Score joins locally and from independent half-space neighborhoods.
+
+    ``block`` is the frozen context graph.  By default its retained joins are
+    scored exactly as before.  Supplying ``matches`` evaluates a complete
+    candidate universe against that same context: an already-retained edge is
+    removed while its two sides are aggregated, whereas an alternative edge
+    compares the existing half-space neighborhoods without pretending that
+    the candidate has already been selected.
+    """
 
     resolved = settings or StratigraphicContinuitySettings()
     fingerprint_index = {
@@ -718,22 +983,33 @@ def score_stratigraphic_continuity(
         patch_id: tuple(int(value) for value in patches.cell_xyz[index])
         for patch_id, index in patch_index.items()
     }
-    adjacency: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    for join_index, match in enumerate(block.joins):
-        adjacency[match.first_patch_id].append((match.second_patch_id, join_index))
-        adjacency[match.second_patch_id].append((match.first_patch_id, join_index))
+    retained_keys = {_join_key(value) for value in block.joins}
+    adjacency: dict[int, list[tuple[int, JoinKey, bool]]] = defaultdict(list)
+    for retained_match in block.joins:
+        key = _join_key(retained_match)
+        quarter_turn = bool(retained_match.fiber_quarter_turn)
+        adjacency[retained_match.first_patch_id].append(
+            (retained_match.second_patch_id, key, quarter_turn)
+        )
+        adjacency[retained_match.second_patch_id].append(
+            (retained_match.first_patch_id, key, quarter_turn)
+        )
 
     records: list[dict[str, Any]] = []
-    total = len(block.joins)
-    for join_index, match in enumerate(block.joins):
+    scored_matches = tuple(block.joins if matches is None else matches)
+    total = len(scored_matches)
+    for match_index, match in enumerate(scored_matches):
+        key = _join_key(match)
         local = score_patch_fingerprints(
             fingerprints,
             fingerprint_index[match.first_patch_id],
             fingerprint_index[match.second_patch_id],
             resolved,
+            fiber_quarter_turn=bool(match.fiber_quarter_turn),
         )
         neighborhood = _score_join_neighborhood(
-            join_index,
+            match,
+            key if key in retained_keys else None,
             block,
             fingerprints,
             fingerprint_index,
@@ -743,14 +1019,15 @@ def score_stratigraphic_continuity(
         )
         records.append(
             {
-                "key": _join_key(match),
+                "key": key,
+                "currentlyRetained": key in retained_keys,
                 "geometryScore": float(match.score),
                 "local": local,
                 "neighborhood": neighborhood,
             }
         )
         if progress is not None:
-            progress(join_index + 1, total)
+            progress(match_index + 1, total)
     records.sort(key=lambda value: value["key"])
     return records
 
@@ -766,32 +1043,43 @@ def _mismatch_transform(value: float) -> float:
 
 
 def _calibrate_records(
-    records: list[dict[str, Any]], settings: StratigraphicContinuitySettings
+    records: list[dict[str, Any]],
+    settings: StratigraphicContinuitySettings,
+    *,
+    calibration_keys: frozenset[JoinKey] | None = None,
 ) -> dict[str, Any]:
     calibration: dict[str, Any] = {}
     for axis in range(3):
-        selected = [
+        scored = [
             value
             for value in records
             if value["key"][2] == axis
             and value["local"]["status"] == "scored"
             and value["neighborhood"]["status"] == "scored"
         ]
-        if len(selected) < settings.minimum_calibration_joins:
+        calibrators = [
+            value
+            for value in scored
+            if calibration_keys is None or value["key"] in calibration_keys
+        ]
+        if len(calibrators) < settings.minimum_calibration_joins:
             calibration[str(axis)] = {
                 "state": "insufficient-sample",
-                "count": len(selected),
+                "count": len(calibrators),
                 "minimumCount": settings.minimum_calibration_joins,
             }
             continue
         local_values = np.asarray(
-            [_mismatch_transform(value["local"]["mismatch"]) for value in selected],
+            [
+                _mismatch_transform(value["local"]["mismatch"])
+                for value in calibrators
+            ],
             dtype=np.float64,
         )
         neighborhood_values = np.asarray(
             [
                 _mismatch_transform(value["neighborhood"]["mismatch"])
-                for value in selected
+                for value in calibrators
             ],
             dtype=np.float64,
         )
@@ -803,7 +1091,8 @@ def _calibrate_records(
         )
         calibration[str(axis)] = {
             "state": "calibrated",
-            "count": len(selected),
+            "count": len(calibrators),
+            "scoredCount": len(scored),
             "transform": "negative log similarity",
             "local": {
                 "median": round(local_center, 7),
@@ -824,7 +1113,7 @@ def _calibrate_records(
                 ),
             },
         }
-        for value in selected:
+        for value in scored:
             local_z = (
                 _mismatch_transform(value["local"]["mismatch"]) - local_center
             ) / local_scale
@@ -874,7 +1163,10 @@ def _write_fingerprint_artifact(
         "model": {
             "anchor": "selected patch matched to its exact same-family full-bank mode",
             "depth": "signed relative distance along the selected patch normal gauge",
-            "orientation": "axial fiber agreement relative to the anchor fiber",
+            "orientation": (
+                "axial second-harmonic fiber agreement relative to the anchor; "
+                "quarter-turn joins transport its sign as a Z2 frame gauge"
+            ),
             "weight": (
                 "geometric mean of mode evidence, material probability, confidence, "
                 "and effective-support saturation"
@@ -1054,6 +1346,10 @@ def _write_join_table(path: Path, records: list[dict[str, Any]]) -> None:
                 ],
                 dtype=np.float32,
             ),
+            currentlyRetained=np.asarray(
+                [value.get("currentlyRetained", True) for value in records],
+                dtype=bool,
+            ),
             retained=np.asarray(
                 [not value["rejected"] for value in records], dtype=bool
             ),
@@ -1067,9 +1363,11 @@ def _resolve_pipeline(root: Path) -> tuple[Path, dict[str, Any]]:
 
 def _identity(
     root: Path,
-    mode_bank_root: Path,
+    mode_source: Mapping[str, Any],
+    raw_settings: RawAcusSettings,
     settings: StratigraphicContinuitySettings,
     join_refinement_root: Path | None,
+    candidate_source: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     implementation_root = Path(__file__).resolve().parent
     payload: dict[str, Any] = {
@@ -1078,23 +1376,38 @@ def _identity(
         "inputRoot": str(root),
         "inputPatchManifestSha256": sha256_file(root / "selected-patches-v1.json"),
         "inputPatchDataSha256": sha256_file(root / "selected-patches-v1.npz"),
-        "modeBankRoot": str(mode_bank_root),
-        "modeBankManifestSha256": sha256_file(mode_bank_root / "mode-bank.json"),
+        "inputSurfaceGraph": (
+            {
+                "manifestSha256": sha256_file(root / "surface-graph-v1.json"),
+                "dataSha256": sha256_file(root / "surface-graph-v1.npz"),
+            }
+            if (root / "surface-graph-v1.json").is_file()
+            else None
+        ),
+        "modeSource": dict(mode_source),
+        "rawAcusSettings": asdict(raw_settings),
         "settings": settings.record(),
         "joinRefinementRoot": (
             str(join_refinement_root) if join_refinement_root is not None else None
+        ),
+        "candidateSource": (
+            dict(candidate_source) if candidate_source is not None else None
         ),
         "implementationSha256": {
             name: sha256_file(implementation_root / name)
             for name in (
                 "stratigraphic_continuity.py",
                 "mode_bank.py",
+                "sheet_evidence.py",
                 "stratigraphy.py",
                 "block.py",
                 "continuity.py",
                 "contracts.py",
                 "geometry.py",
+                "surface_graph.py",
                 "tables.py",
+                "matching.py",
+                "sheet_stitching.py",
             )
         },
     }
@@ -1144,9 +1457,11 @@ def _percentiles(values: list[float]) -> dict[str, float] | None:
 
 def run_stratigraphic_continuity_refinement(
     input_root: str | Path,
-    mode_bank_root: str | Path,
+    mode_bank_root: str | Path | None,
     output_root: str | Path,
     *,
+    sheet_evidence_root: str | Path | None = None,
+    candidate_restitch_root: str | Path | None = None,
     settings: StratigraphicContinuitySettings | None = None,
     join_refinement_root: str | Path | None = None,
     leaf_shape_cells_xyz: tuple[int, int, int] = (4, 4, 3),
@@ -1154,34 +1469,107 @@ def run_stratigraphic_continuity_refinement(
     fingerprint_progress: Callable[[int, int], None] | None = None,
     join_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Refine joins only when local and multi-cell mode-bank signatures disagree."""
+    """Refine joins only when local and multi-cell Acus signatures disagree.
+
+    Exactly one complete mode source is required. ``mode_bank_root`` preserves
+    the original single-pipeline path; ``sheet_evidence_root`` consumes the
+    composed stable-ID bank used by block-level inference.  An optional frozen
+    restitch source expands the same test from retained joins to every
+    geometrically admissible correspondence without changing its calibration
+    population.
+    """
 
     started = time.monotonic()
     resolved = settings or StratigraphicContinuitySettings()
     root = Path(input_root).resolve()
-    bank_root = Path(mode_bank_root).resolve()
+    bank_root = (
+        Path(mode_bank_root).resolve() if mode_bank_root is not None else None
+    )
+    evidence_root = (
+        Path(sheet_evidence_root).resolve()
+        if sheet_evidence_root is not None
+        else None
+    )
+    if (bank_root is None) == (evidence_root is None):
+        raise ValueError("choose exactly one mode bank or sheet-evidence source")
     output = Path(output_root).resolve()
     prior_root = (
         Path(join_refinement_root).resolve()
         if join_refinement_root is not None
         else None
     )
-    if output in (root, bank_root):
-        raise ValueError("stratigraphic output must differ from its inputs")
-    _, pipeline = _resolve_pipeline(root)
-    bank_manifest = json.loads((bank_root / "mode-bank.json").read_text())
-    if (
-        bank_manifest.get("schema") != MODE_BANK_SCHEMA
-        or bank_manifest.get("state") != "complete"
-    ):
-        raise ValueError("stratigraphic continuity requires a complete mode bank")
-    pipeline_identity = str(pipeline["identity"]["identitySha256"])
-    if (
-        bank_manifest["identity"]["inputPipelineIdentitySha256"]
-        != pipeline_identity
-    ):
-        raise ValueError("mode bank and selected reconstruction have different inputs")
-    identity = _identity(root, bank_root, resolved, prior_root)
+    candidate_root = (
+        Path(candidate_restitch_root).resolve()
+        if candidate_restitch_root is not None
+        else None
+    )
+    mode_root = bank_root if bank_root is not None else evidence_root
+    assert mode_root is not None
+    input_roots = {root, mode_root}
+    if prior_root is not None:
+        input_roots.add(prior_root)
+    if candidate_root is not None:
+        input_roots.add(candidate_root)
+    if output in input_roots:
+        raise ValueError("stratigraphic output must differ from every input root")
+    candidate_source = (
+        _candidate_restitch_source(candidate_root, root)
+        if candidate_root is not None
+        else None
+    )
+    evidence: BlockSheetEvidence | None = None
+    source_pipeline_records: tuple[dict[str, Any], ...] = tuple()
+    if bank_root is not None:
+        _, pipeline = _resolve_pipeline(root)
+        bank_manifest = json.loads((bank_root / "mode-bank.json").read_text())
+        if (
+            bank_manifest.get("schema") != MODE_BANK_SCHEMA
+            or bank_manifest.get("state") != "complete"
+        ):
+            raise ValueError("stratigraphic continuity requires a complete mode bank")
+        pipeline_identity = str(pipeline["identity"]["identitySha256"])
+        if (
+            bank_manifest["identity"]["inputPipelineIdentitySha256"]
+            != pipeline_identity
+        ):
+            raise ValueError("mode bank and selected reconstruction have different inputs")
+        raw_settings = RawAcusSettings(**pipeline["identity"]["settings"])
+        mode_source = {
+            "kind": "mode-bank",
+            "root": str(bank_root),
+            "manifestSha256": sha256_file(bank_root / "mode-bank.json"),
+        }
+    else:
+        assert evidence_root is not None
+        from .sheet_evidence import read_block_sheet_evidence
+
+        evidence = read_block_sheet_evidence(evidence_root, verify=True)
+        raw_settings, source_pipeline_records = _raw_settings_from_sheet_evidence(
+            evidence_root
+        )
+        evidence_manifest = evidence_root / "sheet-evidence-v1.json"
+        evidence_data = evidence_root / str(evidence.manifest["data"]["path"])
+        mode_source = {
+            "kind": "block-sheet-evidence",
+            "root": str(evidence_root),
+            "manifestSha256": sha256_file(evidence_manifest),
+            "dataSha256": sha256_file(evidence_data),
+            "modePatchManifestSha256": sha256_file(
+                evidence_root / "mode-patches-v1.json"
+            ),
+            "modePatchDataSha256": sha256_file(
+                evidence_root / "mode-patches-v1.npz"
+            ),
+            "sourcePipelines": list(source_pipeline_records),
+        }
+    identity = _identity(
+        root,
+        mode_source,
+        raw_settings,
+        resolved,
+        prior_root,
+        candidate_source,
+    )
     identity_sha256 = str(identity["identitySha256"])
     manifest_path = output / "stratigraphic-refinement.json"
     if manifest_path.is_file():
@@ -1201,24 +1589,52 @@ def run_stratigraphic_continuity_refinement(
         "state": "assembling",
         "identity": identity,
         "inputRoot": str(root),
-        "modeBankRoot": str(bank_root),
+        "modeBankRoot": str(bank_root) if bank_root is not None else None,
+        "sheetEvidenceRoot": (
+            str(evidence_root) if evidence_root is not None else None
+        ),
         "joinRefinementRoot": str(prior_root) if prior_root is not None else None,
+        "candidateRestitchRoot": (
+            str(candidate_root) if candidate_root is not None else None
+        ),
     }
     atomic_json(manifest_path, manifest)
 
     patches = read_patch_shard(root / "selected-patches-v1", verify=True)
-    baseline = assemble_surface_hierarchy(
-        patches.grid,
-        BlockBounds((0, 0, 0), patches.grid.shape_cells_xyz),
-        patches.to_patches(),
-        maximum_leaf_shape_cells_xyz=leaf_shape_cells_xyz,
-    )
+    if (root / "surface-graph-v1.json").is_file():
+        baseline = read_surface_graph(root, table=patches, verify=True)
+    else:
+        baseline = assemble_surface_hierarchy(
+            patches.grid,
+            BlockBounds((0, 0, 0), patches.grid.shape_cells_xyz),
+            patches.to_patches(),
+            maximum_leaf_shape_cells_xyz=leaf_shape_cells_xyz,
+        )
     if prior_root is not None:
         baseline = apply_join_continuity_refinement(baseline, prior_root)
     manifest["state"] = "fingerprinting"
     atomic_json(manifest_path, manifest)
-    _, mode_tables = load_mode_bank(bank_root, verify=True)
-    raw_settings = RawAcusSettings(**pipeline["identity"]["settings"])
+    if bank_root is not None:
+        _, mode_tables = load_mode_bank(bank_root, verify=True)
+        shard_ids = sorted(mode_tables)
+    else:
+        assert evidence is not None
+        valid_mode_ids = {
+            int(value)
+            for value, status in zip(
+                evidence.arrays["modeId"],
+                evidence.arrays["modeGeometryStatus"],
+            )
+            if int(status) == 0
+        }
+        missing_ids = {int(value) for value in patches.patch_id} - valid_mode_ids
+        if missing_ids:
+            raise ValueError(
+                "selected graph contains patches absent from sheet evidence: "
+                f"{sorted(missing_ids)[:2]}"
+            )
+        mode_tables = _sheet_evidence_mode_tables(evidence, patches.grid)
+        shard_ids = sorted(mode_tables)
     fingerprints, fingerprint_statistics = build_patch_fingerprints(
         patches,
         mode_tables,
@@ -1230,20 +1646,78 @@ def run_stratigraphic_continuity_refinement(
         output / "patch-stratigraphic-fingerprints-v1",
         fingerprints,
         identity_sha256=identity_sha256,
-        shard_ids=sorted(mode_tables),
+        shard_ids=shard_ids,
         statistics=fingerprint_statistics,
     )
 
     manifest["state"] = "scoring"
     atomic_json(manifest_path, manifest)
-    records = score_stratigraphic_continuity(
-        baseline,
-        patches,
-        fingerprints,
-        resolved,
-        progress=join_progress,
-    )
-    calibration = _calibrate_records(records, resolved)
+    baseline_keys = frozenset(_join_key(value) for value in baseline.joins)
+    candidate_records: list[dict[str, Any]] | None = None
+    candidate_table_path: Path | None = None
+    candidate_statistics: dict[str, Any] | None = None
+    if candidate_root is not None:
+        catalog = _candidate_catalog_for_block(candidate_root, baseline)
+        candidate_records = score_stratigraphic_continuity(
+            baseline,
+            patches,
+            fingerprints,
+            resolved,
+            matches=(value.match for value in catalog.candidates),
+            progress=join_progress,
+        )
+        calibration = _calibrate_records(
+            candidate_records,
+            resolved,
+            calibration_keys=baseline_keys,
+        )
+        candidate_by_key = {
+            value["key"]: value for value in candidate_records
+        }
+        missing_baseline = baseline_keys - set(candidate_by_key)
+        if missing_baseline:
+            raise ValueError(
+                "candidate universe omits retained stratigraphic joins: "
+                f"{sorted(missing_baseline)[:2]}"
+            )
+        records = [candidate_by_key[key] for key in sorted(baseline_keys)]
+        candidate_table_path = output / f"{CANDIDATE_CONTINUITY_STEM}.npz"
+        _write_join_table(candidate_table_path, candidate_records)
+        candidate_statistics = {
+            **catalog.statistics(),
+            "localScoredCandidates": sum(
+                value["local"]["status"] == "scored"
+                for value in candidate_records
+            ),
+            "neighborhoodScoredCandidates": sum(
+                value["neighborhood"]["status"] == "scored"
+                for value in candidate_records
+            ),
+            "jointlyCalibratedCandidates": sum(
+                value["localRobustOutlierZ"] is not None
+                for value in candidate_records
+            ),
+            "rejectedCandidates": sum(
+                value["rejected"] for value in candidate_records
+            ),
+            "rejectedRetainedJoins": sum(
+                value["rejected"] and value["currentlyRetained"]
+                for value in candidate_records
+            ),
+            "rejectedAlternativeCandidates": sum(
+                value["rejected"] and not value["currentlyRetained"]
+                for value in candidate_records
+            ),
+        }
+    else:
+        records = score_stratigraphic_continuity(
+            baseline,
+            patches,
+            fingerprints,
+            resolved,
+            progress=join_progress,
+        )
+        calibration = _calibrate_records(records, resolved)
     record_by_key = {value["key"]: value for value in records}
     retained = [
         match
@@ -1253,6 +1727,32 @@ def run_stratigraphic_continuity_refinement(
     refined = rebuild_surface_block(baseline, retained)
     table_path = output / "join-stratigraphic-continuity-v1.npz"
     _write_join_table(table_path, records)
+    table_sha256 = sha256_file(table_path)
+
+    # A refinement is itself a complete, reusable graph checkpoint.  Keeping
+    # the filtered graph beside its scoring table avoids an implicit
+    # "input graph + modifier" state and lets another fixed-point round consume
+    # the exact output directly.  Copy through a temporary path so interruption
+    # cannot leave a half-written patch artifact behind.
+    for name in ("selected-patches-v1.json", "selected-patches-v1.npz"):
+        source_path = root / name
+        target_path = output / name
+        temporary_path = target_path.with_suffix(target_path.suffix + ".tmp")
+        shutil.copyfile(source_path, temporary_path)
+        temporary_path.replace(target_path)
+    graph_manifest = write_surface_graph(
+        output,
+        refined,
+        semantics=(
+            "fixed selected Acus patch geometry after joint local and "
+            "multicell complete-mode stratigraphic outlier rejection"
+        ),
+        provenance={
+            "inputRoot": str(root),
+            "stratigraphicRefinementIdentitySha256": identity_sha256,
+            "stratigraphicJoinTableSha256": table_sha256,
+        },
+    )
 
     baseline_component = dict(baseline.component_by_patch)
     refined_component = dict(refined.component_by_patch)
@@ -1330,12 +1830,42 @@ def run_stratigraphic_continuity_refinement(
         for value in records
         if value["neighborhood"]["status"] == "scored"
     ]
+    artifacts: dict[str, Any] = {
+        "fingerprints": fingerprint_manifest["data"]["path"],
+        "fingerprintManifest": "patch-stratigraphic-fingerprints-v1.json",
+        "fingerprintSha256": fingerprint_manifest["data"]["sha256"],
+        "joinTable": table_path.name,
+        "joinTableSha256": table_sha256,
+        "selectedPatches": {
+            "manifest": "selected-patches-v1.json",
+            "manifestSha256": sha256_file(output / "selected-patches-v1.json"),
+            "data": "selected-patches-v1.npz",
+            "dataSha256": sha256_file(output / "selected-patches-v1.npz"),
+        },
+        "surfaceGraph": {
+            "manifest": "surface-graph-v1.json",
+            "manifestSha256": sha256_file(output / "surface-graph-v1.json"),
+            "data": graph_manifest["data"],
+        },
+    }
+    if candidate_table_path is not None:
+        artifacts.update(
+            {
+                "candidateJoinTable": candidate_table_path.name,
+                "candidateJoinTableSha256": sha256_file(candidate_table_path),
+            }
+        )
     summary: dict[str, Any] = {
         "schema": "pareidolia.cubical-stratigraphic-continuity-summary",
         "version": 1,
         "identitySha256": identity_sha256,
         "inputRoot": str(root),
-        "modeBankRoot": str(bank_root),
+        "modeBankRoot": str(bank_root) if bank_root is not None else None,
+        "sheetEvidenceRoot": (
+            str(evidence_root) if evidence_root is not None else None
+        ),
+        "modeSource": mode_source,
+        "candidateSource": candidate_source,
         "joinRefinementRoot": str(prior_root) if prior_root is not None else None,
         "method": (
             "anchor every selected patch in the complete same-family Acus mode bank; "
@@ -1344,7 +1874,9 @@ def run_stratigraphic_continuity_refinement(
             "outer-tail disagreement at both scales"
         ),
         "directions": (
-            "normal and fiber remain axial; pairwise normal sign is only a depth-order gauge"
+            "normal and fiber axes remain unsigned; normal sign transports depth "
+            "order, while quarter-turn joins transport the cos(2 theta) orientation "
+            "moment as a Z2 fiber-frame sign"
         ),
         "fingerprints": fingerprint_statistics,
         "counts": {
@@ -1363,6 +1895,7 @@ def run_stratigraphic_continuity_refinement(
             "neighborhoodMismatch": _percentiles(neighborhood_scored),
         },
         "calibration": calibration,
+        "candidateUniverse": candidate_statistics,
         "baseline": _component_summary(baseline),
         "refined": _component_summary(refined),
         "splitComponents": split_components,
@@ -1370,13 +1903,7 @@ def run_stratigraphic_continuity_refinement(
             str(key): value for key, value in sorted(rejected_by_component.items())
         },
         "rankedCandidates": candidates,
-        "artifacts": {
-            "fingerprints": fingerprint_manifest["data"]["path"],
-            "fingerprintManifest": "patch-stratigraphic-fingerprints-v1.json",
-            "fingerprintSha256": fingerprint_manifest["data"]["sha256"],
-            "joinTable": table_path.name,
-            "joinTableSha256": sha256_file(table_path),
-        },
+        "artifacts": artifacts,
         "timingSeconds": {"total": round(time.monotonic() - started, 6)},
     }
     atomic_json(output / "summary.json", summary)
@@ -1384,6 +1911,12 @@ def run_stratigraphic_continuity_refinement(
     manifest["summary"] = "summary.json"
     manifest["table"] = table_path.name
     manifest["tableSha256"] = summary["artifacts"]["joinTableSha256"]
+    manifest["surfaceGraph"] = summary["artifacts"]["surfaceGraph"]
+    if candidate_table_path is not None:
+        manifest["candidateTable"] = candidate_table_path.name
+        manifest["candidateTableSha256"] = summary["artifacts"][
+            "candidateJoinTableSha256"
+        ]
     atomic_json(manifest_path, manifest)
     return summary
 
@@ -1424,3 +1957,67 @@ def apply_stratigraphic_continuity_refinement(
         raise ValueError("stratigraphic table and baseline join sets differ")
     retained = [current[key] for key, keep in zip(keys, retained_flags) if keep]
     return rebuild_surface_block(block, retained)
+
+
+def read_candidate_stratigraphic_admissibility(
+    refinement_root: str | Path,
+) -> tuple[frozenset[JoinKey], frozenset[JoinKey], dict[str, Any]]:
+    """Read the complete, robustly calibrated candidate admissibility gate."""
+
+    root = Path(refinement_root)
+    manifest = json.loads((root / "stratigraphic-refinement.json").read_text())
+    if (
+        manifest.get("schema") != STRATIGRAPHIC_CONTINUITY_SCHEMA
+        or manifest.get("state") != "complete"
+        or manifest.get("candidateTable") is None
+    ):
+        raise ValueError(
+            "stratigraphic refinement has no complete candidate universe"
+        )
+    table_path = root / str(manifest["candidateTable"])
+    if sha256_file(table_path) != manifest["candidateTableSha256"]:
+        raise ValueError("candidate stratigraphic table hash mismatch")
+    with np.load(table_path, allow_pickle=False) as values:
+        keys = tuple(
+            (
+                int(first),
+                int(second),
+                int(axis),
+                tuple(int(value) for value in anchor),
+            )
+            for first, second, axis, anchor in zip(
+                values["firstPatchId"],
+                values["secondPatchId"],
+                values["faceAxis"],
+                values["faceAnchorXYZ"],
+            )
+        )
+        admissible_flags = np.asarray(values["retained"], dtype=bool)
+        current_flags = np.asarray(values["currentlyRetained"], dtype=bool)
+        local_z = np.asarray(values["localRobustOutlierZ"], dtype=np.float64)
+        neighborhood_z = np.asarray(
+            values["neighborhoodRobustOutlierZ"], dtype=np.float64
+        )
+    if len(keys) != len(set(keys)):
+        raise ValueError("candidate stratigraphic table contains duplicate joins")
+    universe = frozenset(keys)
+    admissible = frozenset(
+        key for key, keep in zip(keys, admissible_flags) if bool(keep)
+    )
+    return universe, admissible, {
+        "sourceRoot": str(root.resolve()),
+        "identitySha256": manifest["identity"]["identitySha256"],
+        "candidates": len(keys),
+        "jointlyCalibratedCandidates": int(
+            np.count_nonzero(np.isfinite(local_z) & np.isfinite(neighborhood_z))
+        ),
+        "rejectedCandidates": len(universe - admissible),
+        "retainedInputCandidates": int(np.count_nonzero(current_flags)),
+        "rejectedRetainedInputCandidates": int(
+            np.count_nonzero(current_flags & ~admissible_flags)
+        ),
+        "tableSha256": manifest["candidateTableSha256"],
+        "criterion": (
+            "reject only joint local and multicell complete-mode robust outliers"
+        ),
+    }

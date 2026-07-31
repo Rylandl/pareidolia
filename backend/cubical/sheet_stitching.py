@@ -8,7 +8,7 @@ import time
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
@@ -3036,6 +3036,9 @@ def run_block_sheet_restitching(
     output_root: str | Path,
     *,
     settings: SheetStitchingSettings | None = None,
+    stratigraphic_candidates_root: (
+        str | Path | Iterable[str | Path] | None
+    ) = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Build a complete join catalog and globally re-stitch one block graph."""
@@ -3045,10 +3048,38 @@ def run_block_sheet_restitching(
     cluster = Path(cluster_root).resolve()
     materialized = Path(materialized_root).resolve()
     output = Path(output_root).resolve()
-    if output == materialized:
-        raise ValueError("sheet restitch output must differ from its input graph")
+    if stratigraphic_candidates_root is None:
+        stratigraphic_roots: tuple[Path, ...] = tuple()
+    elif isinstance(stratigraphic_candidates_root, (str, Path)):
+        stratigraphic_roots = (
+            Path(stratigraphic_candidates_root).resolve(),
+        )
+    else:
+        stratigraphic_roots = tuple(
+            Path(value).resolve() for value in stratigraphic_candidates_root
+        )
+    if len(stratigraphic_roots) != len(set(stratigraphic_roots)):
+        raise ValueError("stratigraphic candidate gates must be unique")
+    if output in {cluster, materialized, *stratigraphic_roots}:
+        raise ValueError("sheet restitch output must differ from every input root")
     declared_policy = SheetMatchingPolicy.from_cluster_root(cluster)
     block = read_surface_graph(materialized, verify=True)
+    if stratigraphic_roots:
+        from .stratigraphic_continuity import (
+            read_candidate_stratigraphic_admissibility,
+        )
+
+        stratigraphic_inputs = tuple(
+            read_candidate_stratigraphic_admissibility(value)
+            for value in stratigraphic_roots
+        )
+        stratigraphic_gate_identity: Any = [
+            value[2] for value in stratigraphic_inputs
+        ]
+    else:
+        stratigraphic_inputs = tuple()
+        stratigraphic_gate_identity = None
+        stratigraphic_gate = None
     loaded = time.monotonic()
     policy, angle_calibration = calibrate_sheet_matching_policy(
         block,
@@ -3080,6 +3111,7 @@ def run_block_sheet_restitching(
         "policy": policy.record(),
         "angleCalibration": angle_calibration,
         "settings": resolved.record(),
+        "stratigraphicCandidateGates": stratigraphic_gate_identity,
         "implementationSha256": {
             name: sha256_file(module_root / name)
             for name in (
@@ -3092,6 +3124,7 @@ def run_block_sheet_restitching(
                 "block.py",
                 "matching.py",
                 "surface_graph.py",
+                "stratigraphic_continuity.py",
             )
         },
     }
@@ -3119,6 +3152,48 @@ def run_block_sheet_restitching(
         settings=resolved,
         allow_retained_policy_rejection=True,
     )
+    unfiltered_catalog_statistics = catalog.statistics()
+    if stratigraphic_inputs:
+        catalog_keys = frozenset(value.key for value in catalog.candidates)
+        combined_admissible = set(catalog_keys)
+        source_records: list[dict[str, Any]] = []
+        for universe, admissible, source_record in stratigraphic_inputs:
+            unscored = catalog_keys - universe
+            if unscored:
+                raise ValueError(
+                    "reconstructed candidate universe contains joins unscored "
+                    f"by {source_record['sourceRoot']}: {sorted(unscored)[:2]}"
+                )
+            combined_admissible.intersection_update(admissible)
+            source_records.append(
+                {
+                    **source_record,
+                    "sourceCandidatesPrunedByCurrentPolicy": len(
+                        universe - catalog_keys
+                    ),
+                    "currentPolicyCandidatesRejected": len(
+                        catalog_keys - admissible
+                    ),
+                }
+            )
+        catalog = SheetJoinCatalog(
+            tuple(
+                value
+                for value in catalog.candidates
+                if value.key in combined_admissible
+            ),
+            catalog.interior_face_count,
+            catalog.unstable_face_count,
+            catalog.rejected_retained_join_count,
+            catalog.foldback_exclusion_pairs,
+        )
+        stratigraphic_gate = {
+            "combination": "intersection of admissible candidate sets",
+            "sources": source_records,
+            "currentPolicyCandidates": len(catalog_keys),
+            "admissibleCandidates": len(catalog.candidates),
+            "removedCandidates": len(catalog_keys) - len(catalog.candidates),
+        }
     cataloged = time.monotonic()
     manifest["state"] = "solving"
     atomic_json(manifest_path, manifest)
@@ -3162,13 +3237,15 @@ def run_block_sheet_restitching(
             "segmentation, exact topology "
             "validation, whole-sheet neighborhood exchanges, and optional "
             "axial curvature-aware hinge refinement"
-            ", and optional lifted layer-exclusion partitioning"
+            ", optional lifted layer-exclusion partitioning, and optional "
+            "complete-mode stratigraphic candidate gating"
         ),
         provenance={
             "inputRoot": str(materialized),
             "inputSurfaceGraphSha256": identity["surfaceGraphDataSha256"],
             "sheetRestitchIdentitySha256": identity_sha256,
             "candidateCatalogSha256": catalog_manifest["data"]["sha256"],
+            "stratigraphicCandidateGate": stratigraphic_gate,
         },
     )
     summary = {
@@ -3197,14 +3274,19 @@ def run_block_sheet_restitching(
                 "order-preserving face correspondences",
                 "optional component-local path-independent layer transport",
                 "one patch per sheet component per cell",
+                "nearest-corner ownership for cross-edge endpoint welding",
                 "crossing-feature consistency",
                 "orientable polygon parity",
+                "path-independent quarter-turn fiber-frame parity",
                 "optional transitive layer-exclusion pairs",
+                "optional joint local and multicell complete-mode admissibility",
             ],
             "mutatesAcusGeometry": False,
             "materializesGraph": True,
         },
         "catalog": catalog_manifest["statistics"],
+        "unfilteredCatalog": unfiltered_catalog_statistics,
+        "stratigraphicCandidateGate": stratigraphic_gate,
         "restitch": result.summary,
         "proposals": list(result.proposal_records),
         "artifacts": {

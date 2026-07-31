@@ -283,6 +283,7 @@ def _select_consistent_joins(
     patch_by_id = {value.patch_id: value for value in patches}
     patch_set = _DisjointSet(patch_by_id)
     orientation_set = _ParityDisjointSet(patch_by_id)
+    fiber_frame_set = _ParityDisjointSet(patch_by_id)
     component_cells: dict[object, set[Int3]] = {
         patch_id: {patch.cell_xyz} for patch_id, patch in patch_by_id.items()
     }
@@ -508,12 +509,28 @@ def _select_consistent_joins(
         ):
             deferred.append(DeferredJoin(match, "orientation-parity-cycle"))
             continue
+        if (
+            match.fiber_quarter_turn is not None
+            and not fiber_frame_set.compatible(
+                match.first_patch_id,
+                match.second_patch_id,
+                bool(match.fiber_quarter_turn),
+            )
+        ):
+            deferred.append(DeferredJoin(match, "fiber-frame-parity-cycle"))
+            continue
         union_crossings(match)
         orientation_set.union(
             match.first_patch_id,
             match.second_patch_id,
             required_orientation_xor,
         )
+        if match.fiber_quarter_turn is not None:
+            fiber_frame_set.union(
+                match.first_patch_id,
+                match.second_patch_id,
+                bool(match.fiber_quarter_turn),
+            )
         if stack_transport is not None and transport_relation is not None:
             stack_transport.union(*transport_relation)
         if first_root != second_root:
@@ -876,8 +893,9 @@ def select_surface_joins(
 
     This is the inexpensive inference boundary used by sheet-level solvers.
     Candidate order may vary between proposals, while trace occupancy, face
-    order, component/cell uniqueness, crossing consistency, and orientability
-    remain exact. ``fixed_join_keys`` are replayed first and must all survive.
+    order, component/cell uniqueness, crossing consistency, surface
+    orientability, and fiber-frame parity remain exact. ``fixed_join_keys``
+    are replayed first and must all survive.
     ``incompatible_patch_pairs`` are lifted graph constraints: no transitive
     component may contain both endpoints of one pair.  ``stack_rank_by_patch``
     activates a component-local integer gauge: every retained continuation
@@ -1064,10 +1082,12 @@ def surface_block_from_retained_joins(
     Unlike :func:`rebuild_surface_block`, this boundary is allowed to introduce
     joins because its input is a serialized graph rather than a refinement of
     an already assembled block.  Every declared join is treated as immutable
-    and is replayed through the same collision, crossing-topology, and
-    orientability selector used during inference.  A rejected declaration is
-    therefore a corrupt or incomplete graph artifact, never a silent change in
-    connectivity.
+    and is replayed through the same collision, crossing-topology,
+    orientability, and fiber-frame parity selector used during inference.  A
+    rejected declaration is therefore a corrupt or incomplete graph artifact,
+    never a silent change in connectivity.  Explicit strict and quarter-turn
+    fiber relations must form a path-independent binary gauge around every
+    retained cycle.
     """
 
     joins = tuple(retained_joins)
@@ -1106,7 +1126,8 @@ def extend_surface_block_joins(
 
     This is the connectivity analogue of patch augmentation. Existing geometry
     and joins are immutable; new pair-gated candidates still pass the complete
-    collision, crossing-topology, and orientability selector.
+    collision, crossing-topology, orientability, and fiber-frame parity
+    selector.
     """
 
     def key(value: TraceMatch) -> tuple[int, int, int, Int3]:

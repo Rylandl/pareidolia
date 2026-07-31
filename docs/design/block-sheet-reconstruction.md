@@ -96,8 +96,9 @@ The solver optimizes a retained edge set under exact constraints:
 - one join per patch trace;
 - order-preserving correspondences on a shared face;
 - at most one patch from a cell in a sheet component;
-- one consistent grid-edge/grid-vertex crossing feature; and
-- orientable polygon parity.
+- one consistent grid-edge/grid-vertex crossing feature;
+- orientable polygon parity; and
+- path-independent quarter-turn fiber-frame parity.
 
 The current fixed-geometry solver uses four non-monotone levels:
 
@@ -117,9 +118,10 @@ made sheet identity depend on edge arrival order. Each cut is an undirected
 minimum cut weighted by correspondence evidence plus the configured open-trace
 cost. The cut sequence terminates without a dataset-specific iteration count:
 each cut permanently separates at least one previously connected same-cell
-pair. Crossing-feature, face-order, orientation-parity, and component/cell
-constraints are still replayed by the ordinary exact selector, and all safe
-alternatives are offered again after segmentation.
+pair. Crossing-feature, face-order, polygon-orientation parity, quarter-turn
+fiber-frame parity, and component/cell constraints are still replayed by the
+ordinary exact selector, and all safe alternatives are offered again after
+segmentation.
 
 Graph selection is separate from mesh welding. Thousands of candidate edge
 sets can therefore be evaluated without rebuilding vertices, boundary traces,
@@ -230,7 +232,9 @@ of attractive edges. Dense face alignment is segmented by minimum-cost cuts
 until both same-cell collisions and lifted exclusions are separated. Every
 proposal, neighborhood exchange, and curvature refill then replays exclusions
 alongside trace occupancy, face order, crossing consistency, cell uniqueness,
-and orientability. Normal and fiber comparisons remain axial/unsigned.
+polygon orientability, and fiber-frame parity. Normal and fiber comparisons
+remain axial/unsigned; the binary fiber gauge records whether a continuation
+preserves the local axis or exchanges it with its orthogonal papyrus axis.
 
 Hard exclusions alone do not identify a layer substitution in which a track
 leaves one physical layer and continues on the next without retaining both

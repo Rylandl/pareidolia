@@ -366,6 +366,15 @@ still not observations: the two axial normals are put into one pairwise gauge,
 which determines whether the depth sequence must reverse. Flipping both gauges
 leaves the comparison unchanged.
 
+That orientation channel is the second harmonic `cos(2 theta)`, expressed in
+the anchor patch's local fiber frame. A classified quarter-turn continuation
+therefore negates the moment when it transports the neighboring frame; treating
+the two arrays as if they shared a frame would systematically penalize valid
+orthogonal-ply edges. The same binary gauge is propagated through every
+multi-hop neighborhood. The global topology selector independently forbids an
+odd quarter-turn cycle as `fiber-frame-parity-cycle`, just as polygon parity
+forbids a non-orientable surface cycle.
+
 The local comparison is repeated over graph-connected three-hop neighborhoods.
 For a tested face, the two neighborhoods are constrained to their respective
 spatial half-spaces and the tested join is removed, so evidence does not leak
@@ -410,6 +419,27 @@ retained local modes, and joins, so this contributes directly to the scalable
 pipeline. A volume scheduler can shard fingerprints by owned cells and score
 faces after loading only the bounded graph halo; no native-CT or Acus rerun is
 required.
+
+The current command also accepts composed block evidence through
+`--sheet-evidence` and a complete restitch candidate catalog through
+`--candidate-restitch`. Calibration still uses only the retained graph, but
+the frozen robust test is then applied to every geometric alternative. The
+output is no longer only a modifier table: it copies the immutable selected
+patch artifact and writes the exact filtered `surface-graph-v1`, with the input
+graph hashes in its identity. A subsequent round can therefore use that output
+directly and stop when `rejectedJoins` reaches zero. Fixed-point rounds normally
+use the latest gate; taking the intersection of several gates is available as
+an explicitly more conservative restitch policy, not the default iteration.
+
+On the 4,784-sheetlet owned 12 x 12 x 10 checkpoint, complete-candidate gating
+followed by global restitching produced 5,016 joins and a 166-cell leading
+component. The next materialized rescore removed two retained bridges with
+jointly extreme local and neighborhood disagreement. A following round was a
+fixed point: 5,014 joins, 929 components, 56.312% retained interior traces,
+leading sizes 166, 149, and 143, and zero rejected retained joins while 106 of
+11,953 alternatives remain inadmissible. All 929 reconstructed component meshes
+have zero physical nonmanifold edges and zero orientation conflicts; the graph
+also has no same-cell returns, foldbacks, or quarter-turn parity contradictions.
 
 The raw and local-inference stages are already independently sharded. The
 selected-patch assembler is hierarchical. Configuration selection currently

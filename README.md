@@ -293,6 +293,13 @@ patches, the 150-patch runner-up is unchanged, and the maximum retained axial
 hinge falls to 24.512 degrees. The pre-curvature graph remains available as the
 v11 checkpoint so this geometry/coverage tradeoff stays inspectable.
 
+The current owned-core successor also assigns cross-edge corner observations
+to their nearest half-edge. A high-uncertainty trace may no longer snap past a
+cube-edge midpoint merely because its covariance makes the distant corner
+statistically admissible. The corner-safe graph has no physical nonmanifold
+edges across all 922 components; its most distant retained corner transition
+is 0.494786 edge lengths from the shared vertex.
+
 The optional layer partition compiles fixed active sheetlets into a persisted
 typed graph. Continuations retain raw likelihood plus exact whole-face matching
 marginals. High-confidence local collisions remain hard constraints, while a
@@ -367,8 +374,11 @@ The refinement root is both an auditable configuration selection and a normal
 validated graph, so later whole-sheet exchange can improve its likelihood but
 cannot discard it merely because another deterministic restart was weaker.
 
-Assembly now carries an explicit polygon-orientation parity state, preventing
-unsigned local normals from closing a globally contradictory surface loop.
+Assembly now carries two explicit binary gauge states. Polygon-orientation
+parity prevents unsigned local normals from closing a globally contradictory
+surface loop. Fiber-frame parity separately requires every cycle to contain an
+even number of quarter-turn transitions; a contradictory edge is deferred as
+`fiber-frame-parity-cycle`. Unknown fiber relations remain unconstrained.
 `refine-join-continuity` then scores every retained face using fixed-depth
 native CT against equal-span within-patch controls. Only robust per-axis
 intensity-mismatch outliers split connectivity; noisier texture-angle and
@@ -380,9 +390,27 @@ anchors every selected patch back to its exact same-family mode in the complete
 Acus bank, compares the surrounding depth/fiber distribution across a join,
 and repeats that comparison after averaging graph-connected three-hop
 neighborhoods on the two spatial sides of the face. Connectivity changes only
-when both scales are robust per-axis outer-tail outliers. The resulting table
-can be composed after native CT with the `--stratigraphic-refinement` option to
-`flatten-components`; the selected patch evidence remains immutable.
+when both scales are robust per-axis outer-tail outliers. With
+`--candidate-restitch`, the retained graph calibrates the robust scale while
+the same frozen test is applied to every geometric alternative before another
+global solve. Normal sign transports depth order. A quarter-turn edge
+transports the sign of the axial `cos(2 theta)` orientation moment; this is a
+fiber-frame gauge operation, not a signed-vector choice.
+
+Each refinement now writes both its score tables and a complete
+`selected-patches-v1`/`surface-graph-v1` checkpoint. Its identity includes the
+input graph hashes, so fixed-point rounds cannot accidentally reuse scores from
+a different join graph. On the current 4,784-sheetlet owned core, the
+candidate-gated solve reached 5,016 joins and a 166-cell largest component. A
+following rescore removed two complete-mode contradictions, then converged
+with zero rejected retained joins: 5,014 joins, 929 components, 56.312%
+interior-trace utilization, and leading component sizes 166, 149, and 143.
+The converged candidate table rejects 106 of 11,953 alternatives. Across the
+final graph, the maximum direct axial-normal hinge is 23.802 degrees, the
+strict-fiber residual is at most 14.712 degrees, and the explicit quarter-turn
+residual to 90 degrees is at most 14.796 degrees. Every component is free of
+same-cell returns, foldbacks, polygon-orientation conflicts, fiber-frame parity
+contradictions, and physical nonmanifold edges.
 
 `flatten-components` is the corresponding visual checkpoint. It unfolds a
 mixed set of reconstructed components into bounded-normal atlases and samples

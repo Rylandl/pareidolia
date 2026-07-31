@@ -959,7 +959,13 @@ def rasterize_chart(
     uv_pixels = (chart.uv - low) / effective_step + padding_pixels
     surface = np.full((height, width, 3), np.nan, dtype=np.float32)
     normal = np.full((height, width, 3), np.nan, dtype=np.float32)
-    patch_id = np.full((height, width), -1, dtype=np.int64)
+    # Stable patch identities are full uint64 content hashes.  Keep the raster
+    # in that domain as well; signed int64 silently excludes half of the valid
+    # identity space.  The mask, rather than a negative sentinel, declares
+    # whether a pixel owns a patch.
+    patch_id = np.full(
+        (height, width), np.iinfo(np.uint64).max, dtype=np.uint64
+    )
     triangle_owner = np.full((height, width), -1, dtype=np.int32)
     interior_owner = np.full((height, width), -1, dtype=np.int32)
     overlap = np.zeros((height, width), dtype=bool)
@@ -1020,9 +1026,9 @@ def rasterize_chart(
             normal[target_rows, target_columns] = mesh.triangle_normal_xyz[
                 triangle_index
             ].astype(np.float32)
-            patch_id[target_rows, target_columns] = int(
-                mesh.triangle_patch_ids[triangle_index]
-            )
+            patch_id[target_rows, target_columns] = mesh.triangle_patch_ids[
+                triangle_index
+            ]
             triangle_owner[target_rows, target_columns] = triangle_index
         interior = np.min(selected_weights, axis=1) > 0.02
         prior_interior = interior_owner[rows[interior], columns[interior]]
@@ -1366,6 +1372,7 @@ def _resolve_source(root: Path) -> tuple[Path, dict[str, Any], VolumeSource]:
 
 def _identity(
     root: Path,
+    source_resolution_root: Path,
     source: VolumeSource,
     component_ranks: tuple[int, ...],
     depth_offsets: np.ndarray,
@@ -1381,6 +1388,7 @@ def _identity(
         "schema": FLATTENING_SCHEMA,
         "version": FLATTENING_VERSION,
         "inputRoot": str(root),
+        "sourceResolutionRoot": str(source_resolution_root),
         "inputPatchManifestSha256": sha256_file(root / "selected-patches-v1.json"),
         "inputPatchDataSha256": sha256_file(root / "selected-patches-v1.npz"),
         "sourceIdentitySha256": source.source_identity["identitySha256"],
@@ -1456,6 +1464,7 @@ def run_component_flattening(
     maximum_pixels: int = 768,
     maximum_chart_normal_deviation_degrees: float = 40.0,
     leaf_shape_cells_xyz: tuple[int, int, int] = (4, 4, 3),
+    source_root: str | Path | None = None,
     surface_graph_root: str | Path | None = None,
     join_refinement_root: str | Path | None = None,
     stratigraphic_refinement_root: str | Path | None = None,
@@ -1475,7 +1484,10 @@ def run_component_flattening(
     offsets = np.asarray(tuple(float(value) for value in depth_offsets_voxels))
     if offsets.ndim != 1 or not len(offsets) or np.any(np.diff(offsets) <= 0.0):
         raise ValueError("depth offsets must be a strictly increasing sequence")
-    _, pipeline, source = _resolve_source(root)
+    source_resolution_root = (
+        Path(source_root).resolve() if source_root is not None else root
+    )
+    _, pipeline, source = _resolve_source(source_resolution_root)
     refinement_root = (
         Path(join_refinement_root).resolve()
         if join_refinement_root is not None
@@ -1495,6 +1507,7 @@ def run_component_flattening(
     )
     identity = _identity(
         root,
+        source_resolution_root,
         source,
         ranks,
         offsets,

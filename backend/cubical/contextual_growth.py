@@ -38,7 +38,7 @@ from .stratigraphic_continuity import (
     _mismatch_transform,
     _robust_calibration,
     _score_distributions,
-    _side_patch_ids,
+    _side_patch_gauges,
     _support_mask,
     apply_stratigraphic_continuity_refinement,
     build_patch_fingerprints,
@@ -93,6 +93,7 @@ class GrowthSupport:
     reduced_chi_square: float
     normal_angle_radians: float
     fiber_angle_radians: float | None
+    fiber_quarter_turn: bool
 
     @property
     def face(self) -> GridFace:
@@ -118,6 +119,7 @@ class GrowthSupport:
                 if self.fiber_angle_radians is not None
                 else None
             ),
+            "fiberQuarterTurn": self.fiber_quarter_turn,
         }
 
 
@@ -322,6 +324,7 @@ def discover_contextual_growth_candidates(
                     if match.fiber_angle_radians is not None
                     else None
                 ),
+                bool(match.fiber_quarter_turn),
             )
             support_key = source.patch_id, face.axis, face.anchor_xyz
             prior = grouped[(shard_id, mode_index)].get(support_key)
@@ -447,14 +450,19 @@ def _concatenate_fingerprints(
 def _graph_context(
     block: SurfaceBlock,
 ) -> tuple[
-    dict[int, list[tuple[int, int]]],
+    dict[int, list[tuple[int, int, bool]]],
     dict[int, Int3],
 ]:
     patch_by_id = {value.patch_id: value for value in block.patches}
-    adjacency: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    adjacency: dict[int, list[tuple[int, int, bool]]] = defaultdict(list)
     for join_index, match in enumerate(block.joins):
-        adjacency[match.first_patch_id].append((match.second_patch_id, join_index))
-        adjacency[match.second_patch_id].append((match.first_patch_id, join_index))
+        quarter_turn = bool(match.fiber_quarter_turn)
+        adjacency[match.first_patch_id].append(
+            (match.second_patch_id, join_index, quarter_turn)
+        )
+        adjacency[match.second_patch_id].append(
+            (match.first_patch_id, join_index, quarter_turn)
+        )
     return adjacency, {
         patch_id: patch.cell_xyz for patch_id, patch in patch_by_id.items()
     }
@@ -467,9 +475,11 @@ def _score_patch_against_side_context(
     excluded_join_index: int,
     fingerprints: PatchFingerprintTable,
     fingerprint_index: Mapping[int, int],
-    adjacency: Mapping[int, list[tuple[int, int]]],
+    adjacency: Mapping[int, list[tuple[int, int, bool]]],
     cell_by_patch: Mapping[int, Int3],
     settings: StratigraphicContinuitySettings,
+    *,
+    fiber_quarter_turn: bool = False,
 ) -> dict[str, Any]:
     candidate_index = fingerprint_index[candidate_patch_id]
     if not bool(fingerprints.anchor_valid[candidate_index]) or int(
@@ -479,7 +489,7 @@ def _score_patch_against_side_context(
     source_cell = cell_by_patch[source_patch_id]
     face_coordinate = face.anchor_xyz[face.axis]
     source_lower = source_cell[face.axis] < face_coordinate
-    source_ids = _side_patch_ids(
+    source_gauges = _side_patch_gauges(
         source_patch_id,
         excluded_join_index,
         face.axis,
@@ -488,11 +498,15 @@ def _score_patch_against_side_context(
         settings.neighborhood_radius_hops,
         adjacency,
         cell_by_patch,
+        start_fiber_quarter_turn=fiber_quarter_turn,
     )
     reference_normal = fingerprints.normal_xyz[candidate_index]
     aggregate = _aggregate_fingerprints(
         fingerprints,
-        [fingerprint_index[value] for value in sorted(source_ids)],
+        [
+            (fingerprint_index[value], source_gauges[value])
+            for value in sorted(source_gauges)
+        ],
         reference_normal,
         settings,
     )
@@ -525,7 +539,11 @@ def calibrate_contextual_growth(
     block: SurfaceBlock,
     fingerprints: PatchFingerprintTable,
     settings: StratigraphicContinuitySettings,
-) -> tuple[dict[str, Any], dict[int, list[tuple[int, int]]], dict[int, Int3]]:
+) -> tuple[
+    dict[str, Any],
+    dict[int, list[tuple[int, int, bool]]],
+    dict[int, Int3],
+]:
     """Calibrate local-to-local and local-to-half-neighborhood scores on joins."""
 
     fingerprint_index = {
@@ -542,6 +560,7 @@ def calibrate_contextual_growth(
             fingerprint_index[match.first_patch_id],
             fingerprint_index[match.second_patch_id],
             settings,
+            fiber_quarter_turn=bool(match.fiber_quarter_turn),
         )
         if local["status"] == "scored":
             local_by_axis[match.face.axis].append(
@@ -561,6 +580,7 @@ def calibrate_contextual_growth(
                 adjacency,
                 cell_by_patch,
                 settings,
+                fiber_quarter_turn=bool(match.fiber_quarter_turn),
             )
             if context["status"] == "scored":
                 context_by_axis[match.face.axis].append(
@@ -697,6 +717,7 @@ def score_contextual_growth_candidates(
                             fingerprint_index[patch_id],
                             fingerprint_index[support.source_patch_id],
                             stratigraphic_settings,
+                            fiber_quarter_turn=support.fiber_quarter_turn,
                         ),
                         axis_calibration["local"],
                     )
@@ -711,6 +732,7 @@ def score_contextual_growth_candidates(
                             adjacency,
                             cell_by_patch,
                             stratigraphic_settings,
+                            fiber_quarter_turn=support.fiber_quarter_turn,
                         ),
                         axis_calibration["context"],
                     )
