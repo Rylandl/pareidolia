@@ -956,7 +956,11 @@ export function BlockVolumeExplorer() {
           >
             {COMPONENT_SIZE_OPTIONS.map((value) => (
               <option value={value} key={value}>
-                {value === 1 ? "All components" : `${value}+ ${isInterfaceGraph ? "samples" : "triangles"}`}
+                {value === 1
+                  ? isInterfaceGraph
+                    ? "All loaded components"
+                    : "All components"
+                  : `${value}+ ${isInterfaceGraph ? "samples" : "triangles"}`}
               </option>
             ))}
           </select>
@@ -1069,7 +1073,7 @@ export function BlockVolumeExplorer() {
           {selected ? (
             <div className="block-volume-selection">
               <div>
-                <span>Selected surface component</span>
+                <span>Selected {isInterfaceGraph ? "interface" : "surface"} component</span>
                 <strong>
                   #{selected.rank} · stable {selected.stableId} · {isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
                 </strong>
