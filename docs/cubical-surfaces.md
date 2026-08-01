@@ -453,6 +453,47 @@ improves support for the observed hairpin geometry rather than merely filling
 flat holes. Exact reconstruction dominates the 382-second solve; the exact
 bank is checkpointed separately from later objective and preview iterations.
 
+`materialize-physical-ribbon-replay-configuration` turns a cumulative exact
+replay into the ordinary continuity/configuration contract consumed by the
+rest of the pipeline. It preserves broad support continuity separately from
+strict component topology: in the 42-event snapshot, 264,084 selected broad
+support edges prevent legitimate neighbors from being misclassified as
+profile crossings, while 139,520 strict edges define the 4,305 sheet
+components. Materialization preserves all 37,922 selected ribbons and reports
+zero interface or crossing conflict. It takes about four seconds and does not
+reoptimize the selection.
+
+Running the unchanged patch-corridor census on that materialized state changes
+the residual problem from the stale 128-corridor catalog to 95 physical
+corridors, of which 22 have native-CT evidence. Seventeen ordinary frontier
+trials connect none of them. A new targeted frontier sees 3,292 unique
+one-sided hypotheses across those complete strips; 2,504 were already present
+and 788 are genuinely new. The resulting 223,724-node frontier has 5,639,708
+strict continuation edges, preserves the exact baseline component partition,
+and has zero inherited crossing debt.
+
+Exact screening evaluates 137 one-sided states across 19 of the 22 CT strips.
+Only row 93 connects and remains density eligible. It adds seven ribbons,
+removes four, and therefore moves the cumulative state from 37,922 to 37,925
+ribbons. Supported triangles rise from 28,323 to 28,332, edge-connected
+triangle regions fall by two, and all 4,305 components remain. The accepted
+strip has 0.884 context-profile correlation, 0.661 competing-layer margin,
+0.363 boundary-trace correlation, 0.944 patch coverage, and a minimum modeled
+curvature radius of 0.218 sheet thicknesses. Its 166-ribbon/256-triangle
+flattened CT chart has no nonadjacent overlap. The exact pass takes 312 seconds.
+
+The next recensus produces 92 corridors and 21 CT-eligible strips. Its target
+frontier adds zero candidates. `assess-physical-ribbon-corridor-saturation`
+then hashes exact CT patch positions, normals, and thicknesses across
+iterations. All 21 residual patches match prior exact failures; their candidate
+banks and the complete strict edge graph are identical. The accepted change
+touches only topology component 24, and no residual corridor belongs to that
+component. The audit therefore proves a fixed point for this candidate class
+and skips a redundant exact pass. Across the original and refreshed catalogs,
+the cumulative state contains 43 accepted corridor events. Further progress
+requires a different missing-geometry representation rather than deeper
+enumeration of the same one-sided ribbons.
+
 The reproducible commands are:
 
 ```bash
@@ -530,4 +571,51 @@ python -m backend.cubical analyze-physical-ribbon-one-sided-corridors \
   --frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-v1 \
   --settings-json examples/physical-ribbon-one-sided-corridors.json
+
+python -m backend.cubical materialize-physical-ribbon-replay-configuration \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-one-sided-v1
+
+python -m backend.cubical analyze-physical-ribbon-patch-corridors \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-one-sided-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration1-v1 \
+  --settings-json examples/physical-ribbon-patch-corridors.json
+
+python -m backend.cubical build-physical-ribbon-corridor-frontier \
+  --corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration1-v1 \
+  --prior-replay work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration1-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-one-sided-v1 \
+  --bidirectional-continuity work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-one-sided-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration1-v1 \
+  --settings-json examples/physical-ribbon-corridor-frontier.json
+
+python -m backend.cubical analyze-physical-ribbon-one-sided-corridors \
+  --frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration1-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-iteration1-v1 \
+  --settings-json examples/physical-ribbon-one-sided-corridors.json
+
+python -m backend.cubical materialize-physical-ribbon-replay-configuration \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-iteration1-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-iteration2-v1
+
+python -m backend.cubical analyze-physical-ribbon-patch-corridors \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-iteration2-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration2-v1 \
+  --settings-json examples/physical-ribbon-patch-corridors.json
+
+python -m backend.cubical build-physical-ribbon-corridor-frontier \
+  --corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration2-v1 \
+  --prior-replay work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration2-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-iteration2-v1 \
+  --bidirectional-continuity work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-iteration2-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration2-v1 \
+  --settings-json examples/physical-ribbon-corridor-frontier.json
+
+python -m backend.cubical assess-physical-ribbon-corridor-saturation \
+  --prior-corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration1-v1 \
+  --prior-frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration1-v1 \
+  --prior-replay work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-iteration1-v1 \
+  --current-corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration2-v1 \
+  --current-frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration2-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-saturation-v1
 ```

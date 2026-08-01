@@ -143,6 +143,12 @@ from .physical_ribbon_corridor_one_sided import (
     PhysicalRibbonOneSidedCorridorSettings,
     run_physical_ribbon_one_sided_corridors,
 )
+from .physical_ribbon_replay_configuration import (
+    run_physical_ribbon_replay_configuration,
+)
+from .physical_ribbon_corridor_saturation import (
+    run_physical_ribbon_corridor_saturation,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -953,6 +959,28 @@ def _physical_ribbon_corridor_one_sided(args: argparse.Namespace) -> None:
         settings=PhysicalRibbonOneSidedCorridorSettings(**settings_values),
         force=args.force,
         progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_replay_configuration(args: argparse.Namespace) -> None:
+    summary = run_physical_ribbon_replay_configuration(
+        args.replay,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_saturation(args: argparse.Namespace) -> None:
+    summary = run_physical_ribbon_corridor_saturation(
+        args.prior_corridors,
+        args.prior_frontier,
+        args.prior_replay,
+        args.current_corridors,
+        args.current_frontier,
+        args.output,
+        force=args.force,
     )
     print(json.dumps(summary, indent=2))
 
@@ -2734,6 +2762,57 @@ def main() -> None:
     )
     physical_ribbon_corridor_one_sided.set_defaults(
         handler=_physical_ribbon_corridor_one_sided
+    )
+    physical_ribbon_replay_configuration = subparsers.add_parser(
+        "materialize-physical-ribbon-replay-configuration",
+        description=(
+            "Materialize a cumulative exact corridor replay as an ordinary "
+            "strict continuity and configuration pair for the next pipeline "
+            "iteration."
+        ),
+    )
+    physical_ribbon_replay_configuration.add_argument(
+        "--replay", type=Path, required=True
+    )
+    physical_ribbon_replay_configuration.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_replay_configuration.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_replay_configuration.set_defaults(
+        handler=_physical_ribbon_replay_configuration
+    )
+    physical_ribbon_corridor_saturation = subparsers.add_parser(
+        "assess-physical-ribbon-corridor-saturation",
+        description=(
+            "Compare consecutive CT corridor iterations and prove when prior "
+            "exact failures can be reused without another reconstruction pass."
+        ),
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--prior-corridors", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--prior-frontier", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--prior-replay", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--current-corridors", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--current-frontier", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_saturation.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_saturation.set_defaults(
+        handler=_physical_ribbon_corridor_saturation
     )
     gap_census = subparsers.add_parser(
         "gap-census",

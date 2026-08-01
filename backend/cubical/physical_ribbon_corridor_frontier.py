@@ -19,7 +19,6 @@ from .physical_ribbon_continuity import (
     build_paired_boundary_continuity,
 )
 from .physical_ribbon_corridor_dormant import (
-    PHYSICAL_RIBBON_DORMANT_CORRIDORS_SCHEMA,
     PHYSICAL_RIBBON_DORMANT_CORRIDORS_STEM,
     _condition_configuration_on_expanded_frontier,
     _load_interfaces,
@@ -64,26 +63,72 @@ def _load_prior_replay(
     root: str | Path,
 ) -> tuple[Path, dict[str, Any], dict[str, np.ndarray]]:
     value = Path(root).resolve()
-    manifest_path = (
-        value
-        if value.is_file()
-        else value / f"{PHYSICAL_RIBBON_DORMANT_CORRIDORS_STEM}.json"
-    )
+    if value.is_file():
+        manifest_path = value
+    else:
+        stems = (
+            PHYSICAL_RIBBON_DORMANT_CORRIDORS_STEM,
+            "physical-ribbon-one-sided-corridors-v1",
+            "physical-ribbon-patch-corridors-v1",
+        )
+        matches = [
+            value / f"{stem}.json"
+            for stem in stems
+            if (value / f"{stem}.json").is_file()
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "prior replay root must contain exactly one supported manifest"
+            )
+        manifest_path = matches[0]
     manifest = json.loads(manifest_path.read_text())
     if (
-        manifest.get("schema") != PHYSICAL_RIBBON_DORMANT_CORRIDORS_SCHEMA
-        or manifest.get("state") != "complete"
+        manifest.get("state") != "complete"
         or manifest.get("method", {}).get("identityLabelsUsed") is not False
     ):
         raise ValueError(
             "corridor frontier requires a complete label-free cumulative replay"
         )
     data_path = manifest_path.parent / str(manifest["data"]["path"])
+    arrays = _load_npz(data_path, manifest["data"]["sha256"])
+    if not {
+        "corridorReplaySelected",
+        "corridorReplayComponent",
+        "corridorReplayProposalSuccessful",
+    }.issubset(arrays):
+        raise ValueError("prior artifact does not contain a cumulative replay")
     return (
         manifest_path,
         manifest,
-        _load_npz(data_path, manifest["data"]["sha256"]),
+        arrays,
     )
+
+
+def _prior_topology_reference(
+    manifest: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    identity = manifest["identity"]
+    for name in ("frontier", "expandedContinuity", "topologyContinuity"):
+        reference = identity.get(name)
+        if reference is not None:
+            return reference
+    raise ValueError("prior replay does not identify its topology")
+
+
+def _map_frontier_by_bank(
+    source_frontier: np.ndarray,
+    target_frontier: np.ndarray,
+    *,
+    ribbon_bank_count: int,
+) -> np.ndarray:
+    bank_to_target = np.full(ribbon_bank_count, -1, dtype=np.int32)
+    bank_to_target[np.asarray(target_frontier, dtype=np.int32)] = np.arange(
+        len(target_frontier), dtype=np.int32
+    )
+    result = bank_to_target[np.asarray(source_frontier, dtype=np.int32)]
+    if np.any(result < 0):
+        raise ValueError("targeted frontier does not contain the source frontier")
+    return result
 
 
 def _sampling_geometry(
@@ -263,15 +308,29 @@ def run_physical_ribbon_corridor_frontier(
     continuity_path, continuity_manifest, continuity = (
         _load_continuity_artifact(bidirectional_continuity_root)
     )
+    prior_configuration_reference = prior_manifest["identity"].get(
+        "configuration"
+    )
+    if prior_configuration_reference is None:
+        raise ValueError("prior replay does not identify its configuration")
+    prior_topology_reference = _prior_topology_reference(prior_manifest)
     if (
-        prior_manifest["identity"]["configuration"]["dataSha256"]
+        prior_configuration_reference["dataSha256"]
         != configuration_manifest["data"]["sha256"]
-        or prior_manifest["identity"]["expandedContinuity"]["dataSha256"]
+        or prior_topology_reference["dataSha256"]
         != continuity_manifest["data"]["sha256"]
         or continuity_manifest["identity"]["ribbonBank"]["dataSha256"]
         != ribbon_manifest["data"]["sha256"]
     ):
         raise ValueError("corridor frontier inputs do not share one ribbon state")
+    prior_corridor_reference = prior_manifest["identity"].get("corridors")
+    same_corridor_artifact = prior_path == corridor_path
+    if not same_corridor_artifact and (
+        prior_corridor_reference is None
+        or prior_corridor_reference["dataSha256"]
+        != corridor_manifest["data"]["sha256"]
+    ):
+        raise ValueError("prior replay decisions belong to different corridors")
     support_reference = configuration_manifest["identity"]["continuity"]
     support_path, support_manifest, support_topology = (
         _load_continuity_artifact(support_reference["manifestPath"])
@@ -406,14 +465,11 @@ def run_physical_ribbon_corridor_frontier(
             ),
         )
     )
-    original_to_prior = np.asarray(
-        prior["oldFrontierToExpandedFrontier"], dtype=np.int32
+    original_to_target = _map_frontier_by_bank(
+        np.asarray(base_topology["frontierRibbonCandidate"], dtype=np.int32),
+        np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32),
+        ribbon_bank_count=len(np.asarray(ribbon["sourceInterface"])),
     )
-    if len(original_to_prior) != len(
-        np.asarray(base_topology["frontierRibbonCandidate"])
-    ):
-        raise ValueError("prior replay lost the original frontier map")
-    original_to_target = prior_to_target[original_to_prior]
     conditioning_stats["crossingContinuity"] = crossing_stats
     conditioned_at = time.monotonic()
     arrays = {

@@ -56,6 +56,15 @@ from backend.cubical.physical_ribbon_corridor_dormant import (
 from backend.cubical.physical_ribbon_corridor_one_sided import (
     _variant_one_sided_addition_count,
 )
+from backend.cubical.physical_ribbon_corridor_frontier import (
+    _map_frontier_by_bank,
+)
+from backend.cubical.physical_ribbon_corridor_saturation import (
+    _assess_saturation,
+)
+from backend.cubical.physical_ribbon_replay_configuration import (
+    _materialize_replay_arrays,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -94,6 +103,50 @@ class PhysicalRibbonBankTests(unittest.TestCase):
 
 
 class PhysicalRibbonConfigurationTests(unittest.TestCase):
+    def test_materialize_replay_configuration_preserves_exact_state(self) -> None:
+        replay = {
+            "corridorReplaySelected": np.asarray((1, 1, 0), dtype=np.uint8),
+            "corridorReplayComponent": np.asarray((0, 0, -1), dtype=np.int32),
+        }
+        topology = {
+            "frontierRibbonCandidate": np.asarray((0, 1, 2), dtype=np.int32),
+            "frontierMidpointKeyXYZ": np.zeros((3, 3), dtype=np.int32),
+            "continuitySupportDegree": np.asarray((1, 1, 0), dtype=np.int32),
+            "continuitySupportScore": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "tangentRankRatio": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "selectionObjective": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "selected": np.asarray((0, 0, 1), dtype=np.uint8),
+            "component": np.asarray((-1, -1, 0), dtype=np.int32),
+            "edgeFirstFrontierIndex": np.asarray((0, 1), dtype=np.int32),
+            "edgeSecondFrontierIndex": np.asarray((1, 2), dtype=np.int32),
+            "edgeScore": np.asarray((0.8, 0.7), dtype=np.float32),
+            "edgeSelected": np.asarray((0, 0), dtype=np.uint8),
+            "edgeNormalDegrees": np.zeros(2, dtype=np.float32),
+            "edgeMidpointHeightResidualVoxels": np.zeros(2, dtype=np.float32),
+            "edgeBoundaryHeightResidualVoxels": np.zeros(2, dtype=np.float32),
+            "edgeThicknessChangeVoxels": np.zeros(2, dtype=np.float32),
+            "edgeBoundaryShiftDifferenceVoxels": np.zeros(2, dtype=np.float32),
+            "crossingFirstFrontierIndex": np.asarray((0,), dtype=np.int32),
+            "crossingSecondFrontierIndex": np.asarray((2,), dtype=np.int32),
+            "crossingDistanceVoxels": np.asarray((0.5,), dtype=np.float32),
+            "crossingFirstParameter": np.asarray((0.5,), dtype=np.float32),
+            "crossingSecondParameter": np.asarray((0.5,), dtype=np.float32),
+            "nodeUnaryScore": np.asarray((0.8, 0.7, 0.6), dtype=np.float32),
+        }
+        ribbon = {
+            "sourceInterface": np.asarray((0, 2, 4), dtype=np.int32),
+            "targetInterface": np.asarray((1, 3, 5), dtype=np.int32),
+        }
+        materialized, configuration, stats = _materialize_replay_arrays(
+            replay, topology, ribbon
+        )
+        np.testing.assert_array_equal(materialized["selected"], (1, 1, 0))
+        np.testing.assert_array_equal(materialized["edgeSelected"], (1, 0))
+        np.testing.assert_array_equal(configuration["selected"], (1, 1, 0))
+        self.assertEqual(stats["selectedRibbonCount"], 2)
+        self.assertEqual(stats["componentCount"], 1)
+        self.assertEqual(stats["selectedCrossingConflictCount"], 0)
+
     def test_explicit_continuity_frontier_can_include_one_sided_ribbon(self) -> None:
         ribbon = {
             "sourceInterface": np.asarray((0,), dtype=np.int32),
@@ -474,6 +527,75 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_corridor_saturation_reuses_untouched_exact_failures(self) -> None:
+        prior_corridor = {
+            "corridorEvidenceEligible": np.asarray((1, 1), dtype=np.uint8),
+            "corridorPatchOffset": np.asarray((0, 1, 2), dtype=np.int64),
+            "corridorPatchXYZ": np.asarray(
+                ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=np.float32
+            ),
+            "corridorPatchNormalXYZ": np.asarray(
+                ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), dtype=np.float32
+            ),
+            "corridorPatchThicknessVoxels": np.asarray(
+                (8.0, 9.0), dtype=np.float32
+            ),
+            "corridorTopologyComponent": np.asarray((0, 1), dtype=np.int32),
+        }
+        current_corridor = {
+            name: np.asarray(value[:1]).copy()
+            for name, value in prior_corridor.items()
+            if name != "corridorPatchOffset"
+        }
+        current_corridor["corridorPatchOffset"] = np.asarray(
+            (0, 1), dtype=np.int64
+        )
+        prior_frontier = {
+            "frontierRibbonCandidate": np.asarray((7, 8), dtype=np.int32),
+            "edgeFirstFrontierIndex": np.asarray((0,), dtype=np.int32),
+            "edgeSecondFrontierIndex": np.asarray((1,), dtype=np.int32),
+            "selected": np.asarray((1, 0), dtype=np.uint8),
+            "component": np.asarray((0, -1), dtype=np.int32),
+            "targetCorridorRow": np.asarray((0, 1), dtype=np.int32),
+            "targetCorridorCandidateOffset": np.asarray(
+                (0, 1, 2), dtype=np.int64
+            ),
+            "targetCorridorCandidateBankIndex": np.asarray(
+                (7, 8), dtype=np.int32
+            ),
+        }
+        current_frontier = {
+            **prior_frontier,
+            "targetCorridorRow": np.asarray((0,), dtype=np.int32),
+            "targetCorridorCandidateOffset": np.asarray((0, 1), dtype=np.int64),
+            "targetCorridorCandidateBankIndex": np.asarray((7,), dtype=np.int32),
+        }
+        prior_replay = {
+            "corridorReplaySelected": np.asarray((1, 1), dtype=np.uint8),
+            "corridorReplayComponent": np.asarray((0, 1), dtype=np.int32),
+            "corridorChosenExactVariant": np.asarray((-1, 0), dtype=np.int32),
+        }
+        result = _assess_saturation(
+            prior_corridor,
+            prior_frontier,
+            prior_replay,
+            current_corridor,
+            current_frontier,
+        )
+        self.assertTrue(result["candidateClassSaturated"])
+        self.assertEqual(result["sharedPriorExactFailureCount"], 1)
+        self.assertEqual(result["remainingCorridorsInChangedComponents"], [])
+
+    def test_frontier_map_uses_ribbon_bank_identity(self) -> None:
+        np.testing.assert_array_equal(
+            _map_frontier_by_bank(
+                np.asarray((7, 2, 9), dtype=np.int32),
+                np.asarray((2, 4, 7, 9), dtype=np.int32),
+                ribbon_bank_count=10,
+            ),
+            (2, 0, 3),
+        )
+
     def test_one_sided_variant_count_uses_bank_identity(self) -> None:
         variants = {
             "corridorVariantAddedOffset": np.asarray(
