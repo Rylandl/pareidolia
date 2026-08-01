@@ -168,6 +168,14 @@ from .physical_ribbon_complete_strip_replay import (
     PhysicalRibbonCompleteStripReplaySettings,
     run_physical_ribbon_complete_strip_replay,
 )
+from .physical_ribbon_lineage_strips import (
+    PhysicalRibbonLineageStripSettings,
+    run_physical_ribbon_lineage_strips,
+)
+from .physical_ribbon_lineage_strip_replay import (
+    PhysicalRibbonLineageStripReplaySettings,
+    run_physical_ribbon_lineage_strip_replay,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -1072,6 +1080,38 @@ def _physical_ribbon_complete_strip_replay(args: argparse.Namespace) -> None:
         args.strips,
         args.output,
         settings=PhysicalRibbonCompleteStripReplaySettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_lineage_strips(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_lineage_strips(
+        args.replay,
+        args.output,
+        settings=PhysicalRibbonLineageStripSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_lineage_strip_replay(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_lineage_strip_replay(
+        args.lineage_strips,
+        args.output,
+        settings=PhysicalRibbonLineageStripReplaySettings(**settings_values),
         force=args.force,
         progress=print,
     )
@@ -3017,6 +3057,51 @@ def main() -> None:
     )
     physical_ribbon_complete_strip_replay.set_defaults(
         handler=_physical_ribbon_complete_strip_replay
+    )
+    physical_ribbon_lineage_strips = subparsers.add_parser(
+        "analyze-physical-ribbon-lineage-strips",
+        description=(
+            "Rescan unresolved complete native-CT strip assignments while "
+            "requiring the entire inherited strict sheet lineage to remain "
+            "connected, then apply the physical surface gates."
+        ),
+    )
+    physical_ribbon_lineage_strips.add_argument(
+        "--replay", type=Path, required=True
+    )
+    physical_ribbon_lineage_strips.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_lineage_strips.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_lineage_strips.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_lineage_strips.set_defaults(
+        handler=_physical_ribbon_lineage_strips
+    )
+    physical_ribbon_lineage_strip_replay = subparsers.add_parser(
+        "replay-physical-ribbon-lineage-strips",
+        description=(
+            "Jointly replay physically eligible whole-lineage strip "
+            "assignments and recompute every cumulative native-CT face path."
+        ),
+    )
+    physical_ribbon_lineage_strip_replay.add_argument(
+        "--lineage-strips", type=Path, required=True
+    )
+    physical_ribbon_lineage_strip_replay.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_lineage_strip_replay.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_lineage_strip_replay.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_lineage_strip_replay.set_defaults(
+        handler=_physical_ribbon_lineage_strip_replay
     )
     gap_census = subparsers.add_parser(
         "gap-census",

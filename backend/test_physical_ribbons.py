@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -85,6 +86,17 @@ from backend.cubical.physical_ribbon_complete_strips import (
 )
 from backend.cubical.physical_ribbon_complete_strip_replay import (
     _grouped_candidate_states,
+)
+from backend.cubical.physical_ribbon_lineage_strips import (
+    _affected_lineages_preserved,
+    _lineage_preserved,
+    _lineage_target_rows,
+    _selected_component_sizes,
+)
+from backend.cubical.physical_ribbon_lineage_strip_replay import (
+    _complete_inheritance_audit,
+    _cumulative_supplemental_face_arrays,
+    _prior_face_rows,
 )
 from backend.cubical.physical_ribbon_replay_configuration import (
     _materialize_replay_arrays,
@@ -551,6 +563,160 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_lineage_strip_targets_rows_with_split_beam_states(self) -> None:
+        manifest = {
+            "screen": {
+                "rows": [
+                    {
+                        "corridorRow": 2,
+                        "variantCount": 16,
+                        "componentPreservingVariantCount": 0,
+                        "eligibleVariantCount": 0,
+                    },
+                    {
+                        "corridorRow": 4,
+                        "variantCount": 16,
+                        "componentPreservingVariantCount": 3,
+                        "eligibleVariantCount": 0,
+                    },
+                    {
+                        "corridorRow": 6,
+                        "variantCount": 16,
+                        "componentPreservingVariantCount": 16,
+                        "eligibleVariantCount": 0,
+                    },
+                    {
+                        "corridorRow": 8,
+                        "variantCount": 16,
+                        "componentPreservingVariantCount": 8,
+                        "eligibleVariantCount": 2,
+                    },
+                ]
+            }
+        }
+        np.testing.assert_array_equal(
+            _lineage_target_rows(manifest, already_replayed_rows=(4,)), (2,)
+        )
+
+    def test_lineage_constraint_uses_entire_induced_sheet_graph(self) -> None:
+        edge_offset = np.asarray((0, 1, 3, 5, 7, 8), dtype=np.int64)
+        edge_neighbor = np.asarray((1, 0, 2, 1, 3, 2, 4, 3), dtype=np.int32)
+        count, sizes = _selected_component_sizes(
+            {0, 1, 3, 4}, edge_offset, edge_neighbor
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(sizes, (2, 2))
+        preserved, sizes = _lineage_preserved(
+            {0, 1, 2, 3, 4},
+            added=(),
+            removed=(2,),
+            edge_offset=edge_offset,
+            edge_neighbor=edge_neighbor,
+        )
+        self.assertFalse(preserved)
+        self.assertEqual(sizes, (2, 2))
+        preserved, sizes = _lineage_preserved(
+            {0, 1, 2, 3, 4},
+            added=(),
+            removed=(),
+            edge_offset=edge_offset,
+            edge_neighbor=edge_neighbor,
+        )
+        self.assertTrue(preserved)
+        self.assertEqual(sizes, (5,))
+
+    def test_lineage_constraint_rejects_deleted_neighbor_component(self) -> None:
+        edge_offset = np.asarray((0, 1, 2), dtype=np.int64)
+        edge_neighbor = np.asarray((1, 0), dtype=np.int32)
+        preserved, audit = _affected_lineages_preserved(
+            {4: {0}, 7: {1}},
+            np.asarray((4, 7), dtype=np.int32),
+            target_component=4,
+            added=(),
+            removed=(1,),
+            edge_offset=edge_offset,
+            edge_neighbor=edge_neighbor,
+        )
+        self.assertFalse(preserved)
+        self.assertEqual(audit["deletedComponents"], (7,))
+
+    def test_lineage_replay_recovers_all_cumulative_face_rows(self) -> None:
+        manifest = {
+            "surface": {
+                "pathRecords": [
+                    {"corridorRow": 8},
+                    {"corridorRow": 3},
+                    {"corridorRow": 8},
+                ]
+            }
+        }
+        self.assertEqual(_prior_face_rows(manifest), (3, 8))
+
+    def test_lineage_replay_accepts_zero_face_strict_connection(self) -> None:
+        empty_supplemental = {
+            "supplementalTriangleFrontierIndex": np.empty((0, 3), dtype=np.int32)
+        }
+        connections = {
+            "boundaryArcsConnected": np.asarray((0, 1, 0), dtype=np.uint8),
+            "boundaryArcSharedRegionFraction": np.asarray(
+                (0.0, 0.75, 0.0), dtype=np.float32
+            ),
+        }
+        face_record = {"corridorRow": 2, "eligible": True}
+        with patch(
+            "backend.cubical.physical_ribbon_lineage_strip_replay._evaluate_corridor_connections",
+            return_value=connections,
+        ), patch(
+            "backend.cubical.physical_ribbon_lineage_strip_replay._supplemental_face_arrays",
+            return_value=(empty_supplemental, [face_record]),
+        ) as supplemental:
+            arrays, records, strict_rows = _cumulative_supplemental_face_arrays(
+                (1, 2),
+                {},
+                {},
+                surface_settings=object(),
+                face_settings=PhysicalRibbonCorridorFaceSettings(),
+            )
+        self.assertIs(arrays, empty_supplemental)
+        self.assertEqual(strict_rows, (1,))
+        self.assertTrue(records[0]["eligible"])
+        self.assertEqual(records[0]["physicalPathFaceCount"], 0)
+        self.assertIs(records[1], face_record)
+        self.assertEqual(supplemental.call_args.args[0], (2,))
+
+    def test_lineage_replay_rejects_deleted_prior_component(self) -> None:
+        audit = _complete_inheritance_audit(
+            np.asarray((1, 1, 1), dtype=bool),
+            np.asarray((0, 0, 1), dtype=np.int32),
+            np.asarray((1, 1, 0), dtype=bool),
+            np.asarray((0, 0, -1), dtype=np.int32),
+            minimum_substantial_ribbon_count=2,
+        )
+        self.assertEqual(audit["deletedPriorComponentCount"], 1)
+        self.assertEqual(audit["deletedPriorComponents"], [1])
+        self.assertEqual(audit["orphanFinalComponentCount"], 0)
+
+    def test_lineage_replay_only_absorbs_provisional_components(self) -> None:
+        allowed = _complete_inheritance_audit(
+            np.asarray((1, 1, 1), dtype=bool),
+            np.asarray((0, 0, 1), dtype=np.int32),
+            np.asarray((1, 1, 1), dtype=bool),
+            np.asarray((0, 0, 0), dtype=np.int32),
+            minimum_substantial_ribbon_count=2,
+        )
+        self.assertEqual(allowed["crossPriorComponentFusionCount"], 1)
+        self.assertEqual(allowed["allowedProvisionalAbsorptionCount"], 1)
+        self.assertEqual(allowed["forbiddenSubstantialFusionCount"], 0)
+        forbidden = _complete_inheritance_audit(
+            np.asarray((1, 1, 1, 1), dtype=bool),
+            np.asarray((0, 0, 1, 1), dtype=np.int32),
+            np.asarray((1, 1, 1, 1), dtype=bool),
+            np.asarray((0, 0, 0, 0), dtype=np.int32),
+            minimum_substantial_ribbon_count=2,
+        )
+        self.assertEqual(forbidden["forbiddenSubstantialFusionCount"], 1)
+        self.assertEqual(forbidden["allowedProvisionalAbsorptionCount"], 0)
+
     def test_complete_strip_residuals_ignore_candidate_provenance(self) -> None:
         prior = {
             "corridorEvidenceEligible": np.asarray((1, 1, 1, 0), dtype=np.uint8),

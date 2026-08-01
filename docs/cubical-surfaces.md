@@ -589,6 +589,45 @@ which remains a target rather than being hidden by the corridor success count.
 Complete-strip screening takes 274 seconds and cumulative replay with both the
 global and new-only flattened native-CT montages takes 100 seconds on CPU.
 
+The apparent failure of rows 25, 51, 83, and 84 was an objective failure, not
+a missing-Acus-mode failure.  Their highest-ranked complete assignments remove
+articulation ribbons from an inherited component; the surface screen therefore
+sees plausible local strips that detach between six and 31 existing ribbons.
+`analyze-physical-ribbon-lineage-strips` scans the retained 16,384-state factor
+beam with connectivity as a hard constraint.  Every inherited component touched
+by an assignment must remain nonempty and connected, including components that
+are not the target sheet.  The latter clause matters: 2,659 otherwise competitive
+row-25 states delete a neighboring one-ribbon component.  The first 16 valid
+states occur by beam rank 3,962 for row 25, 85 for row 51, 779 for row 83, and
+2,570 for row 84.
+
+All four strips remain recoverable under that stronger contract.  The audit
+retains 64 lineage-safe complete assignments, of which 44 pass the native-CT
+surface screen: 16 for row 25, one for row 51, 16 for row 83, and 11 for row 84.
+Row 51 is already connected by strict triangles and therefore needs zero
+supplemental faces.  Cumulative replay explicitly accepts that zero-face success
+instead of requiring an unnecessary Delaunay closure.
+
+The replay also distinguishes provisional fragments from established sheet
+identity.  A CT-backed strip may absorb a component below the existing
+`minimum_component_ribbon_count` chart threshold, but it may not fuse two
+components that independently meet that threshold.  This is a scale-derived
+rule rather than a row-specific exception.  In the selected row-25 state the
+300-ribbon sheet absorbs one isolated ribbon; no inherited component is deleted
+or split, no orphan component is created, and no two substantial sheets fuse.
+
+`replay-physical-ribbon-lineage-strips` commits all four repairs in its first
+exact state.  Thirty-two ribbons replace 18, strict triangles rise from 28,414
+to 28,451, and 169 cumulative CT faces produce 28,620 total triangles.  All 20
+required prior and new corridor connections survive.  Edge-connected triangle
+regions fall from 753 to 746 and interior holes from 28 to 27, while the two
+macro holes remain explicit.  The mesh has no interface conflict, profile
+crossing, inherited split, deleted component, orphan component, substantial
+sheet fusion, non-manifold edge, or nonadjacent flattened-chart overlap.  The
+minimum affected strict area retention is 0.994591.  Lineage enumeration and
+physical screening take 88 seconds; cumulative exact replay and four new native-
+CT flattenings take 102 seconds on the current CPU implementation.
+
 The reproducible commands are:
 
 ```bash
@@ -733,4 +772,12 @@ python -m backend.cubical analyze-physical-ribbon-complete-strips \
 python -m backend.cubical replay-physical-ribbon-complete-strips \
   --strips work/multiseam-2x2-b00c03c/physical-ribbon-complete-strips-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-complete-strip-replay-v1
+
+python -m backend.cubical analyze-physical-ribbon-lineage-strips \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-complete-strip-replay-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strips-v1
+
+python -m backend.cubical replay-physical-ribbon-lineage-strips \
+  --lineage-strips work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strips-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strip-replay-v1
 ```
