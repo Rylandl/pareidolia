@@ -77,6 +77,15 @@ from backend.cubical.physical_ribbon_corridor_face_replay import (
     _edge_manifold_audit,
     _optimize_candidate_state,
 )
+from backend.cubical.physical_ribbon_complete_strips import (
+    _residual_corridor_rows,
+    _selection_key as _complete_strip_selection_key,
+    _split_audit,
+    _strict_surface,
+)
+from backend.cubical.physical_ribbon_complete_strip_replay import (
+    _grouped_candidate_states,
+)
 from backend.cubical.physical_ribbon_replay_configuration import (
     _materialize_replay_arrays,
 )
@@ -542,6 +551,109 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_complete_strip_residuals_ignore_candidate_provenance(self) -> None:
+        prior = {
+            "corridorEvidenceEligible": np.asarray((1, 1, 1, 0), dtype=np.uint8),
+            "corridorReplayProposalSuccessful": np.asarray(
+                (0, 1, 0, 0), dtype=np.uint8
+            ),
+        }
+        manifest = {"optimization": {"chosenCorridorRows": [2]}}
+        np.testing.assert_array_equal(
+            _residual_corridor_rows(manifest, prior), (0,)
+        )
+
+    def test_complete_strip_strict_surface_excludes_ct_closure_faces(self) -> None:
+        replay = {
+            "baseStrictTriangleCount": np.asarray((1,), dtype=np.int64),
+            "triangleFrontierIndex": np.asarray(
+                ((0, 1, 2), (1, 2, 3)), dtype=np.int32
+            ),
+            "triangleAreaVoxelsSquared": np.asarray((2.0, 3.0)),
+            "triangleNormalResidualDegrees": np.asarray((4.0, 5.0)),
+            "selected": np.asarray((1, 1, 1, 1), dtype=np.uint8),
+        }
+        strict = _strict_surface(replay)
+        self.assertEqual(len(strict["triangleFrontierIndex"]), 1)
+        self.assertEqual(len(strict["triangleAreaVoxelsSquared"]), 1)
+        self.assertEqual(len(strict["selected"]), 4)
+
+    def test_complete_strip_split_audit_measures_detached_lineage(self) -> None:
+        audit = _split_audit(
+            np.asarray((1, 1, 1, 1, 0), dtype=bool),
+            np.asarray((0, 0, 1, 1, -1), dtype=np.int32),
+            np.asarray((7, 7, 7, 7, 7), dtype=np.int32),
+            7,
+        )
+        self.assertTrue(audit["split"])
+        self.assertEqual(audit["descendantRibbonCounts"], [2, 2])
+        self.assertEqual(audit["detachedRibbonCount"], 2)
+        self.assertAlmostEqual(audit["largestDescendantFraction"], 0.5)
+
+    def test_complete_strip_selection_prefers_strict_then_face_debt(self) -> None:
+        common = {
+            "eligible": True,
+            "triangleRegionCountBefore": 2,
+            "triangleRegionCountAfter": 1,
+            "strictAreaRetention": 1.0,
+            "localObjectiveDelta": 1.0,
+            "patchCoverage": 0.8,
+            "variantRank": 0,
+        }
+        strict = {
+            **common,
+            "strictConnected": True,
+            "physicalPathCost": 0.0,
+            "physicalPathFaceCount": 0,
+        }
+        faced = {
+            **common,
+            "strictConnected": False,
+            "physicalPathCost": 1.0,
+            "physicalPathFaceCount": 1,
+        }
+        self.assertGreater(
+            _complete_strip_selection_key(strict),
+            _complete_strip_selection_key(faced),
+        )
+
+    def test_complete_strip_replay_chooses_one_variant_per_corridor(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray(
+                (0, 1, 2, 3), dtype=np.int64
+            ),
+            "corridorVariantAddedFrontierIndex": np.asarray(
+                (0, 1, 2), dtype=np.int32
+            ),
+            "corridorVariantRemovedOffset": np.asarray(
+                (0, 0, 0, 0), dtype=np.int64
+            ),
+            "corridorVariantRemovedFrontierIndex": np.empty(0, dtype=np.int32),
+        }
+        candidates = [
+            {
+                "corridorRow": row,
+                "variantIndex": index,
+                "physicalPathCost": cost,
+                "physicalPathFaceCount": 1,
+                "triangleRegionCountBefore": 2,
+                "triangleRegionCountAfter": 1,
+                "strictAreaRetention": 1.0,
+                "localObjectiveDelta": 1.0,
+                "patchCoverage": 0.8,
+            }
+            for row, index, cost in ((5, 0, 2.0), (5, 1, 1.0), (7, 2, 1.0))
+        ]
+        states, stats = _grouped_candidate_states(
+            candidates,
+            variants,
+            valid_modifications=lambda added, _removed: not ({1, 2} <= added),
+            beam_width=32,
+        )
+        self.assertEqual(states[0]["rows"], (5, 7))
+        self.assertEqual(states[0]["variantIndices"], (0, 2))
+        self.assertEqual(stats["corridorCount"], 2)
+
     def test_corridor_deficit_support_metrics_are_spatial(self) -> None:
         distance, index = _nearest_distance_and_index(
             np.asarray(((0.0, 0.0, 0.0), (4.0, 0.0, 0.0))),

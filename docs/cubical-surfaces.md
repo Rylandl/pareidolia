@@ -549,6 +549,46 @@ contain no nonadjacent chart overlap. Deficit analysis takes 59 seconds,
 independent face screening about 85 seconds, and the cumulative replay plus
 eight flattened previews about 123 seconds on the current CPU implementation.
 
+The next residual audit removes candidate provenance from the decision. The
+one-sided experiment had only exact-screened complete matchings that contained
+a newly admitted one-sided ribbon, even when a complete bidirectional matching
+already existed in the same native-CT strip. That filter is useful for testing
+a frontier mechanism but is not a physical property of papyrus.
+`analyze-physical-ribbon-complete-strips` starts from the cumulative
+37,971-ribbon face replay, enumerates up to 16 complete both-arc assignments for
+each of its eight unresolved CT strips, and screens all of them against the
+whole strip. Interface conflicts, crossing conflicts, and inherited-component
+splits are measured before any mesh completion.
+
+The audit evaluates 128 assignments. Sixty-seven preserve their inherited
+strict component and 16 also admit a physical CT-face path. Four alternatives
+repair row 72 and twelve repair row 81. Row 81 is a useful tight-bend case: its
+selected CT model reaches a minimum curvature radius of 0.490 local sheet
+thicknesses while retaining 0.883 context-profile correlation, 0.352 boundary
+trace correlation, and a 0.645 competing-layer margin. Rows 25, 83, and 84
+instead split every complete assignment, detaching respectively 20--21, nine,
+and six--seven inherited ribbons. Row 51 has only three component-preserving
+states and no physical face path. Row 87 has physical paths but loses at least
+2.2 percent of strict supported area, while sparse row 90 still has no path.
+These are now explicit structural classes rather than missing-candidate counts.
+
+`replay-physical-ribbon-complete-strips` groups alternatives by CT strip,
+chooses at most one state per strip under the exact interface and crossing
+constraints, and then rebuilds the cumulative charts. Every earlier face path
+and prior exact corridor is recomputed jointly before the state can commit.
+Rows 72 and 81 coexist on the first exact state: ten ribbons replace ten,
+all 4,305 strict components remain, and all 14 previous corridor repairs are
+preserved. Strict triangles rise from 28,412 to 28,414; the attached physical
+closure grows from 112 to 130 faces, yielding 28,544 triangles and reducing
+edge-connected triangle regions from 755 to 753. The minimum affected strict
+area retention is 0.999985, and the row-81 component gains 5.9 percent area.
+The mesh remains edge-manifold with no interface conflict, crossing, inherited
+split, cross-sheet fusion, or flattened chart overlap. Macro holes remain at
+two; the boundary audit exposes one additional small interior loop (27 to 28),
+which remains a target rather than being hidden by the corridor success count.
+Complete-strip screening takes 274 seconds and cumulative replay with both the
+global and new-only flattened native-CT montages takes 100 seconds on CPU.
+
 The reproducible commands are:
 
 ```bash
@@ -685,4 +725,12 @@ python -m backend.cubical analyze-physical-ribbon-corridor-faces \
 python -m backend.cubical replay-physical-ribbon-corridor-faces \
   --faces work/multiseam-2x2-b00c03c/physical-ribbon-corridor-faces-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-face-replay-v1
+
+python -m backend.cubical analyze-physical-ribbon-complete-strips \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-corridor-face-replay-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-complete-strips-v1
+
+python -m backend.cubical replay-physical-ribbon-complete-strips \
+  --strips work/multiseam-2x2-b00c03c/physical-ribbon-complete-strips-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-complete-strip-replay-v1
 ```

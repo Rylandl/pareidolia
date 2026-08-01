@@ -160,6 +160,14 @@ from .physical_ribbon_corridor_face_replay import (
     PhysicalRibbonCorridorFaceReplaySettings,
     run_physical_ribbon_corridor_face_replay,
 )
+from .physical_ribbon_complete_strips import (
+    PhysicalRibbonCompleteStripSettings,
+    run_physical_ribbon_complete_strips,
+)
+from .physical_ribbon_complete_strip_replay import (
+    PhysicalRibbonCompleteStripReplaySettings,
+    run_physical_ribbon_complete_strip_replay,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -1032,6 +1040,38 @@ def _physical_ribbon_corridor_face_replay(args: argparse.Namespace) -> None:
         args.faces,
         args.output,
         settings=PhysicalRibbonCorridorFaceReplaySettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_complete_strips(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_complete_strips(
+        args.replay,
+        args.output,
+        settings=PhysicalRibbonCompleteStripSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_complete_strip_replay(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_complete_strip_replay(
+        args.strips,
+        args.output,
+        settings=PhysicalRibbonCompleteStripReplaySettings(**settings_values),
         force=args.force,
         progress=print,
     )
@@ -2931,6 +2971,52 @@ def main() -> None:
     )
     physical_ribbon_corridor_face_replay.set_defaults(
         handler=_physical_ribbon_corridor_face_replay
+    )
+    physical_ribbon_complete_strips = subparsers.add_parser(
+        "analyze-physical-ribbon-complete-strips",
+        description=(
+            "Enumerate complete both-arc matchings for residual native-CT "
+            "strips without filtering by candidate provenance, then screen "
+            "their topology and physically supported surface closure."
+        ),
+    )
+    physical_ribbon_complete_strips.add_argument(
+        "--replay", type=Path, required=True
+    )
+    physical_ribbon_complete_strips.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_complete_strips.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_complete_strips.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_complete_strips.set_defaults(
+        handler=_physical_ribbon_complete_strips
+    )
+    physical_ribbon_complete_strip_replay = subparsers.add_parser(
+        "replay-physical-ribbon-complete-strips",
+        description=(
+            "Jointly replay physically eligible complete-strip assignments, "
+            "then recompute every prior and new CT-supported face closure in "
+            "the final shared sheet charts."
+        ),
+    )
+    physical_ribbon_complete_strip_replay.add_argument(
+        "--strips", type=Path, required=True
+    )
+    physical_ribbon_complete_strip_replay.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_complete_strip_replay.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_complete_strip_replay.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_complete_strip_replay.set_defaults(
+        handler=_physical_ribbon_complete_strip_replay
     )
     gap_census = subparsers.add_parser(
         "gap-census",
