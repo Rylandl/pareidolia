@@ -64,6 +64,7 @@ class PhysicalRibbonCompleteStripSettings:
     minimum_variant_patch_coverage: float = 0.45
     minimum_anchor_count_per_arc: int = 1
     minimum_strict_surface_area_retention: float = 0.98
+    minimum_preclosure_surface_area_retention: float = 0.95
 
     def __post_init__(self) -> None:
         if not 1 <= self.maximum_variants_per_corridor <= 16:
@@ -74,6 +75,13 @@ class PhysicalRibbonCompleteStripSettings:
             raise ValueError("complete strips require an anchor on both arcs")
         if not 0.0 < self.minimum_strict_surface_area_retention <= 1.0:
             raise ValueError("strict surface-area retention must lie in (0, 1]")
+        if not 0.0 < self.minimum_preclosure_surface_area_retention <= (
+            self.minimum_strict_surface_area_retention
+        ):
+            raise ValueError(
+                "preclosure area retention must be positive and no larger "
+                "than final area retention"
+            )
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -178,11 +186,28 @@ def _selection_key(record: Mapping[str, Any]) -> tuple[float, ...]:
         -path_faces,
         float(record["triangleRegionCountBefore"])
         - float(record["triangleRegionCountAfter"]),
+        float(record.get("augmentedAreaRetention", record["strictAreaRetention"])),
         float(record["strictAreaRetention"]),
         float(record["localObjectiveDelta"]),
         float(record["patchCoverage"]),
         -float(record["variantRank"]),
     )
+
+
+def _area_retention_decision(
+    strict_retention: float,
+    augmented_retention: float,
+    settings: PhysicalRibbonCompleteStripSettings,
+) -> str:
+    if strict_retention >= settings.minimum_strict_surface_area_retention:
+        return "strict-area-sufficient"
+    if (
+        strict_retention >= settings.minimum_preclosure_surface_area_retention
+        and augmented_retention
+        >= settings.minimum_strict_surface_area_retention
+    ):
+        return "ct-closure-replaces-area"
+    return "insufficient-area"
 
 
 def _screen_complete_strip_variants(
@@ -207,6 +232,8 @@ def _screen_complete_strip_variants(
     largest_descendant_fraction = np.zeros(variant_count, dtype=np.float32)
     strict_connected = np.zeros(variant_count, dtype=np.uint8)
     strict_area_retention = np.zeros(variant_count, dtype=np.float32)
+    augmented_area_retention = np.zeros(variant_count, dtype=np.float32)
+    closure_area = np.zeros(variant_count, dtype=np.float32)
     region_before = np.zeros(variant_count, dtype=np.int32)
     region_after = np.zeros(variant_count, dtype=np.int32)
     triangle_before = np.zeros(variant_count, dtype=np.int32)
@@ -300,6 +327,9 @@ def _screen_complete_strip_variants(
                 "componentSplit": split,
                 "strictConnected": False,
                 "strictAreaRetention": 0.0,
+                "ctClosureAreaVoxelsSquared": 0.0,
+                "augmentedAreaRetention": 0.0,
+                "areaRetentionDecision": "unreconstructed",
                 "triangleRegionCountBefore": base_regions,
                 "triangleRegionCountAfter": 0,
                 "triangleCountBefore": len(base_index),
@@ -367,20 +397,41 @@ def _screen_complete_strip_variants(
                     ),
                     "eligible": True,
                 }
+                screened_arrays: dict[str, np.ndarray] = {}
             else:
-                screened, _ = _screen_corridor_face_path(
+                screened, screened_arrays = _screen_corridor_face_path(
                     row,
                     local_surface,
                     corridor,
                     surface_settings=surface_settings,
                     settings=face_settings,
                 )
+            candidate_closure_area = 0.0
+            if screened_arrays:
+                closure_mask = np.asarray(
+                    screened_arrays["candidatePhysicalClosure"], dtype=np.uint8
+                ) > 0
+                candidate_closure_area = float(
+                    np.sum(
+                        np.asarray(
+                            screened_arrays["candidateAreaVoxelsSquared"],
+                            dtype=np.float32,
+                        )[closure_mask]
+                    )
+                )
+            augmented_retention = (
+                local_area + candidate_closure_area
+            ) / max(base_area, 1.0e-6)
+            area_decision = _area_retention_decision(
+                retention, augmented_retention, settings
+            )
             eligible = bool(
                 screened["eligible"]
-                and retention
-                >= settings.minimum_strict_surface_area_retention
+                and area_decision != "insufficient-area"
                 and local_regions <= base_regions
             )
+            augmented_area_retention[variant_index] = augmented_retention
+            closure_area[variant_index] = candidate_closure_area
             physical_eligible[variant_index] = int(eligible)
             physical_path_count[variant_index] = int(
                 screened["physicalPathFaceCount"]
@@ -402,6 +453,13 @@ def _screen_complete_strip_variants(
                 {
                     "strictConnected": is_strict_connected,
                     "strictAreaRetention": round(retention, 6),
+                    "ctClosureAreaVoxelsSquared": round(
+                        candidate_closure_area, 6
+                    ),
+                    "augmentedAreaRetention": round(
+                        augmented_retention, 6
+                    ),
+                    "areaRetentionDecision": area_decision,
                     "triangleRegionCountAfter": local_regions,
                     "triangleCountAfter": len(local_triangle),
                     "physicalPathFaceCount": int(
@@ -483,6 +541,8 @@ def _screen_complete_strip_variants(
         ),
         "corridorVariantStrictConnected": strict_connected,
         "corridorVariantStrictAreaRetention": strict_area_retention,
+        "corridorVariantCtClosureAreaVoxelsSquared": closure_area,
+        "corridorVariantAugmentedAreaRetention": augmented_area_retention,
         "corridorVariantTriangleRegionCountBefore": region_before,
         "corridorVariantTriangleRegionCountAfter": region_after,
         "corridorVariantTriangleCountBefore": triangle_before,
@@ -509,6 +569,11 @@ def _screen_complete_strip_variants(
         ),
         "strictConnectedVariantCount": int(np.count_nonzero(strict_connected)),
         "physicalEligibleVariantCount": int(np.count_nonzero(physical_eligible)),
+        "ctClosureAreaReplacementVariantCount": sum(
+            value["eligible"]
+            and value["areaRetentionDecision"] == "ct-closure-replaces-area"
+            for value in records
+        ),
         "corridorWithPhysicalCompletionCount": sum(
             value["eligibleVariantCount"] > 0 for value in row_records
         ),

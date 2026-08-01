@@ -10,10 +10,8 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .contracts import atomic_json, canonical_json_hash, sha256_file
-from .physical_ribbon_bridging import _load_npz, _write_npz
+from .physical_ribbon_bridging import _write_npz
 from .physical_ribbon_complete_strip_replay import (
-    PHYSICAL_RIBBON_COMPLETE_STRIP_REPLAY_SCHEMA,
-    PHYSICAL_RIBBON_COMPLETE_STRIP_REPLAY_STEM,
     _load_complete_strip_artifact,
 )
 from .physical_ribbon_complete_strips import (
@@ -30,6 +28,10 @@ from .physical_ribbon_corridor_one_sided import (
 from .physical_ribbon_corridor_variants import (
     _corridor_boundary_nodes,
     _corridor_settings_from_manifest,
+)
+from .physical_ribbon_cumulative_replay import (
+    cumulative_original_strip_reference,
+    load_cumulative_strip_replay_artifact,
 )
 from .physical_ribbon_patch_corridors import (
     PhysicalRibbonPatchCorridorSettings,
@@ -52,49 +54,114 @@ class PhysicalRibbonLineageStripSettings:
     """Search settings for complete strips that preserve sheet lineage."""
 
     maximum_variants_per_corridor: int = 16
+    coverage_priority_variant_count: int = 8
     minimum_variant_patch_coverage: float = 0.45
     minimum_anchor_count_per_arc: int = 1
     minimum_strict_surface_area_retention: float = 0.98
+    minimum_preclosure_surface_area_retention: float = 0.95
 
     def __post_init__(self) -> None:
         if not 1 <= self.maximum_variants_per_corridor <= 16:
             raise ValueError("lineage-strip variant count must lie in [1, 16]")
+        if not 0 <= self.coverage_priority_variant_count <= (
+            self.maximum_variants_per_corridor
+        ):
+            raise ValueError(
+                "coverage-priority variant count must fit the retained budget"
+            )
         if not 0.0 < self.minimum_variant_patch_coverage <= 1.0:
             raise ValueError("lineage-strip patch coverage must lie in (0, 1]")
         if self.minimum_anchor_count_per_arc < 1:
             raise ValueError("lineage strips require an anchor on both arcs")
         if not 0.0 < self.minimum_strict_surface_area_retention <= 1.0:
             raise ValueError("strict surface-area retention must lie in (0, 1]")
+        if not 0.0 < self.minimum_preclosure_surface_area_retention <= (
+            self.minimum_strict_surface_area_retention
+        ):
+            raise ValueError(
+                "preclosure area retention must be positive and no larger "
+                "than final area retention"
+            )
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
 
     def complete_strip_settings(self) -> PhysicalRibbonCompleteStripSettings:
-        return PhysicalRibbonCompleteStripSettings(**self.record())
+        return PhysicalRibbonCompleteStripSettings(
+            maximum_variants_per_corridor=self.maximum_variants_per_corridor,
+            minimum_variant_patch_coverage=self.minimum_variant_patch_coverage,
+            minimum_anchor_count_per_arc=self.minimum_anchor_count_per_arc,
+            minimum_strict_surface_area_retention=(
+                self.minimum_strict_surface_area_retention
+            ),
+            minimum_preclosure_surface_area_retention=(
+                self.minimum_preclosure_surface_area_retention
+            ),
+        )
+
+
+def _select_lineage_variant_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    maximum_count: int,
+    coverage_priority_count: int,
+) -> list[dict[str, Any]]:
+    """Retain both factor-optimal and whole-strip-supported assignments.
+
+    The factor beam is ordered by its local unary/pair objective.  That is a
+    useful prior, but it can repeatedly retain sparse alternatives that touch
+    the two boundary arcs without populating the intervening strip.  Reserve a
+    fixed part of the exact-screen budget for complete assignments ranked by
+    observed-patch coverage, anchor support, and boundary retention.  The
+    subsequent native-CT surface screen remains the acceptance decision.
+    """
+
+    if maximum_count < 1:
+        raise ValueError("variant selection requires a positive budget")
+    if not 0 <= coverage_priority_count <= maximum_count:
+        raise ValueError("coverage-priority budget must fit the total budget")
+    ordered = [dict(value) for value in candidates]
+    factor_count = maximum_count - coverage_priority_count
+    selected: list[dict[str, Any]] = []
+    selected_beam_ranks: set[int] = set()
+
+    def retain(value: Mapping[str, Any], selection_class: int) -> None:
+        beam_rank = int(value["beamRank"])
+        if beam_rank in selected_beam_ranks or len(selected) >= maximum_count:
+            return
+        record = dict(value)
+        record["selectionClass"] = selection_class
+        selected.append(record)
+        selected_beam_ranks.add(beam_rank)
+
+    for value in ordered[:factor_count]:
+        retain(value, 0)
+    coverage_order = sorted(
+        ordered,
+        key=lambda value: (
+            -float(value["coverage"]),
+            -min(int(value["firstAnchorCount"]), int(value["secondAnchorCount"])),
+            -float(value["retainedBoundaryFraction"]),
+            -float(value["objective"]),
+            int(value["beamRank"]),
+        ),
+    )
+    coverage_target = min(maximum_count, factor_count + coverage_priority_count)
+    for value in coverage_order:
+        if len(selected) >= coverage_target:
+            break
+        retain(value, 1)
+    for value in ordered:
+        if len(selected) >= maximum_count:
+            break
+        retain(value, 0)
+    return selected
 
 
 def _load_complete_strip_replay_artifact(
     root: str | Path,
 ) -> tuple[Path, dict[str, Any], dict[str, np.ndarray]]:
-    value = Path(root).resolve()
-    manifest_path = (
-        value
-        if value.is_file()
-        else value / f"{PHYSICAL_RIBBON_COMPLETE_STRIP_REPLAY_STEM}.json"
-    )
-    manifest = json.loads(manifest_path.read_text())
-    if (
-        manifest.get("schema") != PHYSICAL_RIBBON_COMPLETE_STRIP_REPLAY_SCHEMA
-        or manifest.get("state") != "complete"
-        or manifest.get("method", {}).get("identityLabelsUsed") is not False
-    ):
-        raise ValueError(
-            "lineage strips require a complete label-free complete-strip replay"
-        )
-    data_path = manifest_path.parent / str(manifest["data"]["path"])
-    return manifest_path, manifest, _load_npz(
-        data_path, manifest["data"]["sha256"]
-    )
+    return load_cumulative_strip_replay_artifact(root)
 
 
 def _lineage_target_rows(
@@ -305,6 +372,7 @@ def enumerate_lineage_preserving_strip_variants(
     first_anchor_value: list[int] = []
     second_anchor_value: list[int] = []
     retained_boundary_value: list[float] = []
+    selection_class_value: list[int] = []
     baseline_lineage_count_value: list[int] = []
     retained_lineage_count_value: list[int] = []
     affected_lineage_count_value: list[int] = []
@@ -419,7 +487,7 @@ def enumerate_lineage_preserving_strip_variants(
         rejected_deleted_lineage = 0
         rejected_split_lineage = 0
         scanned = 0
-        accepted_rank = 0
+        valid_candidates: list[dict[str, Any]] = []
         deepest_beam_rank = -1
         for beam_rank, (state_objective, state_mask) in enumerate(states):
             scanned += 1
@@ -503,31 +571,62 @@ def enumerate_lineage_preserving_strip_variants(
                 )
                 continue
 
+            retained_boundary_fraction = (
+                sum(value in proposed for value in first_boundary | second_boundary)
+                / max(len(first_boundary | second_boundary), 1)
+            )
+            target_sizes = lineage_audit["componentSizes"][component_id]
+            valid_candidates.append(
+                {
+                    "beamRank": beam_rank,
+                    "added": added,
+                    "removed": removed,
+                    "objective": float(state_objective),
+                    "objectiveDelta": float(
+                        state_objective - baseline_objective
+                    ),
+                    "coverage": coverage,
+                    "firstAnchorCount": len(first_anchor),
+                    "secondAnchorCount": len(second_anchor),
+                    "retainedBoundaryFraction": retained_boundary_fraction,
+                    "retainedLineageCount": int(target_sizes[0]),
+                    "affectedLineageCount": len(
+                        lineage_audit["affectedComponents"]
+                    ),
+                }
+            )
+
+        retained_candidates = _select_lineage_variant_candidates(
+            valid_candidates,
+            maximum_count=settings.maximum_variants_per_corridor,
+            coverage_priority_count=settings.coverage_priority_variant_count,
+        )
+        for retained_rank, candidate in enumerate(retained_candidates):
             variant_row.append(row)
-            variant_rank.append(accepted_rank)
-            beam_rank_value.append(beam_rank)
+            variant_rank.append(retained_rank)
+            beam_rank_value.append(int(candidate["beamRank"]))
+            added = tuple(int(value) for value in candidate["added"])
+            removed = tuple(int(value) for value in candidate["removed"])
             added_value.extend(added)
             added_offset.append(len(added_value))
             removed_value.extend(removed)
             removed_offset.append(len(removed_value))
-            objective.append(float(state_objective))
-            objective_delta.append(float(state_objective - baseline_objective))
-            coverage_value.append(coverage)
-            first_anchor_value.append(len(first_anchor))
-            second_anchor_value.append(len(second_anchor))
+            objective.append(float(candidate["objective"]))
+            objective_delta.append(float(candidate["objectiveDelta"]))
+            coverage_value.append(float(candidate["coverage"]))
+            first_anchor_value.append(int(candidate["firstAnchorCount"]))
+            second_anchor_value.append(int(candidate["secondAnchorCount"]))
             retained_boundary_value.append(
-                sum(value in proposed for value in first_boundary | second_boundary)
-                / max(len(first_boundary | second_boundary), 1)
+                float(candidate["retainedBoundaryFraction"])
             )
+            selection_class_value.append(int(candidate["selectionClass"]))
             baseline_lineage_count_value.append(len(baseline_lineage_nodes))
-            target_sizes = lineage_audit["componentSizes"][component_id]
-            retained_lineage_count_value.append(int(target_sizes[0]))
-            affected_lineage_count_value.append(
-                len(lineage_audit["affectedComponents"])
+            retained_lineage_count_value.append(
+                int(candidate["retainedLineageCount"])
             )
-            accepted_rank += 1
-            if accepted_rank >= settings.maximum_variants_per_corridor:
-                break
+            affected_lineage_count_value.append(
+                int(candidate["affectedLineageCount"])
+            )
 
         row_stats.append(
             {
@@ -545,10 +644,36 @@ def enumerate_lineage_preserving_strip_variants(
                 "rejectedLineageSplitCount": rejected_lineage,
                 "rejectedDeletedLineageCount": rejected_deleted_lineage,
                 "rejectedSplitAffectedLineageCount": rejected_split_lineage,
-                "acceptedVariantCount": accepted_rank,
-                "acceptedBeamRanks": beam_rank_value[-accepted_rank:]
-                if accepted_rank
-                else [],
+                "validVariantCount": len(valid_candidates),
+                "maximumValidPatchCoverage": (
+                    round(
+                        max(
+                            float(value["coverage"])
+                            for value in valid_candidates
+                        ),
+                        6,
+                    )
+                    if valid_candidates
+                    else None
+                ),
+                "acceptedVariantCount": len(retained_candidates),
+                "acceptedBeamRanks": [
+                    int(value["beamRank"]) for value in retained_candidates
+                ],
+                "coveragePriorityVariantCount": sum(
+                    int(value["selectionClass"] == 1)
+                    for value in retained_candidates
+                ),
+                "acceptedPatchCoverage": [
+                    round(float(value["coverage"]), 6)
+                    for value in retained_candidates
+                ],
+                "acceptedSelectionClass": [
+                    "coverage-priority"
+                    if int(value["selectionClass"]) == 1
+                    else "factor-priority"
+                    for value in retained_candidates
+                ],
                 "beam": beam_stats,
             }
         )
@@ -556,7 +681,8 @@ def enumerate_lineage_preserving_strip_variants(
         if progress is not None:
             progress(
                 f"lineage strips {len(row_stats)}/{len(target_set)} · row {row} · "
-                f"accepted {accepted_rank} · scanned {scanned}/{len(states)}"
+                f"retained {len(retained_candidates)}/{len(valid_candidates)} · "
+                f"scanned {scanned}/{len(states)}"
             )
 
     arrays = {
@@ -588,6 +714,9 @@ def enumerate_lineage_preserving_strip_variants(
         "corridorVariantRetainedBoundaryFraction": np.asarray(
             retained_boundary_value, dtype=np.float32
         ),
+        "corridorVariantSelectionClass": np.asarray(
+            selection_class_value, dtype=np.uint8
+        ),
         "corridorVariantBeamStateCount": state_count_value,
         "corridorVariantBaselineLineageRibbonCount": np.asarray(
             baseline_lineage_count_value, dtype=np.int32
@@ -610,7 +739,8 @@ def enumerate_lineage_preserving_strip_variants(
         "variantDecision": (
             "complete conflict-free both-arc matching with patch coverage and "
             "one connected induced graph for every inherited sheet lineage "
-            "touched by the assignment"
+            "touched by the assignment; the exact-screen budget retains both "
+            "factor-priority and whole-strip-coverage-priority states"
         ),
         "singleCellGrowth": False,
         "identityLabelsUsed": False,
@@ -622,6 +752,7 @@ def run_physical_ribbon_lineage_strips(
     output_root: str | Path,
     *,
     settings: PhysicalRibbonLineageStripSettings | None = None,
+    target_rows: Sequence[int] | None = None,
     force: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -629,7 +760,7 @@ def run_physical_ribbon_lineage_strips(
     replay_path, replay_manifest, replay = _load_complete_strip_replay_artifact(
         replay_root
     )
-    strip_reference = replay_manifest["identity"]["strips"]
+    strip_reference = cumulative_original_strip_reference(replay_manifest)
     strip_path, strip_manifest, _ = _load_complete_strip_artifact(
         strip_reference["manifestPath"]
     )
@@ -681,6 +812,11 @@ def run_physical_ribbon_lineage_strips(
             "dataSha256": configuration_manifest["data"]["sha256"],
         },
         "settings": resolved.record(),
+        "targetRows": (
+            [int(value) for value in sorted(set(target_rows))]
+            if target_rows is not None
+            else None
+        ),
         "faceSettings": face_settings.record(),
         "implementationSha256": sha256_file(Path(__file__)),
         "screenImplementationSha256": sha256_file(
@@ -720,9 +856,13 @@ def run_physical_ribbon_lineage_strips(
         configuration,
         np.asarray(topology["originalFrontierToTargetFrontier"], dtype=np.int32),
     )
-    target_rows = _lineage_target_rows(
-        strip_manifest,
-        replay_manifest["optimization"]["chosenCorridorRows"],
+    resolved_target_rows = (
+        np.asarray(sorted(set(int(value) for value in target_rows)), dtype=np.int32)
+        if target_rows is not None
+        else _lineage_target_rows(
+            strip_manifest,
+            replay_manifest["optimization"]["chosenCorridorRows"],
+        )
     )
     corridor_settings = _corridor_settings_from_manifest(corridor_manifest)
     continuity_weight = float(
@@ -730,7 +870,7 @@ def run_physical_ribbon_lineage_strips(
     )
     if progress is not None:
         progress(
-            f"solving lineage factor graphs for rows {target_rows.tolist()}"
+            f"solving lineage factor graphs for rows {resolved_target_rows.tolist()}"
         )
     reconfiguration, reconfiguration_stats = solve_patch_corridor_reconfigurations(
         remapped,
@@ -745,7 +885,7 @@ def run_physical_ribbon_lineage_strips(
     if progress is not None:
         progress("scanning complete states under whole-lineage connectivity")
     variants, enumeration_stats = enumerate_lineage_preserving_strip_variants(
-        target_rows,
+        resolved_target_rows,
         remapped,
         remapped,
         reconfiguration,
@@ -763,7 +903,7 @@ def run_physical_ribbon_lineage_strips(
             f"screening {len(variants['corridorVariantRow'])} lineage-preserving strips against native CT"
         )
     screen, _, screen_stats = _screen_complete_strip_variants(
-        target_rows,
+        resolved_target_rows,
         variants,
         remapped,
         ribbon,
@@ -779,7 +919,7 @@ def run_physical_ribbon_lineage_strips(
     arrays = {
         **variants,
         **screen,
-        "targetCorridorRow": target_rows,
+        "targetCorridorRow": resolved_target_rows,
     }
     _write_npz(data_path, arrays)
     finished = time.monotonic()
@@ -790,8 +930,8 @@ def run_physical_ribbon_lineage_strips(
         "identity": identity,
         "source": configuration_manifest["source"],
         "target": {
-            "lineageCorridorCount": len(target_rows),
-            "lineageCorridorRows": [int(value) for value in target_rows],
+            "lineageCorridorCount": len(resolved_target_rows),
+            "lineageCorridorRows": [int(value) for value in resolved_target_rows],
             "lineagePreservingVariantCount": len(
                 variants["corridorVariantRow"]
             ),

@@ -628,6 +628,73 @@ minimum affected strict area retention is 0.994591.  Lineage enumeration and
 physical screening take 88 seconds; cumulative exact replay and four new native-
 CT flattenings take 102 seconds on the current CPU implementation.
 
+The two remaining CT-supported strips exposed a different search bias.  The
+lineage scan had stopped as soon as it found 16 valid states in factor-objective
+order.  Row 90 actually has 853 lineage-safe states in the retained 16,384-state
+beam, but the early states all cover only about 45 percent of the complete CT
+strip and cannot form a face path.  The lineage enumerator now scans the whole
+beam and reserves half of its unchanged 16-state exact-screen budget for
+whole-strip-coverage-priority states.  This is still a complete multi-cell strip
+decision: no ribbon, cell, or frontier endpoint can grow independently.  The
+best row-90 states cover 55.9 percent of the dense patch; three admit an exact
+three-face CT path.  Cumulative replay selects five added and three removed
+ribbons, preserves every earlier repair, and moves the global state to 37,987
+ribbons, 28,453 strict triangles, 173 supplemental CT faces, and 745
+edge-connected triangle regions.
+
+Row 87 is the observed hairpin with a modeled minimum curvature radius of only
+0.182 local sheet thicknesses.  Its factor beam contains 14,151 lineage-safe
+states and the coverage-priority states reach the whole strip, but a strict-only
+area test rejects every one: the best retains 97.56 percent before physical face
+completion.  That test was accounting for the conservative identity mesh while
+ignoring the native-CT-gated closure that is actually written to the surface.
+The screen now distinguishes those roles explicitly.  At least 95 percent of
+the strict preclosure area must survive, and the completed CT-supported surface
+must retain at least 98 percent.  Final replay repeats the same audit against the
+complete prior and final augmented meshes, so an overlapping, duplicated, or
+lost earlier CT face cannot inflate the result.
+
+The selected row-87 state covers 100 percent of its fitted strip, adds six
+ribbons, removes four, retains 97.563 percent of strict area, and retains 108.557
+percent of the prior augmented area after five attached CT faces are rebuilt.
+It has no interface conflict, profile crossing, inherited split, deleted or
+orphan component, substantial-component fusion, non-manifold edge, or
+nonadjacent flattened-chart overlap.  The final cumulative state has 37,989
+ribbons, 28,455 strict triangles, 178 CT faces, 28,633 total triangles, and 744
+edge-connected triangle regions.  All 22 native-CT-supported corridors in this
+census are connected.  Interior holes remain at 27 and macro holes at two;
+those are preserved as the next refreshed-census targets rather than hidden by
+the completed-strip count.
+
+The cumulative replay loader accepts both complete-strip and lineage-strip
+replays, and `--corridor-row` may be repeated to target explicit rows.  This
+makes the same immutable factor graph, CT evidence, lineage audit, and exact
+replay usable for successive repairs rather than requiring a one-off script.
+The two coverage-aware audits take 55 and 44 seconds respectively; each exact
+cumulative replay takes about 103 seconds on the current CPU implementation.
+
+The final two iterative commands are:
+
+```bash
+python -m backend.cubical analyze-physical-ribbon-lineage-strips \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strip-replay-v1 \
+  --corridor-row 87 --corridor-row 90 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-coverage-strips-v1
+
+python -m backend.cubical replay-physical-ribbon-lineage-strips \
+  --lineage-strips work/multiseam-2x2-b00c03c/physical-ribbon-lineage-coverage-strips-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-coverage-replay-v1
+
+python -m backend.cubical analyze-physical-ribbon-lineage-strips \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-lineage-coverage-replay-v1 \
+  --corridor-row 87 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-bend-strips-v1
+
+python -m backend.cubical replay-physical-ribbon-lineage-strips \
+  --lineage-strips work/multiseam-2x2-b00c03c/physical-ribbon-lineage-bend-strips-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-bend-replay-v1
+```
+
 The reproducible commands are:
 
 ```bash

@@ -20,6 +20,11 @@ from .physical_ribbon_complete_strips import (
     _strict_surface,
 )
 from .physical_ribbon_configuration import _component_labels
+from .physical_ribbon_cumulative_replay import (
+    cumulative_face_replay_reference,
+    cumulative_prior_exact_reference,
+    load_cumulative_strip_replay_artifact,
+)
 from .physical_ribbon_corridor_dormant import _remap_corridor_surface
 from .physical_ribbon_corridor_face_replay import (
     _affected_component_area_audit,
@@ -39,7 +44,6 @@ from .physical_ribbon_corridor_variants import _corridor_settings_from_manifest
 from .physical_ribbon_lineage_strips import (
     PHYSICAL_RIBBON_LINEAGE_STRIPS_SCHEMA,
     PHYSICAL_RIBBON_LINEAGE_STRIPS_STEM,
-    _load_complete_strip_replay_artifact,
 )
 from .physical_ribbon_patch_corridors import (
     _evaluate_corridor_connections,
@@ -66,6 +70,7 @@ class PhysicalRibbonLineageStripReplaySettings:
     maximum_exact_states: int = 16
     maximum_preview_components: int = 8
     minimum_affected_component_area_retention: float = 0.95
+    minimum_affected_component_augmented_area_retention: float = 0.98
 
     def __post_init__(self) -> None:
         if self.global_assignment_beam_width < 2:
@@ -76,9 +81,37 @@ class PhysicalRibbonLineageStripReplaySettings:
             raise ValueError("lineage replay must preview at least one sheet")
         if not 0.0 < self.minimum_affected_component_area_retention <= 1.0:
             raise ValueError("surface-area retention must lie in (0, 1]")
+        if not self.minimum_affected_component_area_retention <= (
+            self.minimum_affected_component_augmented_area_retention
+        ) <= 1.0:
+            raise ValueError(
+                "augmented area retention must lie between the preclosure "
+                "floor and one"
+            )
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _augmented_area_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Give the generic component-area audit surface-neutral field names."""
+
+    return [
+        {
+            "priorComponent": int(value["priorComponent"]),
+            "finalComponent": int(value["finalComponent"]),
+            "triangleCountBefore": int(value["triangleCountBefore"]),
+            "triangleCountAfter": int(
+                value["triangleCountAfterBeforeSupplementalFaces"]
+            ),
+            "areaBefore": float(value["areaBefore"]),
+            "areaAfter": float(value["areaAfterBeforeSupplementalFaces"]),
+            "areaRetention": float(value["areaRetention"]),
+        }
+        for value in records
+    ]
 
 
 def _load_lineage_strip_artifact(
@@ -268,7 +301,7 @@ def run_physical_ribbon_lineage_strip_replay(
         lineage_root
     )
     replay_reference = lineage_manifest["identity"]["replay"]
-    replay_path, replay_manifest, replay = _load_complete_strip_replay_artifact(
+    replay_path, replay_manifest, replay = load_cumulative_strip_replay_artifact(
         replay_reference["manifestPath"]
     )
     if (
@@ -276,7 +309,7 @@ def run_physical_ribbon_lineage_strip_replay(
         or replay_manifest["data"]["sha256"] != replay_reference["dataSha256"]
     ):
         raise ValueError("lineage-strip source replay has changed")
-    face_reference = replay_manifest["identity"]["replay"]
+    face_reference = cumulative_face_replay_reference(replay_manifest)
     face_path, face_manifest, _ = _load_face_replay_artifact(
         face_reference["manifestPath"]
     )
@@ -285,7 +318,9 @@ def run_physical_ribbon_lineage_strip_replay(
         or face_manifest["data"]["sha256"] != face_reference["dataSha256"]
     ):
         raise ValueError("lineage-strip source face replay has changed")
-    prior_exact_reference = face_manifest["identity"]["replay"]
+    prior_exact_reference = cumulative_prior_exact_reference(
+        replay_manifest, face_manifest
+    )
     prior_exact_path, prior_exact_manifest, prior_exact = _load_replay_artifact(
         prior_exact_reference["manifestPath"]
     )
@@ -554,12 +589,22 @@ def run_physical_ribbon_lineage_strip_replay(
         component_area, minimum_retention = _affected_component_area_audit(
             baseline_surface, strict_surface, affected_components
         )
+        augmented_component_area_raw, minimum_augmented_retention = (
+            _affected_component_area_audit(
+                replay, augmented_surface, affected_components
+            )
+        )
+        augmented_component_area = _augmented_area_records(
+            augmented_component_area_raw
+        )
         surface_valid = not (
             failed_paths
             or disconnected
             or manifold["nonManifoldEdgeCount"]
             or minimum_retention
             < resolved.minimum_affected_component_area_retention
+            or minimum_augmented_retention
+            < resolved.minimum_affected_component_augmented_area_retention
         )
         attempt_record.update(
             {
@@ -569,6 +614,9 @@ def run_physical_ribbon_lineage_strip_replay(
                 "nonManifoldEdgeCount": manifold["nonManifoldEdgeCount"],
                 "minimumAffectedComponentAreaRetention": round(
                     float(minimum_retention), 6
+                ),
+                "minimumAffectedComponentAugmentedAreaRetention": round(
+                    float(minimum_augmented_retention), 6
                 ),
                 "strictBeforeSupplementalFaceRows": [
                     int(value) for value in strict_face_rows
@@ -580,7 +628,9 @@ def run_physical_ribbon_lineage_strip_replay(
             progress(
                 f"lineage state {attempt} rejected · failed paths {failed_paths} "
                 f"· disconnected {disconnected} · manifold "
-                f"{manifold['nonManifoldEdgeCount']} · area {minimum_retention:.6f}"
+                f"{manifold['nonManifoldEdgeCount']} · strict area "
+                f"{minimum_retention:.6f} · augmented area "
+                f"{minimum_augmented_retention:.6f}"
             )
         if surface_valid:
             chosen_result = {
@@ -600,6 +650,10 @@ def run_physical_ribbon_lineage_strip_replay(
                 "manifold": manifold,
                 "componentArea": component_area,
                 "minimumAreaRetention": minimum_retention,
+                "augmentedComponentArea": augmented_component_area,
+                "minimumAugmentedAreaRetention": (
+                    minimum_augmented_retention
+                ),
             }
             break
     if chosen_result is None:
@@ -809,6 +863,12 @@ def run_physical_ribbon_lineage_strip_replay(
             "minimumAffectedComponentAreaRetention": round(
                 float(chosen_result["minimumAreaRetention"]), 6
             ),
+            "affectedComponentsAugmented": chosen_result[
+                "augmentedComponentArea"
+            ],
+            "minimumAffectedComponentAugmentedAreaRetention": round(
+                float(chosen_result["minimumAugmentedAreaRetention"]), 6
+            ),
             "manifold": chosen_result["manifold"],
             "loops": loop_stats,
             "pathRecords": chosen_result["pathRecords"],
@@ -829,6 +889,11 @@ def run_physical_ribbon_lineage_strip_replay(
             "surfaceConnectivity": (
                 "all prior and new native-CT-gated chart-Delaunay paths "
                 "recomputed together in the final shared charts"
+            ),
+            "areaRetention": (
+                "retain the preclosure strict surface above its safety floor "
+                "and the complete prior-versus-final CT-augmented surface "
+                "above the final density threshold"
             ),
             "singleCellGrowth": False,
             "selectionMutated": True,

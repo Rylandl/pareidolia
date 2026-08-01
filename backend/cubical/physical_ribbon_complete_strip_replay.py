@@ -135,13 +135,19 @@ def _candidate_delta(
 def _candidate_increment(candidate: Mapping[str, Any]) -> tuple[float, ...]:
     return (
         1.0,
-        -float(candidate["physicalPathCost"] or 0.0),
-        -float(candidate["physicalPathFaceCount"]),
         float(candidate["triangleRegionCountBefore"])
         - float(candidate["triangleRegionCountAfter"]),
         float(candidate["strictAreaRetention"]) - 1.0,
-        float(candidate["localObjectiveDelta"]),
         float(candidate["patchCoverage"]),
+        float(
+            candidate.get(
+                "augmentedAreaRetention", candidate["strictAreaRetention"]
+            )
+        )
+        - 1.0,
+        -float(candidate["physicalPathFaceCount"]),
+        -float(candidate["physicalPathCost"] or 0.0),
+        float(candidate["localObjectiveDelta"]),
     )
 
 
@@ -159,7 +165,7 @@ def _grouped_candidate_states(
         grouped.setdefault(int(candidate["corridorRow"]), []).append(candidate)
     beam: list[dict[str, Any]] = [
         {
-            "key": (0.0,) * 7,
+            "key": (0.0,) * 8,
             "rows": (),
             "variantIndices": (),
             "added": frozenset(),
@@ -234,8 +240,10 @@ def _grouped_candidate_states(
         "maximumExpandedBeamStates": maximum_expanded,
         "finalBeamStates": len(beam),
         "decision": (
-            "maximize recovered complete CT strips, then minimize CT-face debt "
-            "under one assignment per strip and exact physical conflicts"
+            "maximize recovered complete CT strips, region reduction, strict "
+            "area retention, whole-strip coverage, and augmented area; then "
+            "minimize CT-face debt under one assignment per strip and exact "
+            "physical conflicts"
         ),
         "identityLabelsUsed": False,
     }

@@ -79,6 +79,8 @@ from backend.cubical.physical_ribbon_corridor_face_replay import (
     _optimize_candidate_state,
 )
 from backend.cubical.physical_ribbon_complete_strips import (
+    PhysicalRibbonCompleteStripSettings,
+    _area_retention_decision,
     _residual_corridor_rows,
     _selection_key as _complete_strip_selection_key,
     _split_audit,
@@ -87,10 +89,15 @@ from backend.cubical.physical_ribbon_complete_strips import (
 from backend.cubical.physical_ribbon_complete_strip_replay import (
     _grouped_candidate_states,
 )
+from backend.cubical.physical_ribbon_cumulative_replay import (
+    cumulative_face_replay_reference,
+    cumulative_prior_exact_reference,
+)
 from backend.cubical.physical_ribbon_lineage_strips import (
     _affected_lineages_preserved,
     _lineage_preserved,
     _lineage_target_rows,
+    _select_lineage_variant_candidates,
     _selected_component_sizes,
 )
 from backend.cubical.physical_ribbon_lineage_strip_replay import (
@@ -563,6 +570,77 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_ct_closure_may_replace_small_strict_area_loss(self) -> None:
+        settings = PhysicalRibbonCompleteStripSettings()
+        self.assertEqual(
+            _area_retention_decision(0.99, 0.99, settings),
+            "strict-area-sufficient",
+        )
+        self.assertEqual(
+            _area_retention_decision(0.97, 1.01, settings),
+            "ct-closure-replaces-area",
+        )
+        self.assertEqual(
+            _area_retention_decision(0.94, 1.10, settings),
+            "insufficient-area",
+        )
+        self.assertEqual(
+            _area_retention_decision(0.97, 0.97, settings),
+            "insufficient-area",
+        )
+
+    def test_lineage_variant_budget_retains_dense_strip_states(self) -> None:
+        candidates = [
+            {
+                "beamRank": rank,
+                "coverage": coverage,
+                "firstAnchorCount": 1,
+                "secondAnchorCount": 1,
+                "retainedBoundaryFraction": 0.5,
+                "objective": 10.0 - rank,
+            }
+            for rank, coverage in enumerate((0.50, 0.55, 0.90, 0.95, 0.80))
+        ]
+        retained = _select_lineage_variant_candidates(
+            candidates,
+            maximum_count=4,
+            coverage_priority_count=2,
+        )
+        self.assertEqual(
+            [value["beamRank"] for value in retained], [0, 1, 3, 2]
+        )
+        self.assertEqual(
+            [value["selectionClass"] for value in retained], [0, 0, 1, 1]
+        )
+
+    def test_cumulative_replay_resolves_source_references_by_schema(self) -> None:
+        face_reference = {"manifestPath": "face.json"}
+        exact_reference = {"manifestPath": "exact.json"}
+        complete = {
+            "schema": "pareidolia.physical-ribbon-complete-strip-replay",
+            "identity": {"replay": face_reference},
+        }
+        face = {"identity": {"replay": exact_reference}}
+        self.assertIs(cumulative_face_replay_reference(complete), face_reference)
+        self.assertIs(
+            cumulative_prior_exact_reference(complete, face), exact_reference
+        )
+        iterative_face = {"manifestPath": "iterative-face.json"}
+        iterative_exact = {"manifestPath": "iterative-exact.json"}
+        iterative = {
+            "schema": "pareidolia.physical-ribbon-lineage-strip-replay",
+            "identity": {
+                "faceReplay": iterative_face,
+                "priorExactReplay": iterative_exact,
+            },
+        }
+        self.assertIs(
+            cumulative_face_replay_reference(iterative), iterative_face
+        )
+        self.assertIs(
+            cumulative_prior_exact_reference(iterative, face), iterative_exact
+        )
+
     def test_lineage_strip_targets_rows_with_split_beam_states(self) -> None:
         manifest = {
             "screen": {
@@ -819,6 +897,46 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
         self.assertEqual(states[0]["rows"], (5, 7))
         self.assertEqual(states[0]["variantIndices"], (0, 2))
         self.assertEqual(stats["corridorCount"], 2)
+
+    def test_complete_strip_replay_prioritizes_retained_dense_surface(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray((0, 1, 2), dtype=np.int64),
+            "corridorVariantAddedFrontierIndex": np.asarray((0, 1), dtype=np.int32),
+            "corridorVariantRemovedOffset": np.asarray((0, 0, 0), dtype=np.int64),
+            "corridorVariantRemovedFrontierIndex": np.empty(0, dtype=np.int32),
+        }
+        common = {
+            "corridorRow": 5,
+            "physicalPathFaceCount": 2,
+            "triangleRegionCountBefore": 2,
+            "triangleRegionCountAfter": 1,
+            "localObjectiveDelta": 1.0,
+        }
+        candidates = [
+            {
+                **common,
+                "variantIndex": 0,
+                "physicalPathCost": 1.0,
+                "strictAreaRetention": 0.96,
+                "patchCoverage": 0.8,
+                "augmentedAreaRetention": 1.1,
+            },
+            {
+                **common,
+                "variantIndex": 1,
+                "physicalPathCost": 1.2,
+                "strictAreaRetention": 0.98,
+                "patchCoverage": 1.0,
+                "augmentedAreaRetention": 1.05,
+            },
+        ]
+        states, _ = _grouped_candidate_states(
+            candidates,
+            variants,
+            valid_modifications=lambda _added, _removed: True,
+            beam_width=8,
+        )
+        self.assertEqual(states[0]["variantIndices"], (1,))
 
     def test_corridor_deficit_support_metrics_are_spatial(self) -> None:
         distance, index = _nearest_distance_and_index(

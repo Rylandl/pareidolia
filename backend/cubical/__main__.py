@@ -1096,6 +1096,7 @@ def _physical_ribbon_lineage_strips(args: argparse.Namespace) -> None:
         args.replay,
         args.output,
         settings=PhysicalRibbonLineageStripSettings(**settings_values),
+        target_rows=args.corridor_row,
         force=args.force,
         progress=print,
     )
@@ -3074,6 +3075,15 @@ def main() -> None:
     )
     physical_ribbon_lineage_strips.add_argument(
         "--settings-json", type=Path
+    )
+    physical_ribbon_lineage_strips.add_argument(
+        "--corridor-row",
+        type=int,
+        action="append",
+        help=(
+            "explicit scored corridor row to audit; repeat for multiple rows; "
+            "defaults to prior split-lineage failures"
+        ),
     )
     physical_ribbon_lineage_strips.add_argument(
         "--force", action="store_true"
