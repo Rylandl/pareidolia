@@ -856,6 +856,73 @@ search layer should retain several diverse complete matchings per component
 for exact screening; it should not resume local frontier growth or weaken the
 final gates.
 
+### Diverse whole-patch state ensembles
+
+A single proxy-optimal assignment is not enough to establish saturation.  Two
+complete matchings can have nearly identical unary, continuity, and dense-CT
+coverage scores while producing different strict-mesh topology.  The patch
+solver now declares six fixed physical objective profiles, constructs complete
+global matchings from multiple deterministic starts, and adds forced-exclusion
+branches around choices in the canonical-best ensemble state.  It retains up
+to 16 distinct whole-component states after normalized-Hamming deduplication.
+These are alternative assignments for the entire mutable interface set; no
+individual cell or ribbon is used as an expansion decision.
+
+Every qualified state is rebuilt on the exact induced graph of its inherited
+surface component.  The local rebuild includes all inherited nodes and every
+candidate used by any variant, rejects an added node that joins another
+selected component, and requires all surviving inherited and added nodes to
+remain in one component.  It then recomputes the strict chart, triangles,
+triangle regions, and boundary loops.  A final whole-volume reconstruction
+proves the combined choices against interface reuse, profile crossings,
+deletion, split, fusion, and area loss.  On the 50-state benchmark this
+component-local screen reproduced the prior whole-volume NPZ byte-for-byte
+while reducing total runtime from 313.5 to 124.7 seconds.
+
+Starting from the independently materialized 10-hole checkpoint, the first
+ensemble produces 72 variants and exact-screens all 50 qualified states.
+Eighteen are exact-valid and the best six compatible components replace 40
+incumbents with 41 alternatives.  They close six macro holes and three
+interior holes, add 12 strict triangles, and leave all 734 triangle regions
+and 4,303 component lineages unchanged.  Flattened native-CT audits accept all
+six components; five are compatible at every fixed depth and the remaining
+component is compatible at one depth, preserving a possible delamination
+rather than forcing agreement across normal offsets.
+
+A refreshed 16-state wave at four holes finds a lower-proxy rank-15 state that
+replaces four ribbons with five, adds two triangles, and passes actual-CT
+texture at all three depths without changing topology counts.  Recomputing the
+dense depth field after that assignment exposes a rank-2 forced-exclusion state
+on another component.  It replaces eight ribbons with seven and closes one
+more macro and interior hole while retaining 98.14 percent of affected area;
+all three flattened CT depths are compatible.  An independent final census is
+therefore at 3 macro holes, 100 interior holes, 734 triangle regions, 29,379
+strict triangles, 38,291 selected ribbons, and 4,303 components, with no
+unresolved boundary fan or non-cycle boundary component.  Relative to the
+17-hole checkpoint, 14 macro holes have now been closed without weakening the
+physical or exact-topology gates.
+
+All 347 pixels in the three remaining macro holes are CT-supported.  Two holes
+belong to component 0: its enumerated states regress exact interior-hole
+topology.  The last belongs to component 12: its enumerated states do not pass
+the declared physical proxy gates.  This is a measured fixed point of the
+current 16-state generator, not evidence that the scan lacks a sheet.  The
+next solver work should target complete correspondences that explicitly
+reduce a named boundary loop, rather than widening blind enumeration or
+returning to one-cell frontier growth.
+
+The accepted artifacts are rooted at:
+
+```text
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-ensemble-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-ensemble-iteration2-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-ensemble-iteration3-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-ensemble-iteration3-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-ensemble-iteration3-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-ensemble-iteration3-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-ensemble-iteration3-v1
+```
+
 The reproducible dense-field sequence is:
 
 ```bash

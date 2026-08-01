@@ -36,9 +36,12 @@ from backend.cubical.physical_ribbon_depth_fields import (
     solve_collective_depth_labels,
 )
 from backend.cubical.physical_ribbon_patch_states import (
+    PhysicalRibbonPatchStateSettings,
     _lineage_audit,
+    _prepare_component_exact_graph,
     _selection_conflicts,
     optimize_collective_patch_coverage,
+    optimize_collective_patch_coverage_ensemble,
 )
 from backend.cubical.physical_ribbon_texture_gate import (
     texture_patch_decisions,
@@ -427,6 +430,12 @@ class PhysicalRibbonConfigurationTests(unittest.TestCase):
 
 
 class PhysicalRibbonCollectiveTests(unittest.TestCase):
+    def test_patch_state_settings_allow_disabling_forced_exclusions(self) -> None:
+        settings = PhysicalRibbonPatchStateSettings(
+            maximum_forced_exclusion_trials=0
+        )
+        self.assertEqual(settings.maximum_forced_exclusion_trials, 0)
+
     def test_collective_patch_crosses_negative_single_node_barrier(self) -> None:
         selected, objective = optimize_collective_patch(
             np.full(3, -0.6, dtype=np.float32),
@@ -519,6 +528,68 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
         np.testing.assert_array_equal(selected, (0, 1, 1))
         self.assertEqual(stats["coveredPixelFraction"], 1.0)
         self.assertFalse(stats["singleCellGrowth"])
+
+    def test_patch_state_ensemble_retains_complete_matching_alternatives(self) -> None:
+        states, stats = optimize_collective_patch_coverage_ensemble(
+            np.asarray((0.4, 0.35, 0.1, 0.09), dtype=np.float32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float32),
+            np.asarray((0, 2), dtype=np.int32),
+            np.asarray((1, 3), dtype=np.int32),
+            np.asarray(
+                (
+                    (1, 0),
+                    (1, 0),
+                    (0, 1),
+                    (0, 1),
+                ),
+                dtype=bool,
+            ),
+            np.ones(2, dtype=np.float32),
+            maximum_sweeps=4,
+            initial_selection=np.asarray((1, 0, 0, 0), dtype=bool),
+            maximum_states=4,
+            maximum_forced_exclusion_trials=4,
+            minimum_hamming_fraction=0.01,
+        )
+        self.assertGreaterEqual(len(states), 2)
+        self.assertGreaterEqual(stats["discoveredStateCount"], 2)
+        for selected in states:
+            self.assertFalse(bool(selected[0] and selected[1]))
+            self.assertFalse(bool(selected[2] and selected[3]))
+            self.assertTrue(bool(np.any(selected[:2])))
+            self.assertTrue(bool(np.any(selected[2:])))
+
+    def test_component_exact_graph_marks_selected_external_neighbors(self) -> None:
+        graph = _prepare_component_exact_graph(
+            4,
+            [
+                {
+                    "added": np.asarray((2,), dtype=np.int32),
+                    "removed": np.empty(0, dtype=np.int32),
+                }
+            ],
+            [0],
+            np.asarray((1, 1, 0, 0, 1), dtype=bool),
+            np.asarray((4, 4, -1, -1, 7), dtype=np.int32),
+            {
+                "edgeFirstFrontierIndex": np.asarray(
+                    (0, 1, 2, 0), dtype=np.int32
+                ),
+                "edgeSecondFrontierIndex": np.asarray(
+                    (1, 2, 4, 3), dtype=np.int32
+                ),
+                "edgeScore": np.ones(4, dtype=np.float32),
+            },
+        )
+        np.testing.assert_array_equal(graph.local_to_global, (0, 1, 2))
+        np.testing.assert_array_equal(graph.baseline_selected, (1, 1, 0))
+        np.testing.assert_array_equal(graph.edge_first, (0, 1))
+        np.testing.assert_array_equal(graph.edge_second, (1, 2))
+        np.testing.assert_array_equal(
+            graph.external_selected_neighbor, (0, 0, 1)
+        )
 
     def test_flattened_texture_audit_recovers_coherent_axial_pattern(self) -> None:
         image = np.tile(np.arange(32, dtype=np.float32), (32, 1))
@@ -2123,7 +2194,9 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
             dtype=np.float32,
         )
         surface = {
-            "triangleFrontierIndex": np.asarray(((0, 1, 2), (0, 3, 4)), dtype=np.int32),
+            "triangleFrontierIndex": np.asarray(
+                ((0, 1, 2), (0, 3, 4)), dtype=np.int32
+            ),
             "midpointXYZ": center,
             "signedNormalXYZ": np.tile((0, 0, 1), (5, 1)).astype(np.float32),
         }
@@ -2133,7 +2206,9 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
             "corridorSecondBoundaryEdge": np.asarray((1,), dtype=np.int32),
             "boundaryEdgeFirstFrontierIndex": np.asarray((1, 3), dtype=np.int32),
             "boundaryEdgeSecondFrontierIndex": np.asarray((2, 4), dtype=np.int32),
-            "boundaryEdgeMidpointXYZ": np.asarray(((-0.5, 0.5, 0), (0.5, -0.5, 0)), dtype=np.float32),
+            "boundaryEdgeMidpointXYZ": np.asarray(
+                ((-0.5, 0.5, 0), (0.5, -0.5, 0)), dtype=np.float32
+            ),
             "boundaryEdgeNormalXYZ": np.tile((0, 0, 1), (2, 1)).astype(np.float32),
             "boundaryEdgeLengthVoxels": np.full(2, np.sqrt(2), dtype=np.float32),
             "boundaryEdgeTriangleRegion": np.asarray((0, 1), dtype=np.int32),

@@ -65,6 +65,10 @@ class PhysicalRibbonPatchStateSettings:
     continuity_weight_multiplier: float = 1.0
     surface_alignment_weight_multiplier: float = 1.0
     maximum_local_optimization_sweeps: int = 8
+    maximum_component_state_variants: int = 16
+    maximum_forced_exclusion_trials: int = 24
+    maximum_exact_state_rounds: int = 16
+    minimum_variant_hamming_fraction: float = 0.02
     maximum_preview_components: int = 64
 
     def __post_init__(self) -> None:
@@ -73,10 +77,14 @@ class PhysicalRibbonPatchStateSettings:
             self.minimum_boundary_anchor_count,
             self.minimum_density_only_boundary_anchor_count,
             self.maximum_local_optimization_sweeps,
+            self.maximum_component_state_variants,
+            self.maximum_exact_state_rounds,
             self.maximum_preview_components,
         )
         if any(value < 1 for value in positive_integer):
             raise ValueError("patch-state integer settings must be positive")
+        if self.maximum_forced_exclusion_trials < 0:
+            raise ValueError("forced-exclusion trial count must be nonnegative")
         if not math.isfinite(self.minimum_objective_gain):
             raise ValueError("patch-state objective gate must be finite")
         for value in (
@@ -95,6 +103,7 @@ class PhysicalRibbonPatchStateSettings:
             self.minimum_surface_realization_fraction,
             self.minimum_triangle_area_retention,
             self.minimum_density_only_retained_boundary_fraction,
+            self.minimum_variant_hamming_fraction,
         ):
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError("patch-state fractions must lie in [0, 1]")
@@ -214,6 +223,156 @@ def optimize_collective_patch_coverage(
     allowing a coherent surface to cross the first-node barrier.
     """
 
+    states, statistics = optimize_collective_patch_coverage_ensemble(
+        node_score,
+        edge_first,
+        edge_second,
+        edge_weight,
+        conflict_first,
+        conflict_second,
+        coverage,
+        pixel_weight,
+        maximum_sweeps=maximum_sweeps,
+        initial_selection=initial_selection,
+        maximum_states=1,
+        maximum_forced_exclusion_trials=0,
+        minimum_hamming_fraction=0.0,
+    )
+    return states[0], statistics
+
+
+def _optimize_coverage_from_start(
+    node_score: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    edge_weight: np.ndarray,
+    conflicts: tuple[np.ndarray, ...],
+    coverage: np.ndarray,
+    pixel_weight: np.ndarray,
+    selected_value: np.ndarray,
+    *,
+    maximum_sweeps: int,
+    forbidden: np.ndarray,
+) -> tuple[np.ndarray, float, int]:
+    selected = np.asarray(selected_value, dtype=bool).copy()
+    selected[forbidden] = False
+    current = _coverage_objective(
+        selected,
+        node_score,
+        edge_first,
+        edge_second,
+        edge_weight,
+        coverage,
+        pixel_weight,
+    )
+    sweeps = 0
+    for sweep in range(maximum_sweeps):
+        changed = False
+        # Exact one-variable removals preserve pair and saturated coverage
+        # accounting; simultaneous marginal pruning would double-count.
+        while np.any(selected):
+            active = np.flatnonzero(selected)
+            best_remove_gain = 1.0e-9
+            best_remove = -1
+            for node_value in active:
+                trial = selected.copy()
+                trial[int(node_value)] = False
+                value = _coverage_objective(
+                    trial,
+                    node_score,
+                    edge_first,
+                    edge_second,
+                    edge_weight,
+                    coverage,
+                    pixel_weight,
+                )
+                gain = value - current
+                if gain > best_remove_gain:
+                    best_remove_gain = gain
+                    best_remove = int(node_value)
+            if best_remove < 0:
+                break
+            selected[best_remove] = False
+            current += best_remove_gain
+            changed = True
+        best_gain = 1.0e-9
+        best_trial: np.ndarray | None = None
+        for node_value in np.flatnonzero(~selected & ~forbidden):
+            node = int(node_value)
+            trial = selected.copy()
+            if len(conflicts[node]):
+                trial[conflicts[node]] = False
+            trial[node] = True
+            value = _coverage_objective(
+                trial,
+                node_score,
+                edge_first,
+                edge_second,
+                edge_weight,
+                coverage,
+                pixel_weight,
+            )
+            gain = value - current
+            if gain > best_gain:
+                best_gain = gain
+                best_trial = trial
+        if best_trial is not None:
+            selected = best_trial
+            current += best_gain
+            changed = True
+        sweeps = sweep + 1
+        if not changed:
+            break
+    return (
+        selected,
+        _coverage_objective(
+            selected,
+            node_score,
+            edge_first,
+            edge_second,
+            edge_weight,
+            coverage,
+            pixel_weight,
+        ),
+        sweeps,
+    )
+
+
+def _normalized_hamming(first: np.ndarray, second: np.ndarray) -> float:
+    relevant = np.asarray(first, dtype=bool) | np.asarray(second, dtype=bool)
+    denominator = max(int(np.count_nonzero(relevant)), 1)
+    return (
+        float(np.count_nonzero(np.asarray(first) != np.asarray(second)))
+        / denominator
+    )
+
+
+def optimize_collective_patch_coverage_ensemble(
+    node_score: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    edge_weight: np.ndarray,
+    conflict_first: np.ndarray,
+    conflict_second: np.ndarray,
+    coverage: np.ndarray,
+    pixel_weight: np.ndarray,
+    *,
+    maximum_sweeps: int,
+    initial_selection: np.ndarray,
+    maximum_states: int,
+    maximum_forced_exclusion_trials: int,
+    minimum_hamming_fraction: float,
+) -> tuple[list[np.ndarray], dict[str, Any]]:
+    """Return diverse complete local optima under a fixed objective ensemble.
+
+    A residual patch is a discrete correspondence problem: several globally
+    coherent matchings may have nearly identical proxy score but different
+    exact topology.  We therefore optimize a declared ensemble of physical
+    priorities and retain distinct whole-patch states for exact reconstruction.
+    Forced exclusions branch only on choices made by the canonical-best
+    ensemble state; they do not grow or judge one cell in isolation.
+    """
+
     node_score = np.asarray(node_score, dtype=np.float64)
     edge_first = np.asarray(edge_first, dtype=np.int32)
     edge_second = np.asarray(edge_second, dtype=np.int32)
@@ -222,6 +381,12 @@ def optimize_collective_patch_coverage(
     pixel_weight = np.asarray(pixel_weight, dtype=np.float64)
     initial = np.asarray(initial_selection, dtype=bool)
     node_count = len(node_score)
+    if maximum_states < 1:
+        raise ValueError("maximum_states must be positive")
+    if maximum_forced_exclusion_trials < 0:
+        raise ValueError("maximum_forced_exclusion_trials must be nonnegative")
+    if not 0.0 <= minimum_hamming_fraction <= 1.0:
+        raise ValueError("minimum_hamming_fraction must lie in [0, 1]")
     if coverage.shape != (node_count, len(pixel_weight)):
         raise ValueError("patch coverage matrix has the wrong shape")
     conflicts = _conflict_neighbors(
@@ -233,154 +398,268 @@ def optimize_collective_patch_coverage(
     np.add.at(incident, edge_first, edge_weight)
     np.add.at(incident, edge_second, edge_weight)
     coverage_potential = coverage.astype(np.float64) @ pixel_weight
-    starts = [initial.copy()]
-    rankings = (
-        node_score + 0.5 * incident + coverage_potential,
-        node_score + incident + 0.5 * coverage_potential,
-        coverage_potential + 0.25 * (node_score + incident),
-        node_score + 0.25 * incident + 2.0 * coverage_potential,
+    # (name, unary multiplier, continuity multiplier, dense-coverage multiplier)
+    profiles = (
+        ("balanced", 1.0, 1.0, 1.0),
+        ("coverage", 0.75, 0.75, 1.6),
+        ("continuity", 0.85, 1.6, 0.65),
+        ("unary", 1.55, 0.60, 0.80),
+        ("coverage-continuity", 0.65, 1.30, 1.35),
+        ("conservative", 1.25, 1.25, 0.45),
     )
-    for rank_score in rankings:
-        selected = np.zeros(node_count, dtype=bool)
-        order = np.lexsort((np.arange(node_count), -rank_score))
-        for node_value in order:
-            node = int(node_value)
-            if rank_score[node] <= 0.0:
-                continue
-            if len(conflicts[node]) and np.any(selected[conflicts[node]]):
-                continue
-            selected[node] = True
-        # Restore every incumbent that the proposed complete matching does not
-        # physically exclude.  This is a repair operator, never a free pruning
-        # pass over unrelated prior surface.
-        for node_value in np.flatnonzero(initial & ~selected):
-            node = int(node_value)
-            if len(conflicts[node]) and np.any(selected[conflicts[node]]):
-                continue
-            selected[node] = True
-        starts.append(selected)
-    unique: list[np.ndarray] = []
-    seen: set[bytes] = set()
-    for selected in starts:
-        key = selected.tobytes()
-        if key not in seen:
-            seen.add(key)
-            unique.append(selected)
-
-    best = initial.copy()
-    best_value = _coverage_objective(
-        best,
-        node_score,
-        edge_first,
-        edge_second,
-        edge_weight,
-        coverage,
-        pixel_weight,
-    )
+    discovered: dict[bytes, dict[str, Any]] = {}
     run_records: list[dict[str, Any]] = []
-    for start_index, selected_value in enumerate(unique):
-        selected = selected_value.copy()
-        initial_value = _coverage_objective(
-            selected,
-            node_score,
-            edge_first,
-            edge_second,
-            edge_weight,
-            coverage,
-            pixel_weight,
+    zero_forbidden = np.zeros(node_count, dtype=bool)
+    for profile_index, (
+        name,
+        unary_scale,
+        edge_scale,
+        coverage_scale,
+    ) in enumerate(profiles):
+        profile_node = node_score * unary_scale
+        profile_edge = edge_weight * edge_scale
+        profile_pixel = pixel_weight * coverage_scale
+        rankings = (
+            profile_node
+            + 0.5 * incident * edge_scale
+            + coverage_potential * coverage_scale,
+            profile_node
+            + incident * edge_scale
+            + 0.5 * coverage_potential * coverage_scale,
+            coverage_potential * coverage_scale
+            + 0.25 * (profile_node + incident * edge_scale),
+            profile_node
+            + 0.25 * incident * edge_scale
+            + 2.0 * coverage_potential * coverage_scale,
         )
-        current = initial_value
-        sweeps = 0
-        for sweep in range(maximum_sweeps):
-            changed = False
-            # Exact one-variable removals preserve pair and saturated coverage
-            # accounting; simultaneous marginal pruning would double-count.
-            while np.any(selected):
-                active = np.flatnonzero(selected)
-                best_remove_gain = 1.0e-9
-                best_remove = -1
-                for node_value in active:
-                    trial = selected.copy()
-                    trial[int(node_value)] = False
-                    value = _coverage_objective(
-                        trial,
-                        node_score,
-                        edge_first,
-                        edge_second,
-                        edge_weight,
-                        coverage,
-                        pixel_weight,
-                    )
-                    gain = value - current
-                    if gain > best_remove_gain:
-                        best_remove_gain = gain
-                        best_remove = int(node_value)
-                if best_remove < 0:
-                    break
-                selected[best_remove] = False
-                current += best_remove_gain
-                changed = True
-            best_gain = 1.0e-9
-            best_trial: np.ndarray | None = None
-            for node_value in np.flatnonzero(~selected):
+        starts = [initial.copy()]
+        for rank_score in rankings:
+            selected = np.zeros(node_count, dtype=bool)
+            order = np.lexsort((np.arange(node_count), -rank_score))
+            for node_value in order:
                 node = int(node_value)
-                trial = selected.copy()
-                if len(conflicts[node]):
-                    trial[conflicts[node]] = False
-                trial[node] = True
-                value = _coverage_objective(
-                    trial,
+                if rank_score[node] <= 0.0:
+                    continue
+                if len(conflicts[node]) and np.any(selected[conflicts[node]]):
+                    continue
+                selected[node] = True
+            for node_value in np.flatnonzero(initial & ~selected):
+                node = int(node_value)
+                if len(conflicts[node]) and np.any(selected[conflicts[node]]):
+                    continue
+                selected[node] = True
+            starts.append(selected)
+        start_seen: set[bytes] = set()
+        for start_index, start in enumerate(starts):
+            start_key = start.tobytes()
+            if start_key in start_seen:
+                continue
+            start_seen.add(start_key)
+            initial_value = _coverage_objective(
+                start,
+                profile_node,
+                edge_first,
+                edge_second,
+                profile_edge,
+                coverage,
+                profile_pixel,
+            )
+            selected, profile_value, sweeps = _optimize_coverage_from_start(
+                profile_node,
+                edge_first,
+                edge_second,
+                profile_edge,
+                conflicts,
+                coverage,
+                profile_pixel,
+                start,
+                maximum_sweeps=maximum_sweeps,
+                forbidden=zero_forbidden,
+            )
+            canonical_value = _coverage_objective(
+                selected,
+                node_score,
+                edge_first,
+                edge_second,
+                edge_weight,
+                coverage,
+                pixel_weight,
+            )
+            key = selected.tobytes()
+            record = discovered.get(key)
+            if record is None or canonical_value > float(record["canonicalObjective"]):
+                discovered[key] = {
+                    "selected": selected.copy(),
+                    "canonicalObjective": canonical_value,
+                    "profile": name,
+                    "profileIndex": profile_index,
+                    "profileObjective": profile_value,
+                }
+            run_records.append(
+                {
+                    "profile": name,
+                    "start": start_index,
+                    "initialObjective": round(initial_value, 6),
+                    "finalProfileObjective": round(profile_value, 6),
+                    "canonicalObjective": round(canonical_value, 6),
+                    "sweeps": sweeps,
+                    "coveredPixelFraction": round(
+                        float(np.mean(np.any(coverage[selected], axis=0)))
+                        if coverage.shape[1]
+                        else 0.0,
+                        6,
+                    ),
+                }
+            )
+
+    ordered = sorted(
+        discovered.values(),
+        key=lambda record: (
+            float(record["canonicalObjective"]),
+            int(np.count_nonzero(record["selected"])),
+            -int(record["profileIndex"]),
+        ),
+        reverse=True,
+    )
+    if ordered and maximum_forced_exclusion_trials:
+        branch_seed = np.asarray(ordered[0]["selected"], dtype=bool)
+        branch = np.flatnonzero(branch_seed & ~initial)
+        leverage = coverage_potential[branch] + incident[branch]
+        branch_order = branch[np.lexsort((branch, -leverage))][
+            :maximum_forced_exclusion_trials
+        ]
+        for node_value in branch_order:
+            forbidden = np.zeros(node_count, dtype=bool)
+            forbidden[int(node_value)] = True
+            start = branch_seed.copy()
+            start[int(node_value)] = False
+            # Re-admit incumbents displaced only by the excluded choice, then
+            # re-optimize the entire matching rather than filling its cell.
+            for incumbent_value in np.flatnonzero(initial & ~start):
+                incumbent = int(incumbent_value)
+                if len(conflicts[incumbent]) and np.any(
+                    start[conflicts[incumbent]]
+                ):
+                    continue
+                start[incumbent] = True
+            selected, value, sweeps = _optimize_coverage_from_start(
+                node_score,
+                edge_first,
+                edge_second,
+                edge_weight,
+                conflicts,
+                coverage,
+                pixel_weight,
+                start,
+                maximum_sweeps=maximum_sweeps,
+                forbidden=forbidden,
+            )
+            key = selected.tobytes()
+            if key not in discovered:
+                discovered[key] = {
+                    "selected": selected.copy(),
+                    "canonicalObjective": value,
+                    "profile": "forced-exclusion",
+                    "profileIndex": len(profiles),
+                    "profileObjective": value,
+                    "excludedLocalNode": int(node_value),
+                }
+            run_records.append(
+                {
+                    "profile": "forced-exclusion",
+                    "excludedLocalNode": int(node_value),
+                    "canonicalObjective": round(value, 6),
+                    "sweeps": sweeps,
+                    "coveredPixelFraction": round(
+                        float(np.mean(np.any(coverage[selected], axis=0)))
+                        if coverage.shape[1]
+                        else 0.0,
+                        6,
+                    ),
+                }
+            )
+        ordered = sorted(
+            discovered.values(),
+            key=lambda record: (
+                float(record["canonicalObjective"]),
+                int(np.count_nonzero(record["selected"])),
+                -int(record["profileIndex"]),
+            ),
+            reverse=True,
+        )
+
+    retained: list[dict[str, Any]] = []
+    for record in ordered:
+        selected = np.asarray(record["selected"], dtype=bool)
+        if retained and min(
+            _normalized_hamming(selected, prior["selected"])
+            for prior in retained
+        ) < minimum_hamming_fraction:
+            continue
+        retained.append(record)
+        if len(retained) >= maximum_states:
+            break
+    if not retained:
+        retained = [
+            {
+                "selected": initial.copy(),
+                "canonicalObjective": _coverage_objective(
+                    initial,
                     node_score,
                     edge_first,
                     edge_second,
                     edge_weight,
                     coverage,
                     pixel_weight,
-                )
-                gain = value - current
-                if gain > best_gain:
-                    best_gain = gain
-                    best_trial = trial
-            if best_trial is not None:
-                selected = best_trial
-                current += best_gain
-                changed = True
-            sweeps = sweep + 1
-            if not changed:
-                break
-        current = _coverage_objective(
-            selected,
-            node_score,
-            edge_first,
-            edge_second,
-            edge_weight,
-            coverage,
-            pixel_weight,
-        )
-        run_records.append(
+                ),
+                "profile": "incumbent",
+                "profileIndex": -1,
+                "profileObjective": 0.0,
+            }
+        ]
+    state_records = []
+    for rank, record in enumerate(retained):
+        selected = np.asarray(record["selected"], dtype=bool)
+        state_records.append(
             {
-                "start": start_index,
-                "initialObjective": round(initial_value, 6),
-                "finalObjective": round(current, 6),
-                "sweeps": sweeps,
+                "rank": rank,
+                "profile": record["profile"],
+                "canonicalObjective": round(float(record["canonicalObjective"]), 6),
+                "selectedCount": int(np.count_nonzero(selected)),
                 "coveredPixelFraction": round(
                     float(np.mean(np.any(coverage[selected], axis=0)))
                     if coverage.shape[1]
                     else 0.0,
                     6,
                 ),
+                "minimumPriorHammingFraction": round(
+                    min(
+                        (
+                            _normalized_hamming(selected, prior["selected"])
+                            for prior in retained[:rank]
+                        ),
+                        default=1.0,
+                    ),
+                    6,
+                ),
+                **(
+                    {"excludedLocalNode": int(record["excludedLocalNode"])}
+                    if "excludedLocalNode" in record
+                    else {}
+                ),
             }
         )
-        if (current, int(np.count_nonzero(selected))) > (
-            best_value,
-            int(np.count_nonzero(best)),
-        ):
-            best = selected.copy()
-            best_value = current
-    return best, {
-        "algorithm": "multi-start whole-patch matching with saturated dense CT coverage",
+    best = np.asarray(retained[0]["selected"], dtype=bool)
+    return [np.asarray(record["selected"], dtype=bool) for record in retained], {
+        "algorithm": (
+            "diverse whole-patch matching ensemble with saturated dense CT "
+            "coverage"
+        ),
         "singleCellGrowth": False,
-        "startCount": len(unique),
+        "objectiveProfileCount": len(profiles),
+        "optimizationRunCount": len(run_records),
+        "discoveredStateCount": len(discovered),
+        "retainedStateCount": len(retained),
         "pixelCount": int(coverage.shape[1]),
         "coveredPixelFraction": round(
             float(np.mean(np.any(coverage[best], axis=0)))
@@ -388,7 +667,8 @@ def optimize_collective_patch_coverage(
             else 0.0,
             6,
         ),
-        "objective": round(best_value, 6),
+        "objective": round(float(retained[0]["canonicalObjective"]), 6),
+        "states": state_records,
         "runs": run_records,
     }
 
@@ -704,7 +984,10 @@ def _proposal_hole_metrics(
         start, stop = int(patch_offset[row]), int(patch_offset[row + 1])
         patch = patch_xyz[start:stop]
         projected = patch[
-            np.asarray([row_nearest[row][node] for node in candidate_added], dtype=np.int32)
+            np.asarray(
+                [row_nearest[row][node] for node in candidate_added],
+                dtype=np.int32,
+            )
         ]
         coverage_radius = float(mean_edge[loop])
         covered = np.any(
@@ -866,7 +1149,9 @@ def solve_component_patch_states(
             )
             neighbor = topology_neighbor[begin:end]
             weight = topology_weight[begin:end]
-            fixed_support[option_index] = float(np.sum(weight[fixed_selected[neighbor]]))
+            fixed_support[option_index] = float(
+                np.sum(weight[fixed_selected[neighbor]])
+            )
         node_score = unary[options].astype(np.float64)
         node_score += (
             continuity_weight
@@ -931,17 +1216,26 @@ def solve_component_patch_states(
                 depth_field,
                 pixel_weight=settings.candidate_coverage_weight,
             )
-            optimized, coverage_solver = optimize_collective_patch_coverage(
-                node_score,
-                local_first,
-                local_second,
-                local_edge_weight,
-                conflict_first,
-                conflict_second,
-                coverage,
-                pixel_weight,
-                maximum_sweeps=settings.maximum_local_optimization_sweeps,
-                initial_selection=baseline_local,
+            optimized_states, coverage_solver = (
+                optimize_collective_patch_coverage_ensemble(
+                    node_score,
+                    local_first,
+                    local_second,
+                    local_edge_weight,
+                    conflict_first,
+                    conflict_second,
+                    coverage,
+                    pixel_weight,
+                    maximum_sweeps=settings.maximum_local_optimization_sweeps,
+                    initial_selection=baseline_local,
+                    maximum_states=settings.maximum_component_state_variants,
+                    maximum_forced_exclusion_trials=(
+                        settings.maximum_forced_exclusion_trials
+                    ),
+                    minimum_hamming_fraction=(
+                        settings.minimum_variant_hamming_fraction
+                    ),
+                )
             )
             baseline_objective = _coverage_objective(
                 baseline_local,
@@ -963,108 +1257,133 @@ def solve_component_patch_states(
                 maximum_sweeps=settings.maximum_local_optimization_sweeps,
                 initial_selection=baseline_local,
             )
+            optimized_states = [optimized]
 
-        # The optimizer may discover that an unrelated weak incumbent has a
-        # negative marginal.  This operator is an alternating surface repair,
-        # not a pruning pass: remove incumbents only when a chosen alternative
-        # physically excludes them.
-        chosen_added_local = optimized & ~baseline_local
-        required_removed = np.zeros(len(options), dtype=bool)
-        for first, second in zip(conflict_first, conflict_second):
-            if chosen_added_local[first] and baseline_local[second]:
-                required_removed[second] = True
-            if chosen_added_local[second] and baseline_local[first]:
-                required_removed[first] = True
-        proposed = baseline_local.copy()
-        proposed[required_removed] = False
-        proposed[chosen_added_local] = True
-        if coverage is None or pixel_weight is None:
-            proposal_objective = _objective(
-                proposed,
-                node_score,
-                local_first,
-                local_second,
-                local_edge_weight,
+        proposal_seen: set[tuple[bytes, bytes]] = set()
+        state_records = (
+            coverage_solver.get("states", ()) if coverage_solver is not None else ()
+        )
+        for variant_rank, optimized in enumerate(optimized_states):
+            # The optimizer may discover that an unrelated weak incumbent has
+            # a negative marginal.  This is an alternating surface repair, not
+            # a pruning pass: remove incumbents only when a chosen alternative
+            # physically excludes them.
+            chosen_added_local = optimized & ~baseline_local
+            required_removed = np.zeros(len(options), dtype=bool)
+            for first, second in zip(conflict_first, conflict_second):
+                if chosen_added_local[first] and baseline_local[second]:
+                    required_removed[second] = True
+                if chosen_added_local[second] and baseline_local[first]:
+                    required_removed[first] = True
+            proposed = baseline_local.copy()
+            proposed[required_removed] = False
+            proposed[chosen_added_local] = True
+            added = options[proposed & ~baseline_local]
+            removed = options[baseline_local & ~proposed]
+            signature = (added.tobytes(), removed.tobytes())
+            if signature in proposal_seen:
+                continue
+            proposal_seen.add(signature)
+            if coverage is None or pixel_weight is None:
+                proposal_objective = _objective(
+                    proposed,
+                    node_score,
+                    local_first,
+                    local_second,
+                    local_edge_weight,
+                )
+            else:
+                proposal_objective = _coverage_objective(
+                    proposed,
+                    node_score,
+                    local_first,
+                    local_second,
+                    local_edge_weight,
+                    coverage,
+                    pixel_weight,
+                )
+            trial_selected = selected.copy()
+            trial_selected[removed] = False
+            trial_selected[added] = True
+            two_core, tangent_ratio = _added_geometry(
+                added,
+                trial_selected,
+                midpoint,
+                edge_first,
+                edge_second,
+                edge_score,
             )
-        else:
-            proposal_objective = _coverage_objective(
-                proposed,
-                node_score,
-                local_first,
-                local_second,
-                local_edge_weight,
-                coverage,
-                pixel_weight,
+            hole_metrics = _proposal_hole_metrics(
+                hole_rows,
+                row_nearest,
+                set(int(value) for value in added),
+                trial_selected,
+                holes,
+                topology_offset,
+                topology_neighbor,
             )
-        added = options[proposed & ~baseline_local]
-        removed = options[baseline_local & ~proposed]
-        trial_selected = selected.copy()
-        trial_selected[removed] = False
-        trial_selected[added] = True
-        two_core, tangent_ratio = _added_geometry(
-            added,
-            trial_selected,
-            midpoint,
-            edge_first,
-            edge_second,
-            edge_score,
-        )
-        hole_metrics = _proposal_hole_metrics(
-            hole_rows,
-            row_nearest,
-            set(int(value) for value in added),
-            trial_selected,
-            holes,
-            topology_offset,
-            topology_neighbor,
-        )
-        objective_gain = float(proposal_objective - baseline_objective)
-        qualified = (
-            len(added) >= settings.minimum_added_ribbon_count
-            and objective_gain >= settings.minimum_objective_gain
-            and two_core >= settings.minimum_added_two_core_fraction
-            and tangent_ratio >= settings.minimum_added_tangent_ratio
-            and bool(hole_metrics)
-            and all(
-                record["contextProfileCorrelation"]
-                >= settings.minimum_context_profile_correlation
-                and record["competingLayerMargin"]
-                >= settings.minimum_competing_layer_margin
-                and record["coverage"] >= settings.minimum_patch_coverage
-                and record["retainedBoundaryFraction"]
-                >= settings.minimum_retained_boundary_fraction
-                and record["boundaryAnchorCount"]
-                >= settings.minimum_boundary_anchor_count
-                for record in hole_metrics
+            objective_gain = float(proposal_objective - baseline_objective)
+            qualified = (
+                len(added) >= settings.minimum_added_ribbon_count
+                and objective_gain >= settings.minimum_objective_gain
+                and two_core >= settings.minimum_added_two_core_fraction
+                and tangent_ratio >= settings.minimum_added_tangent_ratio
+                and bool(hole_metrics)
+                and all(
+                    record["contextProfileCorrelation"]
+                    >= settings.minimum_context_profile_correlation
+                    and record["competingLayerMargin"]
+                    >= settings.minimum_competing_layer_margin
+                    and record["coverage"] >= settings.minimum_patch_coverage
+                    and record["retainedBoundaryFraction"]
+                    >= settings.minimum_retained_boundary_fraction
+                    and record["boundaryAnchorCount"]
+                    >= settings.minimum_boundary_anchor_count
+                    for record in hole_metrics
+                )
             )
-        )
-        proposals.append(
-            {
-                "targetComponent": int(target_component),
-                "holeRows": hole_rows,
-                "options": options,
-                "candidateCount": int(len(candidate)),
-                "added": added.astype(np.int32),
-                "removed": removed.astype(np.int32),
-                "objectiveGain": objective_gain,
-                "twoCoreFraction": two_core,
-                "tangentRatio": tangent_ratio,
-                "holeMetrics": hole_metrics,
-                "coverageStats": coverage_stats,
-                "coverageSolver": coverage_solver,
-                "qualified": bool(qualified),
-            }
-        )
+            state_record = (
+                state_records[variant_rank]
+                if variant_rank < len(state_records)
+                else {"profile": "single-objective"}
+            )
+            proposals.append(
+                {
+                    "targetComponent": int(target_component),
+                    "variantRank": int(variant_rank),
+                    "variantProfile": str(state_record.get("profile", "unknown")),
+                    "holeRows": hole_rows,
+                    "options": options,
+                    "candidateCount": int(len(candidate)),
+                    "added": added.astype(np.int32),
+                    "removed": removed.astype(np.int32),
+                    "objectiveGain": objective_gain,
+                    "twoCoreFraction": two_core,
+                    "tangentRatio": tangent_ratio,
+                    "holeMetrics": hole_metrics,
+                    "coverageStats": coverage_stats,
+                    "selectedCoverageFraction": float(
+                        state_record.get("coveredPixelFraction", 0.0)
+                    ),
+                    "coverageSolver": coverage_solver,
+                    "qualified": bool(qualified),
+                }
+            )
 
-    proposal_order = sorted(
-        range(len(proposals)),
-        key=lambda row: (
-            float(proposals[row]["objectiveGain"]),
-            len(proposals[row]["added"]),
-            -int(proposals[row]["targetComponent"]),
-        ),
-        reverse=True,
-    )
+    # Compose only the highest-ranked qualified variant per component here.
+    # The runner reconstructs every rank in separate exact screening rounds.
+    proposal_order: list[int] = []
+    for target_component in sorted(rows_by_component):
+        choices = [
+            row
+            for row, proposal in enumerate(proposals)
+            if int(proposal["targetComponent"]) == target_component
+            and bool(proposal["qualified"])
+        ]
+        if choices:
+            proposal_order.append(
+                min(choices, key=lambda row: int(proposals[row]["variantRank"]))
+            )
     composed = selected.copy()
     applied = np.zeros(len(proposals), dtype=bool)
     for row in proposal_order:
@@ -1092,12 +1411,25 @@ def solve_component_patch_states(
     }
     statistics = {
         "scoredHoleCount": int(len(scored_loop)),
-        "surfaceComponentPatchCount": int(len(proposals)),
+        "surfaceComponentPatchCount": int(len(rows_by_component)),
+        "componentStateVariantCount": int(len(proposals)),
         "candidateRibbonCount": int(
-            sum(int(proposal["candidateCount"]) for proposal in proposals)
+            sum(
+                max(
+                    (
+                        int(proposal["candidateCount"])
+                        for proposal in proposals
+                        if int(proposal["targetComponent"]) == target_component
+                    ),
+                    default=0,
+                )
+                for target_component in rows_by_component
+            )
         ),
         "externallyBlockedCandidateCount": int(rejected_external_candidate_count),
-        "qualifiedPatchCount": int(sum(proposal["qualified"] for proposal in proposals)),
+        "qualifiedPatchCount": int(
+            sum(proposal["qualified"] for proposal in proposals)
+        ),
         "composedPatchCount": int(np.count_nonzero(applied)),
         "proposedAddedRibbonCount": int(
             sum(len(proposals[row]["added"]) for row in np.flatnonzero(applied))
@@ -1106,8 +1438,13 @@ def solve_component_patch_states(
             sum(len(proposals[row]["removed"]) for row in np.flatnonzero(applied))
         ),
         "singleCellGrowth": False,
-        "decisionUnit": "all CT-supported closed-hole frontiers on one surface component",
-        "fixedHalo": "every selected ribbon not in an alternating interface or crossing conflict",
+        "decisionUnit": (
+            "all CT-supported closed-hole frontiers on one surface component"
+        ),
+        "fixedHalo": (
+            "every selected ribbon not in an alternating interface or "
+            "crossing conflict"
+        ),
         "denseCoverageObjective": bool(
             depth_field is not None and settings.candidate_coverage_weight > 0.0
         ),
@@ -1154,6 +1491,13 @@ def _proposal_arrays(
         "patchTargetPriorComponent": np.asarray(
             [proposal["targetComponent"] for proposal in proposals], dtype=np.int32
         ),
+        "patchVariantRank": np.asarray(
+            [proposal.get("variantRank", 0) for proposal in proposals], dtype=np.int16
+        ),
+        "patchVariantProfile": np.asarray(
+            [proposal.get("variantProfile", "unknown") for proposal in proposals],
+            dtype="U32",
+        ),
         "patchHoleRowOffset": np.asarray(hole_offset, dtype=np.int64),
         "patchHoleRow": np.asarray(hole_values, dtype=np.int32),
         "patchOptionOffset": np.asarray(option_offset, dtype=np.int64),
@@ -1162,7 +1506,10 @@ def _proposal_arrays(
             [proposal["candidateCount"] for proposal in proposals], dtype=np.int32
         ),
         "patchCtSupportedPixelCount": np.asarray(
-            [proposal["coverageStats"]["ctSupportedPixelCount"] for proposal in proposals],
+            [
+                proposal["coverageStats"]["ctSupportedPixelCount"]
+                for proposal in proposals
+            ],
             dtype=np.int32,
         ),
         "patchDepthCompatibleCandidateCount": np.asarray(
@@ -1173,14 +1520,15 @@ def _proposal_arrays(
             dtype=np.int32,
         ),
         "patchCoverablePixelFraction": np.asarray(
-            [proposal["coverageStats"]["coverablePixelFraction"] for proposal in proposals],
+            [
+                proposal["coverageStats"]["coverablePixelFraction"]
+                for proposal in proposals
+            ],
             dtype=np.float32,
         ),
         "patchSelectedCoverageFraction": np.asarray(
             [
-                0.0
-                if proposal["coverageSolver"] is None
-                else proposal["coverageSolver"]["coveredPixelFraction"]
+                proposal.get("selectedCoverageFraction", 0.0)
                 for proposal in proposals
             ],
             dtype=np.float32,
@@ -1214,6 +1562,293 @@ def _proposal_arrays(
         ),
         "patchMetricCompetingLayerMargin": np.asarray(metric_margin, dtype=np.float32),
     }
+
+
+def _exact_patch_audit(
+    proposal: Mapping[str, Any],
+    *,
+    proposal_row: int,
+    baseline_metrics: Mapping[int, Mapping[str, float | int]],
+    baseline_selected: np.ndarray,
+    baseline_component: np.ndarray,
+    final_selected: np.ndarray,
+    final_component: np.ndarray,
+    mapping: Mapping[int, int],
+    final_metrics: Mapping[int, Mapping[str, float | int]],
+    triangle_node: np.ndarray,
+    settings: PhysicalRibbonPatchStateSettings,
+    round_index: int,
+    lineage_preserved: bool | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    target_component = int(proposal["targetComponent"])
+    final_component_id = int(mapping.get(target_component, -1))
+    before = dict(baseline_metrics.get(target_component, {}))
+    after = dict(final_metrics.get(final_component_id, {}))
+    added = np.asarray(proposal["added"], dtype=np.int32)
+    realization = float(np.mean(triangle_node[added])) if len(added) else 0.0
+    area_retention = float(after.get("triangleAreaVoxelsSquared", 0.0)) / max(
+        float(before.get("triangleAreaVoxelsSquared", 0.0)), 1.0e-6
+    )
+    lineage_ok = final_component_id >= 0
+    if lineage_preserved is not None:
+        lineage_ok = bool(lineage_preserved)
+    elif lineage_ok:
+        member = final_selected & (final_component == final_component_id)
+        inherited = np.unique(baseline_component[member & baseline_selected])
+        inherited = inherited[inherited >= 0]
+        lineage_ok = (
+            len(inherited) == 1 and int(inherited[0]) == target_component
+        )
+    non_regression = (
+        int(after.get("triangleRegionCount", 0))
+        <= int(before.get("triangleRegionCount", 0))
+        and int(after.get("interiorHoleCount", 0))
+        <= int(before.get("interiorHoleCount", 0))
+        and int(after.get("macroHoleCount", 0))
+        <= int(before.get("macroHoleCount", 0))
+        and area_retention >= settings.minimum_triangle_area_retention
+    )
+    topology_improved = (
+        int(after.get("triangleRegionCount", 0))
+        < int(before.get("triangleRegionCount", 0))
+        or int(after.get("interiorHoleCount", 0))
+        < int(before.get("interiorHoleCount", 0))
+        or int(after.get("macroHoleCount", 0))
+        < int(before.get("macroHoleCount", 0))
+    )
+    minimum_retained = min(
+        (
+            float(record["retainedBoundaryFraction"])
+            for record in proposal["holeMetrics"]
+        ),
+        default=0.0,
+    )
+    minimum_anchor = min(
+        (int(record["boundaryAnchorCount"]) for record in proposal["holeMetrics"]),
+        default=0,
+    )
+    density_improved = (
+        int(after.get("triangleCount", 0)) > int(before.get("triangleCount", 0))
+        and minimum_retained
+        >= settings.minimum_density_only_retained_boundary_fraction
+        and minimum_anchor >= settings.minimum_density_only_boundary_anchor_count
+    )
+    improved = topology_improved or density_improved
+    accepted = bool(
+        lineage_ok
+        and non_regression
+        and improved
+        and realization >= settings.minimum_surface_realization_fraction
+    )
+    return accepted, {
+        "patchRow": int(proposal_row),
+        "variantRank": int(proposal.get("variantRank", 0)),
+        "variantProfile": str(proposal.get("variantProfile", "unknown")),
+        "screenRound": int(round_index),
+        "priorComponent": target_component,
+        "finalComponent": final_component_id,
+        "accepted": accepted,
+        "lineagePreserved": bool(lineage_ok),
+        "topologyNonRegression": bool(non_regression),
+        "topologyImproved": bool(topology_improved),
+        "densityImproved": bool(density_improved),
+        "addedSurfaceRealizationFraction": realization,
+        "triangleAreaRetention": area_retention,
+        "before": before,
+        "after": after,
+    }
+
+
+def _exact_variant_key(
+    proposal: Mapping[str, Any], audit: Mapping[str, Any]
+) -> tuple[float, ...]:
+    before = audit["before"]
+    after = audit["after"]
+    return (
+        float(
+            int(before.get("macroHoleCount", 0))
+            - int(after.get("macroHoleCount", 0))
+        ),
+        float(
+            int(before.get("interiorHoleCount", 0))
+            - int(after.get("interiorHoleCount", 0))
+        ),
+        float(
+            int(before.get("triangleRegionCount", 0))
+            - int(after.get("triangleRegionCount", 0))
+        ),
+        float(int(after.get("triangleCount", 0)) - int(before.get("triangleCount", 0))),
+        float(audit.get("triangleAreaRetention", 0.0)),
+        float(proposal.get("objectiveGain", 0.0)),
+        -float(proposal.get("variantRank", 0)),
+    )
+
+
+def _compose_patch_rows(
+    baseline_selected: np.ndarray,
+    proposals: list[Mapping[str, Any]],
+    rows: list[int],
+    source: np.ndarray,
+    target: np.ndarray,
+    crossing_first: np.ndarray,
+    crossing_second: np.ndarray,
+) -> tuple[np.ndarray, list[int], list[int]]:
+    selected = np.asarray(baseline_selected, dtype=bool).copy()
+    applied: list[int] = []
+    conflicted: list[int] = []
+    for row in rows:
+        proposal = proposals[row]
+        trial = selected.copy()
+        trial[np.asarray(proposal["removed"], dtype=np.int32)] = False
+        trial[np.asarray(proposal["added"], dtype=np.int32)] = True
+        if _selection_conflicts(
+            trial, source, target, crossing_first, crossing_second
+        ) != (0, 0):
+            conflicted.append(int(row))
+            continue
+        selected = trial
+        applied.append(int(row))
+    return selected, applied, conflicted
+
+
+@dataclass(frozen=True, slots=True)
+class _ComponentExactGraph:
+    target_component: int
+    local_to_global: np.ndarray
+    baseline_selected: np.ndarray
+    edge_first: np.ndarray
+    edge_second: np.ndarray
+    edge_score: np.ndarray
+    external_selected_neighbor: np.ndarray
+
+
+def _prepare_component_exact_graph(
+    target_component: int,
+    proposals: list[Mapping[str, Any]],
+    proposal_rows: list[int],
+    baseline_selected: np.ndarray,
+    baseline_component: np.ndarray,
+    topology: Mapping[str, np.ndarray],
+) -> _ComponentExactGraph:
+    member = np.flatnonzero(
+        np.asarray(baseline_selected, dtype=bool)
+        & (np.asarray(baseline_component, dtype=np.int32) == target_component)
+    )
+    additions = [
+        np.asarray(proposals[row]["added"], dtype=np.int32)
+        for row in proposal_rows
+        if len(proposals[row]["added"])
+    ]
+    local_to_global = np.unique(
+        np.concatenate((member, *additions)) if additions else member
+    ).astype(np.int32)
+    global_to_local = np.full(len(baseline_selected), -1, dtype=np.int32)
+    global_to_local[local_to_global] = np.arange(
+        len(local_to_global), dtype=np.int32
+    )
+    first_global = np.asarray(
+        topology["edgeFirstFrontierIndex"], dtype=np.int32
+    )
+    second_global = np.asarray(
+        topology["edgeSecondFrontierIndex"], dtype=np.int32
+    )
+    first_local = global_to_local[first_global]
+    second_local = global_to_local[second_global]
+    induced = (first_local >= 0) & (second_local >= 0)
+    external_selected_neighbor = np.zeros(len(local_to_global), dtype=bool)
+    first_inside = (first_local >= 0) & (second_local < 0)
+    if np.any(first_inside):
+        external = np.asarray(baseline_selected, dtype=bool)[
+            second_global[first_inside]
+        ]
+        external_selected_neighbor[first_local[first_inside][external]] = True
+    second_inside = (second_local >= 0) & (first_local < 0)
+    if np.any(second_inside):
+        external = np.asarray(baseline_selected, dtype=bool)[
+            first_global[second_inside]
+        ]
+        external_selected_neighbor[second_local[second_inside][external]] = True
+    return _ComponentExactGraph(
+        target_component=int(target_component),
+        local_to_global=local_to_global,
+        baseline_selected=np.asarray(baseline_selected, dtype=bool)[
+            local_to_global
+        ],
+        edge_first=first_local[induced].astype(np.int32),
+        edge_second=second_local[induced].astype(np.int32),
+        edge_score=np.asarray(topology["edgeScore"], dtype=np.float32)[induced],
+        external_selected_neighbor=external_selected_neighbor,
+    )
+
+
+def _reconstruct_component_graph_state(
+    graph: _ComponentExactGraph,
+    proposal: Mapping[str, Any],
+    ribbon: Mapping[str, np.ndarray],
+    topology: Mapping[str, np.ndarray],
+    *,
+    settings: PhysicalRibbonPatchHoleSettings,
+) -> tuple[
+    bool,
+    dict[str, np.ndarray] | None,
+    dict[str, np.ndarray] | None,
+    np.ndarray,
+]:
+    local_selected = graph.baseline_selected.copy()
+    global_to_local = {
+        int(global_node): local_node
+        for local_node, global_node in enumerate(graph.local_to_global)
+    }
+    for global_node in np.asarray(proposal["removed"], dtype=np.int32):
+        local_selected[global_to_local[int(global_node)]] = False
+    for global_node in np.asarray(proposal["added"], dtype=np.int32):
+        local_selected[global_to_local[int(global_node)]] = True
+    if np.any(local_selected & graph.external_selected_neighbor):
+        return False, None, None, np.empty(0, dtype=np.int32)
+    local_component, _ = _component_labels(
+        local_selected, graph.edge_first, graph.edge_second
+    )
+    inherited = graph.baseline_selected & local_selected
+    inherited_component = np.unique(local_component[inherited])
+    inherited_component = inherited_component[inherited_component >= 0]
+    if len(inherited_component) != 1:
+        return False, None, None, np.empty(0, dtype=np.int32)
+    target_local_component = int(inherited_component[0])
+    added_local = np.asarray(
+        [global_to_local[int(value)] for value in proposal["added"]],
+        dtype=np.int32,
+    )
+    if len(added_local) and np.any(
+        local_component[added_local] != target_local_component
+    ):
+        return False, None, None, np.empty(0, dtype=np.int32)
+    component_node = np.flatnonzero(
+        local_selected & (local_component == target_local_component)
+    ).astype(np.int32)
+    component_global = graph.local_to_global[component_node]
+    component_remap = np.full(len(graph.local_to_global), -1, dtype=np.int32)
+    component_remap[component_node] = np.arange(
+        len(component_node), dtype=np.int32
+    )
+    first = component_remap[graph.edge_first]
+    second = component_remap[graph.edge_second]
+    active = (first >= 0) & (second >= 0)
+    frontier = np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
+    local_topology = {
+        "frontierRibbonCandidate": frontier[component_global],
+        "edgeFirstFrontierIndex": first[active],
+        "edgeSecondFrontierIndex": second[active],
+        "edgeScore": graph.edge_score[active],
+    }
+    local_configuration = {
+        "selected": np.ones(len(component_global), dtype=np.uint8),
+        "component": np.zeros(len(component_global), dtype=np.int32),
+    }
+    surface, _ = build_physical_ribbon_surface_complex(
+        ribbon, local_topology, local_configuration, settings=settings
+    )
+    loops, _ = extract_surface_boundary_loops(surface, settings=settings)
+    return True, surface, loops, component_global
 
 
 def run_physical_ribbon_patch_states(
@@ -1318,142 +1953,10 @@ def run_physical_ribbon_patch_states(
     )
     solved = time.monotonic()
     surface_settings = PhysicalRibbonPatchHoleSettings()
-    preliminary_surface, _ = build_physical_ribbon_surface_complex(
-        ribbon, topology, arrays, settings=surface_settings
-    )
-    preliminary_loops, _ = extract_surface_boundary_loops(
-        preliminary_surface, settings=surface_settings
-    )
-    surfaced = time.monotonic()
     baseline_selected = np.asarray(configuration["selected"], dtype=np.uint8) > 0
     baseline_component = np.asarray(configuration["component"], dtype=np.int32)
-    preliminary_selected = np.asarray(arrays["selected"], dtype=np.uint8) > 0
-    preliminary_component = np.asarray(arrays["component"], dtype=np.int32)
-    mapping, lineage = _lineage_audit(
-        baseline_selected,
-        baseline_component,
-        preliminary_selected,
-        preliminary_component,
-    )
-    preliminary_metrics = _component_surface_metrics(
-        preliminary_surface, preliminary_loops
-    )
-    triangle = np.asarray(
-        preliminary_surface["triangleFrontierIndex"], dtype=np.int32
-    )
-    triangle_node = np.zeros(len(preliminary_selected), dtype=bool)
-    if len(triangle):
-        triangle_node[np.unique(triangle)] = True
-    accepted = np.zeros(len(proposals), dtype=bool)
-    exact_records: list[dict[str, Any]] = []
-    for row, proposal in enumerate(proposals):
-        target_component = int(proposal["targetComponent"])
-        if not proposal.get("composed", False):
-            continue
-        final_component_id = mapping.get(target_component, -1)
-        before = baseline_metrics.get(target_component, {})
-        after = preliminary_metrics.get(final_component_id, {})
-        added = np.asarray(proposal["added"], dtype=np.int32)
-        realization = (
-            float(np.mean(triangle_node[added])) if len(added) else 0.0
-        )
-        area_retention = float(after.get("triangleAreaVoxelsSquared", 0.0)) / max(
-            float(before.get("triangleAreaVoxelsSquared", 0.0)), 1.0e-6
-        )
-        lineage_ok = final_component_id >= 0
-        if lineage_ok:
-            member = preliminary_selected & (
-                preliminary_component == final_component_id
-            )
-            inherited = np.unique(
-                baseline_component[member & baseline_selected]
-            )
-            inherited = inherited[inherited >= 0]
-            lineage_ok = len(inherited) == 1 and int(inherited[0]) == target_component
-        non_regression = (
-            int(after.get("triangleRegionCount", 0))
-            <= int(before.get("triangleRegionCount", 0))
-            and int(after.get("interiorHoleCount", 0))
-            <= int(before.get("interiorHoleCount", 0))
-            and int(after.get("macroHoleCount", 0))
-            <= int(before.get("macroHoleCount", 0))
-            and area_retention >= resolved.minimum_triangle_area_retention
-        )
-        topology_improved = (
-            int(after.get("triangleRegionCount", 0))
-            < int(before.get("triangleRegionCount", 0))
-            or int(after.get("interiorHoleCount", 0))
-            < int(before.get("interiorHoleCount", 0))
-            or int(after.get("macroHoleCount", 0))
-            < int(before.get("macroHoleCount", 0))
-        )
-        minimum_retained = min(
-            (
-                float(record["retainedBoundaryFraction"])
-                for record in proposal["holeMetrics"]
-            ),
-            default=0.0,
-        )
-        minimum_anchor = min(
-            (
-                int(record["boundaryAnchorCount"])
-                for record in proposal["holeMetrics"]
-            ),
-            default=0,
-        )
-        density_improved = (
-            int(after.get("triangleCount", 0)) > int(before.get("triangleCount", 0))
-            and minimum_retained
-            >= resolved.minimum_density_only_retained_boundary_fraction
-            and minimum_anchor >= resolved.minimum_density_only_boundary_anchor_count
-        )
-        improved = topology_improved or density_improved
-        accepted[row] = bool(
-            lineage_ok
-            and non_regression
-            and improved
-            and realization >= resolved.minimum_surface_realization_fraction
-        )
-        exact_records.append(
-            {
-                "patchRow": row,
-                "priorComponent": target_component,
-                "finalComponent": final_component_id,
-                "accepted": bool(accepted[row]),
-                "addedSurfaceRealizationFraction": realization,
-                "triangleAreaRetention": area_retention,
-                "before": before,
-                "after": after,
-            }
-        )
-
-    # Rebuild once after discarding every exact counterexample.  Component
-    # patches are disjoint by prior identity, so a failed component can be
-    # removed without invalidating the evidence of an accepted component.
-    final_selected = baseline_selected.copy()
-    for row in np.flatnonzero(accepted):
-        final_selected[proposals[row]["removed"]] = False
-        final_selected[proposals[row]["added"]] = True
     edge_first = np.asarray(topology["edgeFirstFrontierIndex"], dtype=np.int32)
     edge_second = np.asarray(topology["edgeSecondFrontierIndex"], dtype=np.int32)
-    final_component, final_size = _component_labels(
-        final_selected, edge_first, edge_second
-    )
-    arrays["selected"] = final_selected.astype(np.uint8)
-    arrays["component"] = final_component.astype(np.int32)
-    arrays["componentSize"] = final_size.astype(np.int32)
-    if np.array_equal(final_selected, preliminary_selected):
-        final_surface = preliminary_surface
-        final_loops = preliminary_loops
-    else:
-        final_surface, _ = build_physical_ribbon_surface_complex(
-            ribbon, topology, arrays, settings=surface_settings
-        )
-        final_loops, _ = extract_surface_boundary_loops(
-            final_surface, settings=surface_settings
-        )
-    finished_surface = time.monotonic()
-
     frontier = np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
     source = np.asarray(ribbon["sourceInterface"], dtype=np.int32)[frontier]
     target = np.asarray(ribbon["targetInterface"], dtype=np.int32)[frontier]
@@ -1463,6 +1966,217 @@ def run_physical_ribbon_patch_states(
     crossing_second = np.asarray(
         configuration["crossingSecondFrontierIndex"], dtype=np.int32
     )
+
+    def reconstruct(
+        selected: np.ndarray,
+    ) -> tuple[
+        dict[str, np.ndarray],
+        dict[str, np.ndarray],
+        dict[str, np.ndarray],
+    ]:
+        component_value, size_value = _component_labels(
+            selected, edge_first, edge_second
+        )
+        selection = {
+            "selected": selected.astype(np.uint8),
+            "component": component_value.astype(np.int32),
+            "componentSize": size_value.astype(np.int32),
+        }
+        surface, _ = build_physical_ribbon_surface_complex(
+            ribbon, topology, selection, settings=surface_settings
+        )
+        loops, _ = extract_surface_boundary_loops(
+            surface, settings=surface_settings
+        )
+        return selection, surface, loops
+
+    qualified_by_component: dict[int, list[int]] = defaultdict(list)
+    for row, proposal in enumerate(proposals):
+        if proposal["qualified"]:
+            qualified_by_component[int(proposal["targetComponent"])].append(row)
+    for rows in qualified_by_component.values():
+        rows.sort(key=lambda row: int(proposals[row].get("variantRank", 0)))
+    exact_graph_by_component = {
+        target_component: _prepare_component_exact_graph(
+            target_component,
+            proposals,
+            rows,
+            baseline_selected,
+            baseline_component,
+            topology,
+        )
+        for target_component, rows in sorted(qualified_by_component.items())
+    }
+    exact_round_count = min(
+        resolved.maximum_exact_state_rounds,
+        max((len(rows) for rows in qualified_by_component.values()), default=0),
+    )
+    exact_records: list[dict[str, Any]] = []
+    exact_record_by_row: dict[int, dict[str, Any]] = {}
+    round_records: list[dict[str, Any]] = []
+    for round_index in range(exact_round_count):
+        requested_rows = [
+            rows[round_index]
+            for _, rows in sorted(qualified_by_component.items())
+            if round_index < len(rows)
+        ]
+        applied_rows: list[int] = []
+        conflicted_rows: list[int] = []
+        round_accepted: list[int] = []
+        for row in requested_rows:
+            round_selected, applied, conflicted = _compose_patch_rows(
+                baseline_selected,
+                proposals,
+                [row],
+                source,
+                target,
+                crossing_first,
+                crossing_second,
+            )
+            if conflicted or not applied:
+                conflicted_rows.append(row)
+                continue
+            applied_rows.append(row)
+            target_component = int(proposals[row]["targetComponent"])
+            (
+                lineage_ok,
+                local_surface,
+                local_loops,
+                local_to_global,
+            ) = _reconstruct_component_graph_state(
+                exact_graph_by_component[target_component],
+                proposals[row],
+                ribbon,
+                topology,
+                settings=surface_settings,
+            )
+            final_component_id = target_component if lineage_ok else -1
+            mapping = (
+                {target_component: final_component_id} if lineage_ok else {}
+            )
+            round_metrics: dict[int, dict[str, float | int]] = {}
+            triangle_node = np.zeros(len(round_selected), dtype=bool)
+            if lineage_ok and local_surface is not None and local_loops is not None:
+                local_metrics = _component_surface_metrics(
+                    local_surface, local_loops
+                )
+                round_metrics[final_component_id] = dict(
+                    local_metrics.get(0, {})
+                )
+                triangle = np.asarray(
+                    local_surface["triangleFrontierIndex"], dtype=np.int32
+                )
+                if len(triangle):
+                    triangle_node[
+                        local_to_global[np.unique(triangle)]
+                    ] = True
+            is_valid, record = _exact_patch_audit(
+                proposals[row],
+                proposal_row=row,
+                baseline_metrics=baseline_metrics,
+                baseline_selected=baseline_selected,
+                baseline_component=baseline_component,
+                final_selected=round_selected,
+                final_component=baseline_component,
+                mapping=mapping,
+                final_metrics=round_metrics,
+                triangle_node=triangle_node,
+                settings=resolved,
+                round_index=round_index,
+                lineage_preserved=lineage_ok,
+            )
+            record["reconstructionScope"] = "affected strict component"
+            exact_records.append(record)
+            exact_record_by_row[row] = record
+            if is_valid:
+                round_accepted.append(row)
+        round_records.append(
+            {
+                "round": round_index,
+                "requestedPatchRows": requested_rows,
+                "appliedPatchRows": applied_rows,
+                "conflictedPatchRows": conflicted_rows,
+                "exactAcceptedPatchRows": round_accepted,
+            }
+        )
+    surfaced = time.monotonic()
+
+    chosen_rows: list[int] = []
+    for target_component, rows in sorted(qualified_by_component.items()):
+        valid = [
+            row
+            for row in rows
+            if row in exact_record_by_row and exact_record_by_row[row]["accepted"]
+        ]
+        if valid:
+            chosen_rows.append(
+                max(
+                    valid,
+                    key=lambda row: _exact_variant_key(
+                        proposals[row], exact_record_by_row[row]
+                    ),
+                )
+            )
+    chosen_rows.sort(
+        key=lambda row: _exact_variant_key(
+            proposals[row], exact_record_by_row[row]
+        ),
+        reverse=True,
+    )
+
+    accepted = np.zeros(len(proposals), dtype=bool)
+    final_audits: list[dict[str, Any]] = []
+    final_conflicted_rows: list[int] = []
+    while True:
+        final_selected, applied_rows, conflicted_rows = _compose_patch_rows(
+            baseline_selected,
+            proposals,
+            chosen_rows,
+            source,
+            target,
+            crossing_first,
+            crossing_second,
+        )
+        final_conflicted_rows.extend(conflicted_rows)
+        arrays, final_surface, final_loops = reconstruct(final_selected)
+        final_component = np.asarray(arrays["component"], dtype=np.int32)
+        mapping, _ = _lineage_audit(
+            baseline_selected,
+            baseline_component,
+            final_selected,
+            final_component,
+        )
+        final_metrics = _component_surface_metrics(final_surface, final_loops)
+        triangle = np.asarray(final_surface["triangleFrontierIndex"], dtype=np.int32)
+        triangle_node = np.zeros(len(final_selected), dtype=bool)
+        if len(triangle):
+            triangle_node[np.unique(triangle)] = True
+        final_audits = []
+        failed_rows: list[int] = []
+        for row in applied_rows:
+            is_valid, record = _exact_patch_audit(
+                proposals[row],
+                proposal_row=row,
+                baseline_metrics=baseline_metrics,
+                baseline_selected=baseline_selected,
+                baseline_component=baseline_component,
+                final_selected=final_selected,
+                final_component=final_component,
+                mapping=mapping,
+                final_metrics=final_metrics,
+                triangle_node=triangle_node,
+                settings=resolved,
+                round_index=-1,
+            )
+            final_audits.append(record)
+            if not is_valid:
+                failed_rows.append(row)
+        if not failed_rows:
+            accepted[applied_rows] = True
+            break
+        chosen_rows = [row for row in applied_rows if row not in failed_rows]
+    finished_surface = time.monotonic()
+
     conflict_count = _selection_conflicts(
         final_selected, source, target, crossing_first, crossing_second
     )
@@ -1475,7 +2189,9 @@ def run_physical_ribbon_patch_states(
     if conflict_count != (0, 0) or any(final_lineage.values()):
         raise RuntimeError("exact patch-state replay violated a hard invariant")
     final_loop_stats = {
-        "triangleRegionCount": int(sum(_triangle_region_counts(final_surface).values())),
+        "triangleRegionCount": int(
+            sum(_triangle_region_counts(final_surface).values())
+        ),
         "interiorHoleLoopCount": int(
             np.count_nonzero(np.asarray(final_loops["loopKind"]) == 1)
         ),
@@ -1542,7 +2258,15 @@ def run_physical_ribbon_patch_states(
             "interfaceConflictCount": conflict_count[0],
             "crossingConflictCount": conflict_count[1],
             **final_lineage,
+            "exactScreenRoundCount": int(exact_round_count),
+            "exactScreenedVariantCount": int(len(exact_records)),
+            "exactValidVariantCount": int(
+                sum(bool(record["accepted"]) for record in exact_records)
+            ),
+            "exactScreenRounds": round_records,
             "exactPatchAudits": exact_records,
+            "finalExactPatchAudits": final_audits,
+            "finalConflictedPatchRows": sorted(set(final_conflicted_rows)),
         },
         "exactTopology": {
             "strictTriangleCountBefore": int(before_triangle),
@@ -1579,8 +2303,8 @@ def run_physical_ribbon_patch_states(
         },
         "timingSeconds": {
             "collectivePatchOptimization": round(solved - started, 6),
-            "preliminaryExactSurface": round(surfaced - solved, 6),
-            "filteredExactSurface": round(finished_surface - surfaced, 6),
+            "componentLocalExactScreening": round(surfaced - solved, 6),
+            "finalExactSurface": round(finished_surface - surfaced, 6),
             "writingAndPreviews": round(finished - finished_surface, 6),
             "total": round(finished - started, 6),
         },
@@ -1600,18 +2324,24 @@ def run_physical_ribbon_patch_states(
                 "surface component"
             ),
             "optimization": (
-                "collective alternating interface matching with saturated "
-                "whole-patch dense CT coverage inside a fixed selected halo"
+                "diverse collective alternating-interface matchings with "
+                "saturated whole-patch dense CT coverage inside a fixed "
+                "selected halo"
                 if depth_field is not None
-                else "collective alternating interface matching inside a fixed selected halo"
+                else (
+                    "collective alternating interface matching inside a fixed "
+                    "selected halo"
+                )
             ),
             "physicalEvidence": (
                 "whole-patch native-CT air-material-air profile and "
                 "displaced-layer competition"
             ),
             "exactAcceptance": (
+                "multiple complete states are reconstructed on their exact "
+                "strict component graph; a final whole-volume rebuild proves "
                 "surface realization, lineage, triangle density, connected "
-                "regions, and closed holes"
+                "regions, and closed-hole results"
             ),
             "singleCellGrowth": False,
             "selectionMutated": True,

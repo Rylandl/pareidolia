@@ -16,5 +16,9 @@
   "continuity_weight_multiplier": 1.0,
   "surface_alignment_weight_multiplier": 1.0,
   "maximum_local_optimization_sweeps": 8,
+  "maximum_component_state_variants": 16,
+  "maximum_forced_exclusion_trials": 24,
+  "maximum_exact_state_rounds": 16,
+  "minimum_variant_hamming_fraction": 0.02,
   "maximum_preview_components": 64
 }
