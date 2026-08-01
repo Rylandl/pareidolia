@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -14,8 +15,10 @@ from .contracts import VolumeSource, atomic_json, canonical_json_hash, sha256_fi
 from .physical_ribbon_bridging import _load_npz, _write_npz
 from .physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
+    _context_vertices,
     _point_in_polygon,
     _rasterize_polygon,
+    _selected_surface_adjacency,
     extract_surface_boundary_loops,
     score_surface_patch_holes,
     write_patch_hole_montage,
@@ -27,6 +30,18 @@ from .physical_ribbon_surface_holes import _resolve_surface_manifest
 PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA = "pareidolia.physical-ribbon-open-bays"
 PHYSICAL_RIBBON_OPEN_BAYS_VERSION = 1
 PHYSICAL_RIBBON_OPEN_BAYS_STEM = "physical-ribbon-open-bays-v1"
+
+CACHEABLE_COMPLETION_REJECTION_REASONS = frozenset(
+    (
+        "insufficient collective depth-field CT support",
+        "completion contains a physically degenerate triangle",
+        "completion contains an overlong triangle edge",
+        "completion triangle contradicts the local CT normal field",
+        "constructed mesh normals lose whole-patch CT support",
+        "constructed surface profile does not match its boundary context",
+        "a displaced competing layer explains the constructed surface",
+    )
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +168,40 @@ def _arc_edges(nodes: np.ndarray) -> frozenset[tuple[int, int]]:
         (min(int(first), int(second)), max(int(first), int(second)))
         for first, second in zip(nodes, nodes[1:])
     )
+
+
+def _hash_array(digest: Any, name: str, values: np.ndarray) -> None:
+    array = np.ascontiguousarray(values)
+    digest.update(name.encode("utf-8"))
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    digest.update(array.tobytes())
+
+
+def _bay_evidence_fingerprint(
+    surface: Mapping[str, np.ndarray],
+    boundary: np.ndarray,
+    context: np.ndarray,
+    component_id: int,
+) -> str:
+    """Hash every deterministic input to bay fitting and native-CT scoring."""
+
+    nodes = tuple(int(value) for value in np.asarray(boundary, dtype=np.int32))
+    reverse = tuple(reversed(nodes))
+    canonical_boundary = np.asarray(min(nodes, reverse), dtype=np.int32)
+    context_nodes = np.asarray(sorted(int(value) for value in context), dtype=np.int32)
+    digest = hashlib.sha256()
+    digest.update(np.asarray((component_id,), dtype=np.int32).tobytes())
+    _hash_array(digest, "boundary", canonical_boundary)
+    _hash_array(digest, "context", context_nodes)
+    for name in (
+        "chartUV",
+        "midpointXYZ",
+        "signedNormalXYZ",
+        "thicknessVoxels",
+    ):
+        _hash_array(digest, name, np.asarray(surface[name])[context_nodes])
+    return digest.hexdigest()
 
 
 def _owned_boundary_distance(
@@ -308,6 +357,7 @@ def enumerate_surface_open_bays(
     *,
     owned_bounds: tuple[np.ndarray, np.ndarray] | None,
     settings: PhysicalRibbonOpenBaySettings,
+    excluded_evidence_fingerprints: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     chart_uv = np.asarray(surface["chartUV"], dtype=np.float32)
     midpoint_xyz = np.asarray(surface["midpointXYZ"], dtype=np.float32)
@@ -317,6 +367,8 @@ def enumerate_surface_open_bays(
     kind = np.asarray(loops["loopKind"], dtype=np.uint8)
     component = np.asarray(loops["loopTopologyComponent"], dtype=np.int32)
     region = np.asarray(loops["loopTriangleRegion"], dtype=np.int32)
+    surface_component = np.asarray(surface["component"], dtype=np.int32)
+    adjacency = _selected_surface_adjacency(surface)
     rejection_count: Counter[str] = Counter()
     by_loop: dict[int, list[dict[str, Any]]] = defaultdict(list)
     outer_loop = np.flatnonzero(kind == 0)
@@ -378,8 +430,24 @@ def enumerate_surface_open_bays(
         )
     )
     retained: list[dict[str, Any]] = []
+    cached_rejection_count = 0
     for record in geometry_ranked:
         polygon = chart_uv[record["arcNodes"]]
+        context = _context_vertices(
+            np.asarray(record["arcNodes"], dtype=np.int32),
+            adjacency,
+            surface_component,
+            graph_hops=settings.context_graph_hops,
+        )
+        evidence_fingerprint = _bay_evidence_fingerprint(
+            surface,
+            np.asarray(record["arcNodes"], dtype=np.int32),
+            context,
+            int(record["component"]),
+        )
+        if evidence_fingerprint in excluded_evidence_fingerprints:
+            cached_rejection_count += 1
+            continue
         outer_loop_index = int(record["outerLoopIndex"])
         outer_nodes = vertex[
             int(offset[outer_loop_index]) : int(offset[outer_loop_index + 1])
@@ -400,6 +468,7 @@ def enumerate_surface_open_bays(
             continue
         record["exteriorRasterFraction"] = exterior_fraction
         record["objective"] = float(record["objective"]) * exterior_fraction
+        record["evidenceFingerprint"] = evidence_fingerprint
         retained.append(record)
         if len(retained) >= settings.maximum_scored_holes:
             break
@@ -496,6 +565,9 @@ def enumerate_surface_open_bays(
         "bayGeometryObjective": np.asarray(
             [record["objective"] for record in retained], dtype=np.float32
         ),
+        "bayEvidenceSha256": np.asarray(
+            [record["evidenceFingerprint"] for record in retained], dtype="S64"
+        ),
     }
     return arrays, {
         "outerBoundaryLoopCount": int(len(outer_loop)),
@@ -506,6 +578,8 @@ def enumerate_surface_open_bays(
         ),
         "overlapSuppressedCandidateCount": suppressed_overlap_count,
         "retainedGeometryCandidateCount": count,
+        "cachedEvidenceRejectionCount": cached_rejection_count,
+        "excludedEvidenceFingerprintCount": len(excluded_evidence_fingerprints),
         "geometryRejectionCount": dict(sorted(rejection_count.items())),
         "decisionUnit": "one complete existing boundary arc plus one proposed mouth",
         "singleCellGrowth": False,
@@ -519,6 +593,7 @@ def build_physical_ribbon_open_bays(
     *,
     owned_bounds: tuple[np.ndarray, np.ndarray] | None,
     settings: PhysicalRibbonOpenBaySettings,
+    excluded_evidence_fingerprints: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     surface_view = _surface_view(surface)
     source_loops, loop_statistics = extract_surface_boundary_loops(
@@ -529,6 +604,7 @@ def build_physical_ribbon_open_bays(
         source_loops,
         owned_bounds=owned_bounds,
         settings=settings,
+        excluded_evidence_fingerprints=excluded_evidence_fingerprints,
     )
     selected = np.arange(len(bay_loops["loopKind"]), dtype=np.int32)
     scored, scoring_statistics = score_surface_patch_holes(
@@ -559,11 +635,223 @@ def build_physical_ribbon_open_bays(
     }
 
 
+def _resolve_prior_manifest(
+    root: str | Path,
+    *,
+    schema: str,
+    label: str,
+) -> tuple[Path, dict[str, Any]]:
+    value = Path(root).resolve()
+    candidates = (value,) if value.is_file() else tuple(sorted(value.glob("*.json")))
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if manifest.get("schema") == schema and manifest.get("state") == "complete":
+            matches.append((path, manifest))
+    if len(matches) != 1:
+        raise ValueError(f"{label} root must identify one complete artifact")
+    return matches[0]
+
+
+def _prior_completion_holes(
+    completion_manifest: Mapping[str, Any],
+    *,
+    settings: PhysicalRibbonOpenBaySettings,
+    source_identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    reference = completion_manifest.get("identity", {}).get("holes", {})
+    path_value = reference.get("manifestPath")
+    if not path_value:
+        raise ValueError("prior completion does not identify its bay artifact")
+    path = Path(str(path_value))
+    if not path.is_file() or sha256_file(path) != reference.get("manifestSha256"):
+        raise ValueError("prior completion bay manifest changed")
+    manifest = json.loads(path.read_text())
+    if (
+        manifest.get("schema") != PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA
+        or manifest.get("state") != "complete"
+        or manifest.get("data", {}).get("sha256")
+        != reference.get("dataSha256")
+    ):
+        raise ValueError("prior completion was not built from open bays")
+    if canonical_json_hash(manifest.get("identity", {}).get("settings", {})) != (
+        canonical_json_hash(settings.record())
+    ):
+        raise ValueError("prior open-bay settings differ from the current run")
+    if canonical_json_hash(manifest.get("identity", {}).get("source", {})) != (
+        canonical_json_hash(source_identity)
+    ):
+        raise ValueError("prior open-bay evidence belongs to another volume")
+    data = _load_npz(
+        path.parent / str(manifest["data"]["path"]),
+        str(reference["dataSha256"]),
+    )
+    return manifest, data
+
+
+def _completion_record_fingerprint(
+    holes: Mapping[str, np.ndarray],
+    record: Mapping[str, Any],
+) -> str:
+    row = int(record["holeRow"])
+    loop = int(record["loopIndex"])
+    scored_loop = np.asarray(holes["scoredLoopIndex"], dtype=np.int32)
+    if row < 0 or row >= len(scored_loop) or int(scored_loop[row]) != loop:
+        raise ValueError("prior completion row and bay loop differ")
+    loop_offset = np.asarray(holes["loopOffset"], dtype=np.int64)
+    loop_vertex = np.asarray(holes["loopVertexFrontierIndex"], dtype=np.int32)
+    boundary = loop_vertex[
+        int(loop_offset[loop]) : int(loop_offset[loop + 1])
+    ]
+    context_offset = np.asarray(holes["contextOffset"], dtype=np.int64)
+    context_vertex = np.asarray(
+        holes["contextVertexFrontierIndex"], dtype=np.int32
+    )
+    context = context_vertex[
+        int(context_offset[row]) : int(context_offset[row + 1])
+    ]
+    return _bay_evidence_fingerprint(
+        holes,
+        boundary,
+        context,
+        int(np.asarray(holes["loopTopologyComponent"])[loop]),
+    )
+
+
+def _cached_rejection_evidence(
+    prior_completion_roots: Sequence[str | Path],
+    prior_texture_audit_roots: Sequence[str | Path],
+    *,
+    settings: PhysicalRibbonOpenBaySettings,
+    source_identity: Mapping[str, Any],
+    current_surface_reference: Mapping[str, Any],
+) -> tuple[frozenset[str], list[dict[str, Any]], dict[str, int]]:
+    fingerprints: set[str] = set()
+    references: list[dict[str, Any]] = []
+    intrinsic_count = 0
+    same_surface_count = 0
+    texture_count = 0
+    completion_cache: dict[
+        Path, tuple[dict[str, Any], dict[str, np.ndarray]]
+    ] = {}
+
+    def completion_inputs(
+        path: Path,
+        manifest: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+        cached = completion_cache.get(path)
+        if cached is None:
+            cached = _prior_completion_holes(
+                manifest,
+                settings=settings,
+                source_identity=source_identity,
+            )
+            completion_cache[path] = cached
+        return cached
+
+    for root in prior_completion_roots:
+        path, manifest = _resolve_prior_manifest(
+            root,
+            schema="pareidolia.physical-ribbon-dense-completion",
+            label="prior completion",
+        )
+        holes_manifest, holes = completion_inputs(path, manifest)
+        same_surface = (
+            holes_manifest.get("identity", {}).get("surface")
+            == current_surface_reference
+        )
+        for record in manifest.get("completions", ()):
+            reasons = set(record.get("rejectionReasons", ()))
+            if bool(record.get("accepted")):
+                continue
+            intrinsic = bool(reasons & CACHEABLE_COMPLETION_REJECTION_REASONS)
+            if not intrinsic and not same_surface:
+                continue
+            fingerprints.add(_completion_record_fingerprint(holes, record))
+            if intrinsic:
+                intrinsic_count += 1
+            else:
+                same_surface_count += 1
+        references.append(
+            {
+                "kind": "intrinsicCompletionRejections",
+                "manifestPath": str(path),
+                "manifestSha256": sha256_file(path),
+            }
+        )
+
+    for root in prior_texture_audit_roots:
+        audit_path, audit_manifest = _resolve_prior_manifest(
+            root,
+            schema="pareidolia.physical-ribbon-flattened-audit",
+            label="prior texture audit",
+        )
+        surface_reference = audit_manifest.get("identity", {}).get("surface", {})
+        path_value = surface_reference.get("manifestPath")
+        if not path_value:
+            raise ValueError("prior texture audit does not identify its completion")
+        completion_path = Path(str(path_value))
+        if (
+            not completion_path.is_file()
+            or sha256_file(completion_path)
+            != surface_reference.get("manifestSha256")
+        ):
+            raise ValueError("prior texture-audit completion changed")
+        completion_manifest = json.loads(completion_path.read_text())
+        if (
+            completion_manifest.get("schema")
+            != "pareidolia.physical-ribbon-dense-completion"
+            or completion_manifest.get("data", {}).get("sha256")
+            != surface_reference.get("dataSha256")
+        ):
+            raise ValueError("prior texture audit source is not a dense completion")
+        _, holes = completion_inputs(completion_path, completion_manifest)
+        excluded_rows = {
+            int(value)
+            for key in (
+                "boundaryTextureIncompatibleCompletionHoleRows",
+                "boundaryTextureUnmeasuredCompletionHoleRows",
+            )
+            for value in audit_manifest.get("audit", {}).get(key, ())
+        }
+        record_by_row = {
+            int(record["holeRow"]): record
+            for record in completion_manifest.get("completions", ())
+            if bool(record.get("accepted"))
+        }
+        if not excluded_rows.issubset(record_by_row):
+            raise ValueError("texture-excluded row is not an accepted completion")
+        for row in excluded_rows:
+            fingerprints.add(
+                _completion_record_fingerprint(holes, record_by_row[row])
+            )
+            texture_count += 1
+        references.append(
+            {
+                "kind": "incompatibleOrUnmeasuredTexture",
+                "manifestPath": str(audit_path),
+                "manifestSha256": sha256_file(audit_path),
+            }
+        )
+
+    return frozenset(fingerprints), references, {
+        "priorIntrinsicRejectionCount": intrinsic_count,
+        "priorSameSurfaceRejectionCount": same_surface_count,
+        "priorTextureRejectionCount": texture_count,
+        "uniqueCachedEvidenceFingerprintCount": len(fingerprints),
+    }
+
+
 def run_physical_ribbon_open_bays(
     surface_root: str | Path,
     output_root: str | Path,
     *,
     settings: PhysicalRibbonOpenBaySettings | None = None,
+    prior_completion_roots: Sequence[str | Path] = (),
+    prior_texture_audit_roots: Sequence[str | Path] = (),
     force: bool = False,
 ) -> dict[str, Any]:
     resolved = settings or PhysicalRibbonOpenBaySettings()
@@ -572,8 +860,24 @@ def run_physical_ribbon_open_bays(
         surface_path.parent / str(surface_manifest["data"]["path"]),
         surface_manifest["data"]["sha256"],
     )
+    current_surface_reference = {
+        "manifestPath": str(surface_path),
+        "manifestSha256": sha256_file(surface_path),
+        "dataSha256": surface_manifest["data"]["sha256"],
+    }
     source_record = surface_manifest["source"]
     source = VolumeSource.open(source_record["path"], source_record.get("metadataPath"))
+    (
+        excluded_evidence_fingerprints,
+        rejection_evidence_references,
+        rejection_cache_statistics,
+    ) = _cached_rejection_evidence(
+        prior_completion_roots,
+        prior_texture_audit_roots,
+        settings=resolved,
+        source_identity=source.source_identity,
+        current_surface_reference=current_surface_reference,
+    )
     geometry = surface_manifest.get("geometry", {})
     world_bounds = geometry.get("ownedWorldBounds")
     owned_bounds = (
@@ -587,16 +891,13 @@ def run_physical_ribbon_open_bays(
     identity: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA,
         "version": PHYSICAL_RIBBON_OPEN_BAYS_VERSION,
-        "surface": {
-            "manifestPath": str(surface_path),
-            "manifestSha256": sha256_file(surface_path),
-            "dataSha256": surface_manifest["data"]["sha256"],
-        },
+        "surface": current_surface_reference,
         "topologyContinuity": surface_manifest["identity"][
             "topologyContinuity"
         ],
         "source": source.source_identity,
         "settings": resolved.record(),
+        "priorRejectionEvidence": rejection_evidence_references,
         "implementationSha256": sha256_file(Path(__file__)),
     }
     identity["identitySha256"] = canonical_json_hash(identity)
@@ -625,7 +926,9 @@ def run_physical_ribbon_open_bays(
         source,
         owned_bounds=owned_bounds,
         settings=resolved,
+        excluded_evidence_fingerprints=excluded_evidence_fingerprints,
     )
+    statistics["rejectionCache"] = rejection_cache_statistics
     analyzed = time.monotonic()
     _write_npz(data_path, arrays)
     write_patch_hole_montage(
@@ -674,6 +977,15 @@ def run_physical_ribbon_open_bays(
                 "and excluded from autonomous completion"
             ),
             "candidateRole": "no ribbon-bank candidate is required or consulted",
+            "rejectionCache": (
+                "intrinsic exact failures are reused only when the complete "
+                "arc plus its fitted context has an identical evidence hash; "
+                "collision and topology failures are reused only while the "
+                "entire source surface is byte-identical; "
+                "proposal-local texture-incompatible or unmeasured states "
+                "are likewise excluded, while topology and collision-only "
+                "failures are reconsidered after any surface mutation"
+            ),
             "selectionMutated": False,
             "singleCellGrowth": False,
             "identityLabelsUsed": False,

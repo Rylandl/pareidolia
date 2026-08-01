@@ -1,0 +1,67 @@
+{
+  "maximum_rounds": 16,
+  "open_bays": {
+    "minimum_arc_edge_count": 3,
+    "maximum_arc_edge_count": 32,
+    "minimum_mouth_width_boundary_edges": 0.75,
+    "maximum_mouth_width_thicknesses": 4.0,
+    "minimum_perimeter_reduction_boundary_edges": 0.5,
+    "minimum_bay_area_chart_voxels_squared": 1.0,
+    "minimum_bay_compactness": 0.025,
+    "minimum_exterior_raster_fraction": 0.9,
+    "owned_boundary_exclusion_voxels": 2.0,
+    "geometry_raster_step_voxels": 0.75,
+    "maximum_geometry_raster_pixels": 2048,
+    "maximum_candidates_per_outer_loop": 4,
+    "maximum_arc_overlap_fraction": 0.6,
+    "context_graph_hops": 2,
+    "patch_pixel_step_voxels": 0.75,
+    "maximum_patch_pixels": 8192,
+    "maximum_scored_holes": 128,
+    "maximum_preview_holes": 24
+  },
+  "depth_fields": {
+    "minimum_shift_thicknesses": -1.5,
+    "maximum_shift_thicknesses": 1.5,
+    "shift_step_thicknesses": 0.125,
+    "profile_correlation_weight": 0.35,
+    "spatial_smoothness_weight": 0.18,
+    "smoothness_truncation_thicknesses": 0.75,
+    "boundary_anchor_weight": 0.18,
+    "boundary_anchor_decay_raster_steps": 2.0,
+    "minimum_context_contrast_fraction": 0.5,
+    "minimum_profile_correlation": 0.35,
+    "competing_label_separation_thicknesses": 0.5,
+    "candidate_shift_tolerance_thicknesses": 0.3,
+    "minimum_coherent_support_fraction": 0.7,
+    "minimum_candidate_coverage_fraction": 0.75,
+    "maximum_solver_sweeps": 12,
+    "maximum_preview_holes": 24
+  },
+  "dense_completion": {
+    "minimum_depth_field_supported_fraction": 0.9,
+    "minimum_reconstructed_supported_fraction": 0.7,
+    "minimum_median_profile_correlation": 0.65,
+    "minimum_median_far_layer_margin": 0.02,
+    "interior_boundary_separation_hypotheses_voxels": [
+      0.2,
+      0.3,
+      0.5,
+      0.75,
+      1.0,
+      1.5
+    ],
+    "minimum_triangle_area_voxels_squared": 0.03,
+    "maximum_triangle_edge_voxels": 6.0,
+    "high_triangle_normal_residual_degrees": 45.0,
+    "maximum_triangle_normal_residual_degrees": 85.0,
+    "maximum_native_ct_quadrature_edge_voxels": 1.0,
+    "intersection_tolerance_voxels": 0.05,
+    "maximum_edge_flip_iterations": 16384,
+    "maximum_completed_holes": 128
+  },
+  "flattened_audit": {
+    "maximum_components": 128,
+    "minimum_boundary_edge_measurements": 6
+  }
+}

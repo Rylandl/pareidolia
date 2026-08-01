@@ -5,6 +5,7 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 
@@ -130,6 +131,10 @@ from .physical_ribbon_surface_holes import (
 from .physical_ribbon_open_bays import (
     PhysicalRibbonOpenBaySettings,
     run_physical_ribbon_open_bays,
+)
+from .physical_ribbon_open_bay_saturation import (
+    PhysicalRibbonOpenBaySaturationSettings,
+    run_physical_ribbon_open_bay_saturation,
 )
 from .physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
@@ -967,7 +972,44 @@ def _physical_ribbon_open_bays(args: argparse.Namespace) -> None:
         args.surface,
         args.output,
         settings=PhysicalRibbonOpenBaySettings(**settings_values),
+        prior_completion_roots=tuple(args.prior_completion),
+        prior_texture_audit_roots=tuple(args.prior_texture_audit),
         force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_open_bay_saturation(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+
+    def progress(
+        round_index: int, stage: str, values: Mapping[str, object]
+    ) -> None:
+        details = " · ".join(
+            f"{name} {value}"
+            for name, value in values.items()
+            if isinstance(value, (int, float, str, bool))
+        )
+        suffix = f" · {details}" if details else ""
+        print(
+            f"open-bay saturation round {round_index} · {stage}{suffix}",
+            flush=True,
+        )
+
+    summary = run_physical_ribbon_open_bay_saturation(
+        args.surface,
+        args.output,
+        settings=PhysicalRibbonOpenBaySaturationSettings.from_record(
+            settings_values
+        ),
+        prior_completion_roots=tuple(args.prior_completion),
+        prior_texture_audit_roots=tuple(args.prior_texture_audit),
+        force=args.force,
+        progress=progress,
     )
     print(json.dumps(summary, indent=2))
 
@@ -990,6 +1032,7 @@ def _physical_ribbon_dense_completion(args: argparse.Namespace) -> None:
         args.depth_field,
         args.output,
         settings=PhysicalRibbonDenseCompletionSettings(**settings_values),
+        texture_audit_root=args.texture_audit,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -3058,9 +3101,72 @@ def main() -> None:
         "--output", type=Path, required=True
     )
     physical_ribbon_open_bays.add_argument("--settings-json", type=Path)
+    physical_ribbon_open_bays.add_argument(
+        "--prior-completion",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "prior dense completion whose unchanged intrinsic failures should "
+            "not consume the current scoring cap; repeat as needed"
+        ),
+    )
+    physical_ribbon_open_bays.add_argument(
+        "--prior-texture-audit",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "prior flattened audit whose unchanged incompatible or unmeasured "
+            "proposals should be excluded; repeat as needed"
+        ),
+    )
     physical_ribbon_open_bays.add_argument("--force", action="store_true")
     physical_ribbon_open_bays.set_defaults(
         handler=_physical_ribbon_open_bays
+    )
+    physical_ribbon_open_bay_saturation = subparsers.add_parser(
+        "saturate-physical-ribbon-open-bays",
+        description=(
+            "Iterate complete multi-edge open-bay reconstruction, dense "
+            "native-CT depth solving, exact surface admission, and flattened "
+            "fiber gating until no uncached supported state remains."
+        ),
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--prior-completion",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "optional prior dense completion providing evidence-hashed exact "
+            "failures; repeat as needed"
+        ),
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--prior-texture-audit",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "optional prior flattened audit providing proposal-local rejected "
+            "fiber states; repeat as needed"
+        ),
+    )
+    physical_ribbon_open_bay_saturation.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_open_bay_saturation.set_defaults(
+        handler=_physical_ribbon_open_bay_saturation
     )
     physical_ribbon_depth_fields = subparsers.add_parser(
         "analyze-physical-ribbon-depth-fields",
@@ -3098,6 +3204,14 @@ def main() -> None:
     )
     physical_ribbon_dense_completion.add_argument(
         "--output", type=Path, required=True
+    )
+    physical_ribbon_dense_completion.add_argument(
+        "--texture-audit",
+        type=Path,
+        help=(
+            "optional flattened audit of an ungated completion; replay only "
+            "proposal-local texture-compatible hole rows"
+        ),
     )
     physical_ribbon_dense_completion.add_argument("--settings-json", type=Path)
     physical_ribbon_dense_completion.add_argument("--force", action="store_true")

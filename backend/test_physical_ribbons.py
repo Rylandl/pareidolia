@@ -27,6 +27,7 @@ from backend.cubical.physical_ribbon_collective import (
     optimize_collective_patch,
 )
 from backend.cubical.physical_ribbon_flattened_audit import (
+    PhysicalRibbonFlattenedAuditSettings,
     _completion_proposals_by_component,
     _completion_triangle_texture_pairs,
     _rank_exact_variant_rows,
@@ -35,7 +36,12 @@ from backend.cubical.physical_ribbon_flattened_audit import (
 )
 from backend.cubical.physical_ribbon_open_bays import (
     PhysicalRibbonOpenBaySettings,
+    _bay_evidence_fingerprint,
     _loop_open_bay_candidates,
+)
+from backend.cubical.physical_ribbon_open_bay_saturation import (
+    PhysicalRibbonOpenBaySaturationSettings,
+    _stationary_round_decision,
 )
 from backend.cubical.physical_ribbon_depth_fields import (
     _coherent_supported_fraction,
@@ -50,6 +56,7 @@ from backend.cubical.physical_ribbon_dense_completion import (
     _mesh_edge_length_audit,
     _other_component_triangle_intersections,
     _surface_field_integrability,
+    _texture_compatible_hole_rows,
     _triangle_quadrature_samples,
     triangulate_weak_boundary_field,
 )
@@ -1487,6 +1494,29 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
         self.assertLess(result["maximumCtSupportedTriangleEdgeVoxels"], 6.0)
         self.assertEqual(result["maximumTriangleEdgeVoxels"], 10.0)
 
+    def test_texture_gate_requires_exhaustive_proposal_verdicts(self) -> None:
+        completion = {
+            "completions": (
+                {"holeRow": 2, "accepted": True},
+                {"holeRow": 3, "accepted": False},
+                {"holeRow": 5, "accepted": True},
+            )
+        }
+        audit = {
+            "audit": {
+                "flattenedCompletionProposalCount": 2,
+                "boundaryTextureCompatibleCompletionHoleRows": (2,),
+                "boundaryTextureIncompatibleCompletionHoleRows": (5,),
+                "boundaryTextureUnmeasuredCompletionHoleRows": (),
+            }
+        }
+        self.assertEqual(
+            _texture_compatible_hole_rows(completion, audit), frozenset((2,))
+        )
+        audit["audit"]["boundaryTextureIncompatibleCompletionHoleRows"] = ()
+        with self.assertRaises(ValueError):
+            _texture_compatible_hole_rows(completion, audit)
+
     def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(
         self,
     ) -> None:
@@ -1632,6 +1662,91 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
 
 
 class PhysicalRibbonOpenBayTests(unittest.TestCase):
+    def test_evidence_fingerprint_is_axial_but_context_complete(self) -> None:
+        surface = {
+            "chartUV": np.asarray(
+                ((0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)),
+                dtype=np.float32,
+            ),
+            "midpointXYZ": np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (2.0, 0.0, 0.0),
+                    (3.0, 0.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "signedNormalXYZ": np.asarray(
+                ((0.0, 0.0, 1.0),) * 4, dtype=np.float32
+            ),
+            "thicknessVoxels": np.ones(4, dtype=np.float32),
+        }
+        forward = _bay_evidence_fingerprint(
+            surface,
+            np.asarray((0, 1, 2), dtype=np.int32),
+            np.asarray((0, 1, 2), dtype=np.int32),
+            7,
+        )
+        reverse = _bay_evidence_fingerprint(
+            surface,
+            np.asarray((2, 1, 0), dtype=np.int32),
+            np.asarray((2, 0, 1), dtype=np.int32),
+            7,
+        )
+        self.assertEqual(forward, reverse)
+        self.assertNotEqual(
+            forward,
+            _bay_evidence_fingerprint(
+                surface,
+                np.asarray((0, 1, 2), dtype=np.int32),
+                np.asarray((0, 1, 2, 3), dtype=np.int32),
+                7,
+            ),
+        )
+        changed = {name: values.copy() for name, values in surface.items()}
+        changed["midpointXYZ"][1, 2] = 0.25
+        self.assertNotEqual(
+            forward,
+            _bay_evidence_fingerprint(
+                changed,
+                np.asarray((0, 1, 2), dtype=np.int32),
+                np.asarray((0, 1, 2), dtype=np.int32),
+                7,
+            ),
+        )
+
+    def test_fixed_point_retries_only_when_the_ranking_cap_is_full(self) -> None:
+        retry, reason = _stationary_round_decision(
+            retained_candidate_count=128,
+            maximum_scored_holes=128,
+            failure_kind="exact",
+        )
+        self.assertTrue(retry)
+        self.assertEqual(reason, "scoring-cap-exhausted-retry-same-surface")
+        retry, reason = _stationary_round_decision(
+            retained_candidate_count=12,
+            maximum_scored_holes=128,
+            failure_kind="texture",
+        )
+        self.assertFalse(retry)
+        self.assertEqual(reason, "texture-evidence-saturated")
+
+    def test_fixed_point_settings_require_exhaustive_downstream_caps(self) -> None:
+        settings = PhysicalRibbonOpenBaySaturationSettings.from_record({})
+        self.assertEqual(settings.open_bays.maximum_scored_holes, 128)
+        self.assertEqual(settings.dense_completion.maximum_completed_holes, 128)
+        self.assertEqual(settings.flattened_audit.maximum_components, 128)
+        with self.assertRaises(ValueError):
+            PhysicalRibbonOpenBaySaturationSettings(
+                dense_completion=PhysicalRibbonDenseCompletionSettings(
+                    maximum_completed_holes=64
+                ),
+                flattened_audit=PhysicalRibbonFlattenedAuditSettings(
+                    maximum_components=128
+                ),
+            )
+
     def test_concave_outer_frontier_yields_complete_compact_bay(self) -> None:
         chart = np.asarray(
             (

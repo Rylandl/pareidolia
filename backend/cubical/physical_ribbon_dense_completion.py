@@ -15,6 +15,9 @@ from .contracts import VolumeSource, atomic_json, canonical_json_hash, sha256_fi
 from .needle_surface import _triangle_geometry
 from .physical_ribbon_bridging import _load_npz, _write_npz
 from .physical_ribbon_depth_fields import _profile_fields
+from .physical_ribbon_flattened_audit import (
+    PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA,
+)
 from .physical_ribbon_patch_holes import (
     PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
     PhysicalRibbonPatchHoleSettings,
@@ -62,6 +65,68 @@ def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
             "open-bay artifact"
         )
     return matches[0]
+
+
+def _resolve_texture_audit_manifest(
+    root: str | Path,
+) -> tuple[Path, dict[str, Any]]:
+    value = Path(root).resolve()
+    candidates = (value,) if value.is_file() else tuple(sorted(value.glob("*.json")))
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            manifest.get("schema") == PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA
+            and manifest.get("state") == "complete"
+        ):
+            matches.append((path, manifest))
+    if len(matches) != 1:
+        raise ValueError(
+            "texture-audit root must identify one complete flattened audit"
+        )
+    return matches[0]
+
+
+def _texture_compatible_hole_rows(
+    completion_manifest: Mapping[str, Any],
+    audit_manifest: Mapping[str, Any],
+) -> frozenset[int]:
+    """Require an exhaustive, disjoint texture verdict for every completion."""
+
+    accepted_values = [
+        int(record["holeRow"])
+        for record in completion_manifest.get("completions", ())
+        if bool(record.get("accepted"))
+    ]
+    accepted = set(accepted_values)
+    if len(accepted) != len(accepted_values):
+        raise ValueError("accepted completion hole rows are not unique")
+    audit = audit_manifest.get("audit", {})
+    compatible = {
+        int(value)
+        for value in audit.get("boundaryTextureCompatibleCompletionHoleRows", ())
+    }
+    incompatible = {
+        int(value)
+        for value in audit.get("boundaryTextureIncompatibleCompletionHoleRows", ())
+    }
+    unmeasured = {
+        int(value)
+        for value in audit.get("boundaryTextureUnmeasuredCompletionHoleRows", ())
+    }
+    if compatible & incompatible or compatible & unmeasured or incompatible & unmeasured:
+        raise ValueError("flattened completion texture verdicts overlap")
+    if compatible | incompatible | unmeasured != accepted:
+        raise ValueError(
+            "flattened completion texture verdicts do not exhaust accepted rows"
+        )
+    declared_count = int(audit.get("flattenedCompletionProposalCount", -1))
+    if declared_count != len(accepted):
+        raise ValueError("flattened completion proposal count differs from source")
+    return frozenset(compatible)
 
 
 def _validate_depth_field(
@@ -1927,6 +1992,7 @@ def build_physical_ribbon_dense_completion(
     *,
     hole_settings: PhysicalRibbonPatchHoleSettings,
     settings: PhysicalRibbonDenseCompletionSettings,
+    eligible_hole_rows: AbstractSet[int] | None = None,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], dict[str, Any]]:
     current = _surface_view(holes)
     baseline_node_count = len(np.asarray(current["midpointXYZ"]))
@@ -1961,6 +2027,10 @@ def build_physical_ribbon_dense_completion(
     field_margin = np.asarray(
         depth_field["pixelCollectiveFarLayerMargin"], dtype=np.float32
     )
+    if eligible_hole_rows is not None and any(
+        row < 0 or row >= len(loop_index) for row in eligible_hole_rows
+    ):
+        raise ValueError("texture-eligible hole row is outside the depth field")
 
     proposal_offset = [0]
     proposal_node: list[int] = []
@@ -2040,7 +2110,16 @@ def build_physical_ribbon_dense_completion(
             row,
         )
 
-    ranked_rows = sorted(range(len(loop_index)), key=ranking_key)[
+    candidate_rows = (
+        range(len(loop_index))
+        if eligible_hole_rows is None
+        else (
+            row
+            for row in range(len(loop_index))
+            if row in eligible_hole_rows
+        )
+    )
+    ranked_rows = sorted(candidate_rows, key=ranking_key)[
         : settings.maximum_completed_holes
     ]
     for row in ranked_rows:
@@ -2455,6 +2534,12 @@ def build_physical_ribbon_dense_completion(
             if open_bay_mode
             else None
         ),
+        "textureGatedReplay": eligible_hole_rows is not None,
+        "textureEligibleHoleRowCount": (
+            len(eligible_hole_rows)
+            if eligible_hole_rows is not None
+            else None
+        ),
         "evaluatedMeshHypothesisCount": int(
             sum(len(record.get("hypotheses", ())) for record in records)
         ),
@@ -2497,6 +2582,7 @@ def run_physical_ribbon_dense_completion(
     output_root: str | Path,
     *,
     settings: PhysicalRibbonDenseCompletionSettings | None = None,
+    texture_audit_root: str | Path | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     resolved = settings or PhysicalRibbonDenseCompletionSettings()
@@ -2519,6 +2605,64 @@ def run_physical_ribbon_dense_completion(
     )
     source_record = holes_manifest["source"]
     source = VolumeSource.open(source_record["path"], source_record.get("metadataPath"))
+    eligible_hole_rows: frozenset[int] | None = None
+    texture_audit_reference: dict[str, Any] | None = None
+    texture_gate_statistics: dict[str, int] | None = None
+    if texture_audit_root is not None:
+        texture_path, texture_manifest = _resolve_texture_audit_manifest(
+            texture_audit_root
+        )
+        surface_reference = texture_manifest.get("identity", {}).get("surface", {})
+        completion_path_value = surface_reference.get("manifestPath")
+        if not completion_path_value:
+            raise ValueError("flattened audit does not identify its source completion")
+        completion_path = Path(str(completion_path_value))
+        if (
+            not completion_path.is_file()
+            or sha256_file(completion_path)
+            != surface_reference.get("manifestSha256")
+        ):
+            raise ValueError("flattened audit source completion changed")
+        completion_manifest = json.loads(completion_path.read_text())
+        if (
+            completion_manifest.get("schema")
+            != PHYSICAL_RIBBON_DENSE_COMPLETION_SCHEMA
+            or completion_manifest.get("state") != "complete"
+            or completion_manifest.get("data", {}).get("sha256")
+            != surface_reference.get("dataSha256")
+        ):
+            raise ValueError("flattened audit source is not a dense completion")
+        if completion_manifest.get("identity", {}).get("holes") != _reference(
+            holes_path, holes_manifest
+        ):
+            raise ValueError("texture audit was not measured on these hole states")
+        if completion_manifest.get("identity", {}).get("depthField") != _reference(
+            depth_path, depth_manifest
+        ):
+            raise ValueError("texture audit was not measured on this depth field")
+        if canonical_json_hash(
+            completion_manifest.get("identity", {}).get("settings", {})
+        ) != canonical_json_hash(resolved.record()):
+            raise ValueError("texture audit completion settings differ")
+        eligible_hole_rows = _texture_compatible_hole_rows(
+            completion_manifest, texture_manifest
+        )
+        accepted_source = sum(
+            int(bool(record.get("accepted")))
+            for record in completion_manifest.get("completions", ())
+        )
+        texture_gate_statistics = {
+            "textureSourceAcceptedHoleCount": accepted_source,
+            "textureCompatibleHoleCount": len(eligible_hole_rows),
+            "textureRejectedOrUnmeasuredHoleCount": (
+                accepted_source - len(eligible_hole_rows)
+            ),
+        }
+        texture_audit_reference = {
+            "manifestPath": str(texture_path),
+            "manifestSha256": sha256_file(texture_path),
+            "sourceCompletion": surface_reference,
+        }
     hole_setting_values = dict(
         holes_manifest.get("identity", {}).get("settings", {})
     )
@@ -2542,6 +2686,7 @@ def run_physical_ribbon_dense_completion(
         "topologyContinuity": holes_manifest["identity"]["topologyContinuity"],
         "source": source.source_identity,
         "settings": resolved.record(),
+        "textureAudit": texture_audit_reference,
         "implementationSha256": sha256_file(Path(__file__)),
     }
     identity["identitySha256"] = canonical_json_hash(identity)
@@ -2565,7 +2710,10 @@ def run_physical_ribbon_dense_completion(
         source,
         hole_settings=hole_settings,
         settings=resolved,
+        eligible_hole_rows=eligible_hole_rows,
     )
+    if texture_gate_statistics is not None:
+        statistics.update(texture_gate_statistics)
     built = time.monotonic()
     _write_npz(data_path, arrays)
     finished = time.monotonic()
@@ -2660,6 +2808,13 @@ def run_physical_ribbon_dense_completion(
             "mutation": (
                 "accepted completions augment a versioned surface artifact; "
                 "source ribbon configuration and depth field remain unchanged"
+            ),
+            "textureGate": (
+                "only proposal-local flattened-fiber-compatible hole rows "
+                "from the audited source completion are reconstructed; all "
+                "geometry, CT, collision, and topology gates are rerun"
+                if texture_audit_reference is not None
+                else "not applied in this proposal solve"
             ),
             "singlePixelGrowth": False,
             "identityLabelsUsed": False,

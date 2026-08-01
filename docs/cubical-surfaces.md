@@ -1114,7 +1114,59 @@ unmeasured expansions, so the result is not being rescued by a component
 average.  The visual check is
 `physical-ribbon-open-bay-completion-flat-audit-v1/physical-ribbon-flattened-audit.png`.
 
-The reproducible outer-frontier sequence is:
+One pass is not a saturation argument: accepted bays change neighboring
+frontiers, while a 128-state scoring cap can hide lower-ranked evidence behind
+states that have already failed.  `saturate-physical-ribbon-open-bays` runs the
+entire open-bay, dense-depth, exact reconstruction, flattened-texture, and
+texture-gated replay sequence to a fixed point.  Every bay carries a SHA-256
+over its complete boundary arc, two-hop fitting context, chart coordinates,
+physical positions, normals, and thicknesses.  Intrinsic CT or mesh failures
+are skipped only while that complete evidence remains identical.  Collision
+and topology failures additionally require a byte-identical source surface;
+they are automatically reconsidered after any accepted surface mutation.
+Texture-incompatible and unmeasured proposals are cached independently, so a
+geometrically convincing jump to another ply cannot keep occupying the
+ranking cap.
+
+The materializing texture gate is proposal-local and exhaustive.  An ungated
+exact completion is flattened at fixed physical ply depths, and only rows with
+a compatible fiber verdict are reconstructed.  Geometry, native-CT support,
+collision, manifold, and loop audits are rerun during replay.  If removing a
+bad proposal changes another proposal's realized boundary, the replay is
+flattened again and the compatible set is reduced to a fixed point.  A stage
+cannot silently pass an unaudited accepted proposal: the completion and audit
+row sets must be disjoint, exhaustive, and equal in declared count.
+
+The fixed-point run on this block retains 86 texture-compatible complete bays
+over four mutating rounds (55, 27, three, and one).  They add 2,056 dense
+vertices and 4,368 triangles, reduce the outer frontier by 256 edges (12,462
+to 12,206), and preserve all 734 triangle regions, 734 outer loops, and nine
+interior loops.  One otherwise strong exact proposal is rejected because its
+flattened axial fiber direction
+disagrees with the inherited surface by roughly 33--36 degrees at all three
+sampled depths, despite 1.0 native-CT support and 0.942 profile correlation.
+The final stationary round evaluates all six remaining uncached bays and
+accepts none, establishing exact-evidence rather than cap-limited saturation.
+The complete five-round run takes 273.7 seconds on the current CPU path.
+
+The recommended reproducible command is:
+
+```bash
+python -m backend.cubical saturate-physical-ribbon-open-bays \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-adaptive-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-saturation-v1 \
+  --settings-json examples/physical-ribbon-open-bay-saturation.json
+```
+
+Each round is stored beneath the output root with immutable references to its
+input surface, candidates, depth field, ungated completion, flattened audit,
+and any gated replays.  The root manifest records the terminal surface and
+distinguishes evidence saturation from a configured maximum-round stop.  Prior
+completion and texture-audit roots may be supplied repeatedly when continuing
+an already materialized surface; the same settings and source-volume identity
+are enforced before their rejection evidence is reused.
+
+The equivalent single-round primitives are:
 
 ```bash
 python -m backend.cubical analyze-physical-ribbon-open-bays \
@@ -1198,6 +1250,7 @@ work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-regression-adaptive-
 work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-regression-adaptive-flat-audit-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-adaptive-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-adaptive-flat-audit-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-saturation-v1
 ```
 
 The reproducible dense-field sequence is:
