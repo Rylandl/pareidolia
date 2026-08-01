@@ -13,41 +13,55 @@ import {
 type Point3 = [number, number, number];
 type Orbit = { yaw: number; pitch: number; zoom: number };
 
-type BlockPatch = {
-  id: string;
+type SurfaceTriangle = {
+  id: number;
   component: number;
   componentSize: number;
-  cell: [number, number, number];
-  confidence: number;
-  normal: Point3;
-  vertices: Point3[];
+  vertices: [number, number, number];
+  areaVoxelsSquared: number;
+  normalResidualDegrees: number | null;
+  experimental: boolean;
+  completionRow: number | null;
 };
 
-type BlockComponent = {
+type SurfaceComponent = {
   rank: number;
   stableId: string;
-  patchCount: number;
-  meanConfidence: number;
+  triangleCount: number;
+  nodeCount: number;
+  surfaceAreaVoxelsSquared: number;
   boundsMinimumXYZ: Point3;
   boundsMaximumXYZ: Point3;
-  joinAngles: {
-    normal: { count: number; p90Degrees: number; maximumDegrees: number };
-    strictFiber: { count: number; p90Degrees: number; maximumDegrees: number };
-    quarterTurnResidual: { count: number; p90Degrees: number; maximumDegrees: number };
+  normalResidualDegrees: {
+    median: number;
+    p90: number;
+    maximum: number;
   };
-  curvature?: {
-    flaggedJoins: number;
-    maximumPressure: number;
-    directBendP90Degrees: number;
-    branchContrastP90Degrees: number;
-    normalConeP90DegreesDiagnosticOnly: number;
-  };
+  experimentalTriangleCount: number;
+  experimentalCompletionRows: number[];
+  meanEvidence?: number;
+  meanMacroConfidence?: number;
+  splitByStratumGuard?: boolean;
 };
 
-type BlockSheetResult = {
+type InterfaceNode = [number, number, number, number];
+
+type BlockSurfaceResult = {
   schema: string;
   version: number;
+  representation?: "material-interface-graph";
   variant: string;
+  artifact: {
+    manifestPath: string;
+    state: string;
+    method: string;
+  };
+  source: {
+    path: string;
+    metadataPath: string;
+    name: string;
+    voxelSizeMicrons: number;
+  };
   grid: {
     shapeCellsXYZ: Point3;
     cellSizeXYZ: Point3;
@@ -56,26 +70,29 @@ type BlockSheetResult = {
     coordinateUnit: string;
   };
   stats: {
-    patchCount: number;
+    triangleCount: number;
+    nodeCount: number;
+    displayedNodeCount?: number;
     componentCount: number;
-    retainedJoinCount: number;
-    largestComponentPatchCount: number;
-    unresolvedInteriorTraceEndpoints: number;
-    retainedInteriorTraceFraction: number;
-    curvatureFlaggedJoinsBefore: number;
-    curvatureFlaggedJoinsAfter: number;
-    layerConflictsBefore: number;
-    layerConflictsAfter: number;
-    modeledLayerRepulsionPairs: number;
-    internalLayerRepulsionCost: number;
-    foldbackExclusionPairs: number;
-    acceptedFoldbackPairs: number;
-    maximumNormalJoinAngleDegrees: number;
-    maximumStrictFiberJoinAngleDegrees: number;
-    maximumQuarterTurnResidualDegrees: number;
+    displayedComponentCount?: number;
+    largestComponentTriangleCount: number;
+    largestComponentNodeCount?: number;
+    baselineTriangleCount: number;
+    experimentalTriangleCount: number;
+    acceptedCompletionCount: number;
+    attemptedCompletionCount: number;
+    regionCountBefore: number;
+    regionCountAfter: number;
+    medianNormalResidualDegrees: number;
+    p90NormalResidualDegrees: number;
+    retainedEdgeCount?: number;
+    columnConflictRejectedEdgeCount?: number;
+    eligibleNodeFraction?: number;
   };
-  components: BlockComponent[];
-  patches: BlockPatch[];
+  components: SurfaceComponent[];
+  vertices: Point3[];
+  triangles: SurfaceTriangle[];
+  interfaceNodes?: InterfaceNode[];
 };
 
 type VolumePayload = {
@@ -107,14 +124,21 @@ type VolumeRenderer = {
   };
 };
 
-type ProjectedPatch = {
-  patch: BlockPatch;
+type ProjectedTriangle = {
+  triangle: SurfaceTriangle;
   points: Array<{ x: number; y: number }>;
   depth: number;
 };
 
+type ProjectedInterfaceNode = {
+  x: number;
+  y: number;
+  depth: number;
+  component: number;
+};
+
 const DEFAULT_ORBIT: Orbit = { yaw: -0.72, pitch: 0.48, zoom: 1.35 };
-const COMPONENT_SIZE_OPTIONS = [1, 2, 4, 8, 16, 32, 64, 128];
+const COMPONENT_SIZE_OPTIONS = [1, 16, 32, 64, 128, 256, 512, 1024];
 
 const VERTEX_SHADER = `#version 300 es
 out vec2 vUv;
@@ -354,7 +378,7 @@ function projectPoint(
   };
 }
 
-function clipIndex(axis: ClipAxis) {
+function clipIndex(axis: ClipAxis): -1 | 0 | 1 | 2 {
   return axis === "x" ? 0 : axis === "y" ? 1 : axis === "z" ? 2 : -1;
 }
 
@@ -411,7 +435,8 @@ export function BlockVolumeExplorer() {
   const volumeCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<VolumeRenderer | null>(null);
-  const hitPatchesRef = useRef<ProjectedPatch[]>([]);
+  const hitTrianglesRef = useRef<ProjectedTriangle[]>([]);
+  const hitInterfaceNodesRef = useRef<ProjectedInterfaceNode[]>([]);
   const dragRef = useRef<{
     x: number;
     y: number;
@@ -419,22 +444,23 @@ export function BlockVolumeExplorer() {
     startY: number;
     moved: boolean;
   } | null>(null);
-  const [result, setResult] = useState<BlockSheetResult | null>(null);
+  const [result, setResult] = useState<BlockSurfaceResult | null>(null);
   const [volume, setVolume] = useState<VolumePayload | null>(null);
   const [rendererReady, setRendererReady] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [message, setMessage] = useState("Loading the solved block and source voxels…");
+  const [message, setMessage] = useState("Loading the current cubical surface and source voxels…");
   const [retry, setRetry] = useState(0);
   const [orbit, setOrbit] = useState(DEFAULT_ORBIT);
   const [threshold, setThreshold] = useState(0.38);
   const [density, setDensity] = useState(3.4);
   const [sheetOpacity, setSheetOpacity] = useState(0.34);
-  const [minimumComponentSize, setMinimumComponentSize] = useState(1);
+  const [minimumComponentSize, setMinimumComponentSize] = useState(128);
   const [clipAxis, setClipAxis] = useState<ClipAxis>("none");
   const [clipFraction, setClipFraction] = useState(1);
   const [showVolume, setShowVolume] = useState(true);
   const [showSheets, setShowSheets] = useState(true);
   const [showEdges, setShowEdges] = useState(true);
+  const [showExperimental, setShowExperimental] = useState(true);
   const [selectedComponent, setSelectedComponent] = useState<number | null>(null);
   const [isolateSelected, setIsolateSelected] = useState(false);
 
@@ -443,18 +469,39 @@ export function BlockVolumeExplorer() {
     [result, selectedComponent],
   );
 
-  const visiblePatchCount = useMemo(() => {
+  const isInterfaceGraph = result?.representation === "material-interface-graph";
+
+  const visiblePrimitiveCount = useMemo(() => {
     if (!result || !showSheets) return 0;
-    return result.patches.reduce(
-      (count, patch) =>
+    if (result.representation === "material-interface-graph") {
+      return (result.interfaceNodes ?? []).reduce((count, node) => {
+        const component = result.components[node[3] - 1];
+        return count +
+          (component &&
+          component.nodeCount >= minimumComponentSize &&
+          (!isolateSelected || selectedComponent === node[3])
+            ? 1
+            : 0);
+      }, 0);
+    }
+    return result.triangles.reduce(
+      (count, triangle) =>
         count +
-        (patch.componentSize >= minimumComponentSize &&
-        (!isolateSelected || selectedComponent === patch.component)
+        (triangle.componentSize >= minimumComponentSize &&
+        (showExperimental || !triangle.experimental) &&
+        (!isolateSelected || selectedComponent === triangle.component)
           ? 1
           : 0),
       0,
     );
-  }, [isolateSelected, minimumComponentSize, result, selectedComponent, showSheets]);
+  }, [
+    isolateSelected,
+    minimumComponentSize,
+    result,
+    selectedComponent,
+    showExperimental,
+    showSheets,
+  ]);
 
   const drawVolume = useCallback(() => {
     const renderer = rendererRef.current;
@@ -494,46 +541,109 @@ export function BlockVolumeExplorer() {
     context.clearRect(0, 0, width, height);
     const extent = result.grid.extentXYZ;
     const axis = clipIndex(clipAxis);
-    const cutoff = axis >= 0 ? extent[axis] * clipFraction : Infinity;
-    const projected: ProjectedPatch[] = [];
-    if (showSheets) {
-      for (const patch of result.patches) {
-        if (patch.componentSize < minimumComponentSize) continue;
-        if (isolateSelected && patch.component !== selectedComponent) continue;
-        const clipped = clipPolygon(patch.vertices, axis, cutoff);
+    const cutoff = axis === -1 ? Infinity : extent[axis] * clipFraction;
+    const projected: ProjectedTriangle[] = [];
+    const projectedInterfaceNodes: ProjectedInterfaceNode[] = [];
+    if (showSheets && result.representation === "material-interface-graph") {
+      const groups = Array.from(
+        { length: result.components.length + 1 },
+        () => [] as ProjectedInterfaceNode[],
+      );
+      for (const node of result.interfaceNodes ?? []) {
+        const component = result.components[node[3] - 1];
+        if (!component || component.nodeCount < minimumComponentSize) continue;
+        if (isolateSelected && node[3] !== selectedComponent) continue;
+        if (axis >= 0 && node[axis] > cutoff + 1e-6) continue;
+        const projectedPoint = projectPoint(
+          [node[0], node[1], node[2]],
+          extent,
+          orbit,
+          width,
+          height,
+        );
+        if (!projectedPoint) continue;
+        const entry = {
+          x: projectedPoint.x,
+          y: projectedPoint.y,
+          depth: projectedPoint.depth,
+          component: node[3],
+        };
+        groups[node[3]].push(entry);
+        projectedInterfaceNodes.push(entry);
+      }
+      const groupOrder = result.components
+        .map((component) => component.rank)
+        .filter((rank) => groups[rank].length > 0)
+        .sort((first, second) =>
+          first === selectedComponent ? 1 : second === selectedComponent ? -1 : first - second,
+        );
+      const pointSize = clamp(0.85 + orbit.zoom * 0.22, 1.05, 2.8);
+      for (const rank of groupOrder) {
+        const isSelected = rank === selectedComponent;
+        const hue = componentHue(rank);
+        const alpha = clamp(
+          sheetOpacity * (selectedComponent && !isSelected ? 0.24 : isSelected ? 1.8 : 1.25),
+          0.08,
+          0.96,
+        );
+        context.fillStyle = isSelected
+          ? `rgba(255, 232, 173, ${alpha})`
+          : `hsla(${hue}, 76%, 63%, ${alpha})`;
+        const size = isSelected ? pointSize * 1.65 : pointSize;
+        const half = size * 0.5;
+        for (const entry of groups[rank]) {
+          context.fillRect(entry.x - half, entry.y - half, size, size);
+        }
+      }
+    } else if (showSheets) {
+      for (const triangle of result.triangles) {
+        if (triangle.componentSize < minimumComponentSize) continue;
+        if (!showExperimental && triangle.experimental) continue;
+        if (isolateSelected && triangle.component !== selectedComponent) continue;
+        const vertices = triangle.vertices.map((index) => result.vertices[index]);
+        const clipped = clipPolygon(vertices, axis, cutoff);
         if (clipped.length < 3) continue;
         const points = clipped.map((vertex) => projectPoint(vertex, extent, orbit, width, height));
         if (points.some((point) => !point)) continue;
         projected.push({
-          patch,
+          triangle,
           points: points.map((point) => ({ x: point!.x, y: point!.y })),
           depth: points.reduce((sum, point) => sum + point!.depth, 0) / points.length,
         });
       }
       projected.sort((first, second) => second.depth - first.depth);
       for (const entry of projected) {
-        const isSelected = entry.patch.component === selectedComponent;
-        const hue = componentHue(entry.patch.component);
-        const confidenceScale = 0.58 + 0.42 * entry.patch.confidence;
-        const alpha = clamp(sheetOpacity * confidenceScale * (selectedComponent && !isSelected ? 0.38 : 1), 0, 0.92);
+        const isSelected = entry.triangle.component === selectedComponent;
+        const isExperimental = entry.triangle.experimental;
+        const hue = componentHue(entry.triangle.component);
+        const alpha = clamp(
+          sheetOpacity * (selectedComponent && !isSelected ? 0.32 : 1),
+          0,
+          0.92,
+        );
         context.beginPath();
         context.moveTo(entry.points[0].x, entry.points[0].y);
         for (let index = 1; index < entry.points.length; index += 1) {
           context.lineTo(entry.points[index].x, entry.points[index].y);
         }
         context.closePath();
-        context.fillStyle = `hsla(${hue}, 66%, ${isSelected ? 68 : 58}%, ${isSelected ? Math.max(alpha, 0.62) : alpha})`;
+        context.fillStyle = isExperimental
+          ? `rgba(255, 91, 69, ${Math.max(alpha, isSelected ? 0.82 : 0.62)})`
+          : `hsla(${hue}, 62%, ${isSelected ? 68 : 57}%, ${isSelected ? Math.max(alpha, 0.62) : alpha})`;
         context.fill();
-        if (showEdges || isSelected) {
-          context.lineWidth = isSelected ? 1.65 : 0.55;
-          context.strokeStyle = isSelected
+        if (showEdges || isSelected || isExperimental) {
+          context.lineWidth = isExperimental ? 1.15 : isSelected ? 1.65 : 0.5;
+          context.strokeStyle = isExperimental
+            ? "rgba(255, 232, 166, 0.96)"
+            : isSelected
             ? "rgba(255, 232, 173, 0.96)"
             : `hsla(${hue}, 72%, 78%, ${Math.min(alpha + 0.16, 0.72)})`;
           context.stroke();
         }
       }
     }
-    hitPatchesRef.current = projected;
+    hitTrianglesRef.current = projected;
+    hitInterfaceNodesRef.current = projectedInterfaceNodes;
 
     const corners: Point3[] = [
       [0, 0, 0],
@@ -582,6 +692,7 @@ export function BlockVolumeExplorer() {
     selectedComponent,
     sheetOpacity,
     showEdges,
+    showExperimental,
     showSheets,
   ]);
 
@@ -613,14 +724,14 @@ export function BlockVolumeExplorer() {
   useEffect(() => {
     const controller = new AbortController();
     setState("loading");
-    setMessage("Loading 4,784 solved patches and the source block volume…");
+    setMessage("Loading the current cubical mesh and its aligned CT block…");
     Promise.all([
       fetch("/api/block/sheets", { signal: controller.signal }).then(async (response) => {
         if (!response.ok) {
           const payload = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(payload?.error || `Block sheets returned ${response.status}.`);
         }
-        return response.json() as Promise<BlockSheetResult>;
+        return response.json() as Promise<BlockSurfaceResult>;
       }),
       fetch("/api/block/volume?stride=2", { signal: controller.signal }).then(async (response) => {
         if (!response.ok) {
@@ -650,7 +761,7 @@ export function BlockVolumeExplorer() {
       .catch((error) => {
         if (controller.signal.aborted) return;
         setState("error");
-        setMessage(error instanceof Error ? error.message : "The solved block is unavailable.");
+        setMessage(error instanceof Error ? error.message : "The current surface block is unavailable.");
       });
     return () => controller.abort();
   }, [retry]);
@@ -747,10 +858,29 @@ export function BlockVolumeExplorer() {
     if (!drag || drag.moved) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const point = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-    const hit = [...hitPatchesRef.current]
+    if (result?.representation === "material-interface-graph") {
+      let hitComponent: number | null = null;
+      let bestDistanceSquared = 36;
+      for (const entry of hitInterfaceNodesRef.current) {
+        const distanceSquared =
+          (entry.x - point.x) ** 2 + (entry.y - point.y) ** 2;
+        if (distanceSquared <= bestDistanceSquared) {
+          bestDistanceSquared = distanceSquared;
+          hitComponent = entry.component;
+        }
+      }
+      setSelectedComponent((value) =>
+        hitComponent === value ? null : hitComponent,
+      );
+      if (hitComponent === null) setIsolateSelected(false);
+      return;
+    }
+    const hit = [...hitTrianglesRef.current]
       .reverse()
       .find((entry) => pointInPolygon(point, entry.points));
-    setSelectedComponent((value) => (hit?.patch.component === value ? null : hit?.patch.component ?? null));
+    setSelectedComponent((value) =>
+      hit?.triangle.component === value ? null : hit?.triangle.component ?? null,
+    );
     if (!hit) setIsolateSelected(false);
   };
 
@@ -767,12 +897,16 @@ export function BlockVolumeExplorer() {
           <Link href="/">Local workbench</Link>
         </nav>
         <div>
-          <p className="eyebrow">Acus · owned core reconstruction</p>
-          <h1>Block volume + solved sheets</h1>
+          <p className="eyebrow">
+            {isInterfaceGraph ? "Dense CT faces · macro-tangent graph" : "Acus · current cubical reconstruction"}
+          </p>
+          <h1>{isInterfaceGraph ? "Material interfaces in CT" : "Surface components in CT"}</h1>
         </div>
         <p className="block-volume-summary">
           {result
-            ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.patchCount.toLocaleString()} patches · ${result.stats.componentCount.toLocaleString()} sheets · ${result.stats.retainedJoinCount.toLocaleString()} joins · ${result.stats.maximumNormalJoinAngleDegrees.toFixed(1)}° max axial hinge · ${result.stats.acceptedFoldbackPairs}/${result.stats.foldbackExclusionPairs} foldbacks · ${result.stats.layerConflictsAfter}/${result.stats.layerConflictsBefore} strong layer conflicts`
+            ? isInterfaceGraph
+              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} strong face samples · ${result.stats.componentCount.toLocaleString()} components · ${(result.stats.retainedEdgeCount ?? 0).toLocaleString()} tangent edges · ${(result.stats.columnConflictRejectedEdgeCount ?? 0).toLocaleString()} stratum conflicts rejected`
+              : `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.triangleCount.toLocaleString()} triangles · ${result.stats.componentCount.toLocaleString()} components · ${result.stats.baselineTriangleCount.toLocaleString()} pre-join + ${result.stats.experimentalTriangleCount.toLocaleString()} experimental · ${result.stats.regionCountBefore} → ${result.stats.regionCountAfter} regions`
             : message}
         </p>
       </header>
@@ -803,7 +937,7 @@ export function BlockVolumeExplorer() {
           />
         </label>
         <label className="block-volume-range-control">
-          <span>Sheet opacity</span>
+          <span>{isInterfaceGraph ? "Interface opacity" : "Surface opacity"}</span>
           <strong>{Math.round(sheetOpacity * 100)}%</strong>
           <input
             type="range"
@@ -815,14 +949,14 @@ export function BlockVolumeExplorer() {
           />
         </label>
         <label className="block-volume-select-control">
-          <span>Minimum sheet size</span>
+          <span>Minimum component size</span>
           <select
             value={minimumComponentSize}
             onChange={(event) => setMinimumComponentSize(Number(event.target.value))}
           >
             {COMPONENT_SIZE_OPTIONS.map((value) => (
               <option value={value} key={value}>
-                {value === 1 ? "All components" : `${value}+ cells`}
+                {value === 1 ? "All components" : `${value}+ ${isInterfaceGraph ? "samples" : "triangles"}`}
               </option>
             ))}
           </select>
@@ -860,11 +994,22 @@ export function BlockVolumeExplorer() {
             Volume
           </button>
           <button type="button" aria-pressed={showSheets} onClick={() => setShowSheets((value) => !value)}>
-            Sheets
+            {isInterfaceGraph ? "Interfaces" : "Surfaces"}
           </button>
-          <button type="button" aria-pressed={showEdges} onClick={() => setShowEdges((value) => !value)}>
-            Edges
-          </button>
+          {!isInterfaceGraph ? (
+            <>
+              <button type="button" aria-pressed={showEdges} onClick={() => setShowEdges((value) => !value)}>
+                Edges
+              </button>
+              <button
+                type="button"
+                aria-pressed={showExperimental}
+                onClick={() => setShowExperimental((value) => !value)}
+              >
+                New joins
+              </button>
+            </>
+          ) : null}
           <button type="button" onClick={() => setOrbit(DEFAULT_ORBIT)}>
             Reset view
           </button>
@@ -879,7 +1024,9 @@ export function BlockVolumeExplorer() {
             className="block-sheet-overlay"
             tabIndex={0}
             role="img"
-            aria-label="Orbitable source volume containing every retained sheet patch. Drag to orbit, pinch or scroll to zoom, and click a sheet to inspect its component."
+            aria-label={isInterfaceGraph
+              ? "Orbitable CT volume containing macro-tangent material-interface components. Drag to orbit, pinch or scroll to zoom, and click an interface component to inspect it."
+              : "Orbitable CT volume containing the current cubical surface mesh. Experimental joins are coral. Drag to orbit, pinch or scroll to zoom, and click a surface to inspect its component."}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -893,13 +1040,14 @@ export function BlockVolumeExplorer() {
 
           <div className="block-volume-legend" aria-hidden="true">
             <span><i data-kind="volume" />CT material</span>
-            <span><i data-kind="sheet" />sheet identity</span>
-            <span>drag orbit · pinch zoom · click sheet</span>
+            <span><i data-kind="sheet" />{isInterfaceGraph ? "signed face component" : "pre-join component"}</span>
+            {!isInterfaceGraph ? <span><i data-kind="experimental" />experimental completion</span> : null}
+            <span>drag orbit · pinch zoom · click {isInterfaceGraph ? "interface" : "surface"}</span>
           </div>
 
           <div className="block-volume-count">
             {state === "ready"
-              ? `${visiblePatchCount.toLocaleString()} / ${result?.stats.patchCount.toLocaleString()} patches visible`
+              ? `${visiblePrimitiveCount.toLocaleString()} / ${isInterfaceGraph ? (result?.stats.displayedNodeCount ?? 0).toLocaleString() : result?.stats.triangleCount.toLocaleString()} ${isInterfaceGraph ? "loaded face samples" : "triangles"} visible`
               : message}
           </div>
 
@@ -921,25 +1069,28 @@ export function BlockVolumeExplorer() {
           {selected ? (
             <div className="block-volume-selection">
               <div>
-                <span>Selected sheet</span>
-                <strong>#{selected.rank} · {selected.patchCount} cells</strong>
+                <span>Selected surface component</span>
+                <strong>
+                  #{selected.rank} · stable {selected.stableId} · {isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
+                </strong>
                 <small>
-                  mean confidence {selected.meanConfidence.toFixed(2)} · span {selected.boundsMaximumXYZ
+                  {isInterfaceGraph ? "span" : `${selected.nodeCount.toLocaleString()} mesh nodes · ${Math.round(selected.surfaceAreaVoxelsSquared).toLocaleString()} vox² · span`} {selected.boundsMaximumXYZ
                     .map((value, index) => Math.round(value - selected.boundsMinimumXYZ[index]))
                     .join(" × ")} vox
                 </small>
-                {selected.curvature ? (
+                {selected.experimentalTriangleCount > 0 ? (
                   <small>
-                    local bend p90 {selected.curvature.directBendP90Degrees.toFixed(1)}° ·
-                    normal spread p90 {selected.curvature.normalConeP90DegreesDiagnosticOnly.toFixed(1)}° ·
-                    {selected.curvature.flaggedJoins} abrupt seams
+                    {selected.experimentalTriangleCount.toLocaleString()} coral completion triangles · proposal row{selected.experimentalCompletionRows.length === 1 ? "" : "s"} {selected.experimentalCompletionRows.join(", ")}
                   </small>
                 ) : null}
                 <small>
-                  join normal p90/max {selected.joinAngles.normal.p90Degrees.toFixed(1)}°/{selected.joinAngles.normal.maximumDegrees.toFixed(1)}° ·
-                  strict fiber max {selected.joinAngles.strictFiber.maximumDegrees.toFixed(1)}° ·
-                  quarter-turn residual max {selected.joinAngles.quarterTurnResidual.maximumDegrees.toFixed(1)}°
+                  {isInterfaceGraph ? "raw-to-macro normal residual" : "triangle normal residual"} median/p90/max {selected.normalResidualDegrees.median.toFixed(1)}°/{selected.normalResidualDegrees.p90.toFixed(1)}°/{selected.normalResidualDegrees.maximum.toFixed(1)}°
                 </small>
+                {isInterfaceGraph ? (
+                  <small>
+                    mean face evidence {(selected.meanEvidence ?? 0).toFixed(2)} · macro orientation confidence {(selected.meanMacroConfidence ?? 0).toFixed(2)}
+                  </small>
+                ) : null}
               </div>
               <button
                 type="button"

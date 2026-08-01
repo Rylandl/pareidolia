@@ -28,9 +28,12 @@ from backend.cubical.physical_ribbon_collective import (
 )
 from backend.cubical.physical_ribbon_flattened_audit import (
     PhysicalRibbonFlattenedAuditSettings,
+    _completion_triangle_native_edges,
     _completion_proposals_by_component,
     _completion_triangle_texture_pairs,
+    _native_axial_structure_axis,
     _rank_exact_variant_rows,
+    _transported_axial_disagreement_degrees,
     boundary_texture_compatibility,
     flattened_texture_structure,
 )
@@ -51,13 +54,22 @@ from backend.cubical.physical_ribbon_depth_fields import (
 )
 from backend.cubical.physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
+    _apply_attachment_halfspace_collar,
+    _chart_overlap_count,
+    _corridor_region_merge_audit,
+    _derive_attachment_collar_domain,
     decompose_weak_boundary_cycles,
     _improve_physical_triangulation,
     _mesh_edge_length_audit,
     _other_component_triangle_intersections,
+    _rigid_chart_alignment,
     _surface_field_integrability,
     _texture_compatible_hole_rows,
     _triangle_quadrature_samples,
+    _uniform_harmonic_disk_chart,
+    _weld_surface_node_pairs,
+    triangulate_mixed_boundary_field,
+    triangulate_two_frontier_strip_field,
     triangulate_weak_boundary_field,
 )
 from backend.cubical.physical_ribbon_patch_states import (
@@ -88,6 +100,19 @@ from backend.cubical.physical_ribbon_patch_holes import (
 from backend.cubical.physical_ribbon_surface_holes import (
     PhysicalRibbonSurfaceHoleSettings,
     _selected_interior_loops,
+)
+from backend.cubical.physical_ribbon_surface_corridors import (
+    _arc_node_walk,
+    _cyclic_edge_span,
+    surface_corridor_completion_view,
+)
+from backend.cubical.physical_ribbon_surface_corridor_saturation import (
+    PhysicalRibbonSurfaceCorridorSaturationSettings,
+    _surface_corridor_enumeration_exhausted,
+)
+from backend.cubical.surface_topology import (
+    split_nonmanifold_surface_vertices,
+    triangle_edge_region_labels,
 )
 from backend.cubical.physical_ribbon_patch_corridors import (
     PhysicalRibbonPatchCorridorSettings,
@@ -705,6 +730,52 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
             0.01,
         )
 
+    def test_native_tangent_strip_recovers_unsigned_line_axis(self) -> None:
+        image = np.tile(np.arange(11, dtype=np.float32), (7, 1))
+        axis, statistics = _native_axial_structure_axis(
+            image,
+            minimum_coherence=0.15,
+        )
+        self.assertIsNotNone(axis)
+        assert axis is not None
+        self.assertGreater(float(statistics["coherence"]), 0.99)
+        self.assertGreater(abs(float(axis[1])), 0.99)
+        self.assertLess(abs(float(axis[0])), 0.01)
+
+    def test_native_fiber_axis_is_parallel_transport_invariant(self) -> None:
+        first_axis = np.asarray((1.0, 1.0, 0.0), dtype=np.float64)
+        second_axis = np.asarray((1.0, 0.0, 1.0), dtype=np.float64)
+        disagreement, hinge = _transported_axial_disagreement_degrees(
+            first_axis,
+            second_axis,
+            np.asarray((1.0, 0.0, 0.0), dtype=np.float64),
+            np.asarray((0.0, 0.0, 1.0), dtype=np.float64),
+            np.asarray((0.0, -1.0, 0.0), dtype=np.float64),
+        )
+        self.assertAlmostEqual(hinge, 90.0, places=5)
+        self.assertAlmostEqual(disagreement, 0.0, places=5)
+
+    def test_native_seam_edges_exclude_other_completion_proposals(self) -> None:
+        triangle = np.asarray(
+            (
+                (0, 1, 2),
+                (0, 2, 3),
+                (1, 4, 2),
+                (1, 5, 4),
+                (0, 3, 6),
+            ),
+            dtype=np.int32,
+        )
+        edges = _completion_triangle_native_edges(
+            np.arange(len(triangle), dtype=np.int32),
+            triangle,
+            base_triangle_count=2,
+            target_triangle_indices={2, 3},
+        )
+        self.assertEqual(edges["seam"], [((1, 2), 0, 2)])
+        self.assertEqual(edges["added"], [((1, 4), 2, 3)])
+        self.assertEqual(edges["baseline"], [((0, 2), 0, 1)])
+
     def test_flattened_audit_tracks_boundary_only_completion_triangles(self) -> None:
         pairs = _completion_triangle_texture_pairs(
             np.arange(4, dtype=np.int32),
@@ -788,6 +859,34 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
         self.assertEqual([value["holeRow"] for value in proposals[0]], [8, 12])
         np.testing.assert_array_equal(proposals[0][0]["triangleIndex"], (2,))
         np.testing.assert_array_equal(proposals[0][1]["triangleIndex"], (3,))
+        self.assertEqual(proposals[0][0]["triangleRegionId"], 0)
+        self.assertEqual(proposals[0][1]["triangleRegionId"], 0)
+
+    def test_flattened_audit_assigns_disconnected_regions_to_atlas_pages(
+        self,
+    ) -> None:
+        triangle = np.asarray(
+            ((0, 1, 2), (3, 4, 5), (1, 6, 2), (4, 7, 5)),
+            dtype=np.int32,
+        )
+        proposals = _completion_proposals_by_component(
+            {
+                "proposalAccepted": np.asarray((1, 1), dtype=np.uint8),
+                "proposalHoleRow": np.asarray((4, 9), dtype=np.int32),
+                "completionTriangleOffset": np.asarray(
+                    (0, 1, 2), dtype=np.int64
+                ),
+                "completionTriangleFrontierIndex": triangle[2:],
+            },
+            triangle,
+            np.zeros(8, dtype=np.int32),
+            base_triangle_count=2,
+        )
+        self.assertEqual(len(proposals[0]), 2)
+        self.assertNotEqual(
+            proposals[0][0]["triangleRegionId"],
+            proposals[0][1]["triangleRegionId"],
+        )
 
     def test_texture_compatibility_scales_with_same_surface_control(self) -> None:
         compatible = boundary_texture_compatibility(
@@ -1375,6 +1474,88 @@ class PhysicalRibbonDepthFieldTests(unittest.TestCase):
         self.assertLess(float(correlation[0, 1]), -0.9)
 
 
+class SurfaceTopologyTests(unittest.TestCase):
+    def test_triangle_atlas_pages_join_only_through_edges(self) -> None:
+        labels = triangle_edge_region_labels(
+            np.asarray(
+                ((0, 1, 2), (0, 3, 4), (1, 5, 2)), dtype=np.int32
+            )
+        )
+        self.assertEqual(int(labels[0]), int(labels[2]))
+        self.assertNotEqual(int(labels[0]), int(labels[1]))
+
+    def test_vertex_only_triangle_fans_receive_distinct_surface_nodes(self) -> None:
+        node_count = 5
+        surface = {
+            "selected": np.ones(node_count, dtype=np.uint8),
+            "component": np.zeros(node_count, dtype=np.int32),
+            "componentSize": np.full(node_count, node_count, dtype=np.int32),
+            "signedNormalXYZ": np.asarray(
+                ((0.0, 0.0, 1.0),) * node_count, dtype=np.float32
+            ),
+            "tangentUxyz": np.asarray(
+                ((1.0, 0.0, 0.0),) * node_count, dtype=np.float32
+            ),
+            "tangentVxyz": np.asarray(
+                ((0.0, 1.0, 0.0),) * node_count, dtype=np.float32
+            ),
+            "chartUV": np.asarray(
+                (
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    (0.0, 1.0),
+                    (-1.0, 0.0),
+                    (0.0, -1.0),
+                ),
+                dtype=np.float32,
+            ),
+            "integrationResidualVoxels": np.empty(0, dtype=np.float32),
+            "midpointXYZ": np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (-1.0, 0.0, 0.0),
+                    (0.0, -1.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "thicknessVoxels": np.ones(node_count, dtype=np.float32),
+            "edgeFirstFrontierIndex": np.empty(0, dtype=np.int32),
+            "edgeSecondFrontierIndex": np.empty(0, dtype=np.int32),
+            "edgeSelected": np.empty(0, dtype=np.uint8),
+            "triangleFrontierIndex": np.asarray(
+                ((0, 1, 2), (0, 3, 4)), dtype=np.int32
+            ),
+            "triangleAreaVoxelsSquared": np.ones(2, dtype=np.float32),
+            "triangleNormalResidualDegrees": np.zeros(2, dtype=np.float32),
+        }
+        normalized, statistics = split_nonmanifold_surface_vertices(surface)
+        triangle = normalized["triangleFrontierIndex"]
+        self.assertEqual(statistics["splitVertexCount"], 1)
+        self.assertEqual(statistics["duplicatedVertexCount"], 1)
+        self.assertEqual(len(normalized["midpointXYZ"]), node_count + 1)
+        self.assertNotEqual(int(triangle[0, 0]), int(triangle[1, 0]))
+        np.testing.assert_allclose(
+            normalized["midpointXYZ"][triangle[0, 0]],
+            normalized["midpointXYZ"][triangle[1, 0]],
+        )
+        self.assertEqual(
+            int(normalized["surfaceNodeWeldGroup"][triangle[0, 0]]),
+            int(normalized["surfaceNodeWeldGroup"][triangle[1, 0]]),
+        )
+        self.assertEqual(len(normalized["edgeFirstFrontierIndex"]), 6)
+        self.assertEqual(
+            len(normalized["integrationResidualVoxels"]),
+            len(normalized["edgeFirstFrontierIndex"]),
+        )
+        _loops, loop_statistics = extract_surface_boundary_loops(
+            normalized, settings=PhysicalRibbonPatchHoleSettings()
+        )
+        self.assertEqual(loop_statistics["pinchedBoundaryComponentCount"], 0)
+        self.assertEqual(loop_statistics["splitBoundaryFanCount"], 0)
+
+
 class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
     def test_adaptive_mesh_hypotheses_must_be_densest_first(self) -> None:
         settings = PhysicalRibbonDenseCompletionSettings()
@@ -1393,6 +1574,10 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PhysicalRibbonDenseCompletionSettings(
                 interior_boundary_separation_hypotheses_voxels=(0.2, 0.2)
+            )
+        with self.assertRaises(ValueError):
+            PhysicalRibbonDenseCompletionSettings(
+                minimum_dense_triangle_shape_ratio=0.0
             )
 
     def test_triangle_quadrature_covers_area_at_declared_spacing(self) -> None:
@@ -1474,10 +1659,398 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
             np.asarray(((3, 4, 5),), dtype=np.int32),
             7,
             tolerance=0.01,
+            attachment_edges={(0, 1)},
         )
         self.assertEqual(result["otherComponentTriangleCount"], 0)
         self.assertEqual(result["sameComponentTriangleCount"], 1)
         self.assertEqual(result["intersectingTrianglePairCount"], 1)
+        self.assertEqual(
+            result["intersectingSameComponentTrianglePairCount"], 1
+        )
+        self.assertEqual(
+            result["intersectingOtherComponentTrianglePairCount"], 0
+        )
+        self.assertEqual(result["intersectingBaselineTriangleIndices"], [0])
+        self.assertEqual(result["intersectingPatchTriangleIndices"], [0])
+        self.assertEqual(
+            result["intersectingBaselineTriangleRegionIds"], [0]
+        )
+        self.assertEqual(result["intersectingBaselineComponentIds"], [7])
+        self.assertEqual(result["storedIntersectionCount"], 1)
+        pair = result["storedIntersectionPairs"][0]
+        self.assertEqual(pair["baselineTriangleIndex"], 0)
+        self.assertEqual(pair["patchTriangleIndex"], 0)
+        self.assertEqual(pair["baselineTriangleRegionId"], 0)
+        self.assertTrue(pair["sameComponent"])
+        self.assertAlmostEqual(pair["axialNormalDisagreementDegrees"], 90.0)
+        self.assertAlmostEqual(
+            pair["minimumAttachmentEdgeDistanceVoxels"], 0.5
+        )
+
+    def test_attachment_collar_domain_is_derived_from_exhaustive_seam_pairs(
+        self,
+    ) -> None:
+        coordinate = np.column_stack(
+            (np.arange(7, dtype=np.int32), np.zeros(7, dtype=np.int32))
+        )
+        variant = {
+            "rejectionReasons": [
+                "completion intersects an existing selected surface"
+            ],
+            "mesh": {
+                "pointKind": np.ones(3, dtype=np.uint8),
+                "pointSourceIndex": np.asarray((1, 2, 1), dtype=np.int32),
+                "trianglePointIndex": np.asarray(((0, 1, 2),), dtype=np.int32),
+            },
+            "geometry": {
+                "intersectingTrianglePairCount": 1,
+                "storedIntersectionCount": 1,
+                "intersectingOtherComponentTrianglePairCount": 0,
+                "intrinsicChartOverlapCount": 0,
+                "attachedBaselineTriangleRegionIds": [7, 9],
+                "intersectingBaselineTriangleRegionIds": [7],
+                "storedIntersectionPairs": [
+                    {
+                        "patchTriangleIndex": 0,
+                        "sameComponent": True,
+                        "minimumAttachmentEdgeDistanceVoxels": 0.1,
+                    }
+                ],
+            },
+        }
+        domain = _derive_attachment_collar_domain(
+            variant,
+            coordinate,
+            raster_step_voxels=0.5,
+            transition_voxels=1.0,
+            intersection_tolerance_voxels=0.05,
+        )
+        self.assertIsNotNone(domain)
+        assert domain is not None
+        self.assertEqual(domain["leftCollisionDepthColumns"], 2)
+        self.assertEqual(domain["leftColumnCount"], 4)
+        self.assertEqual(domain["rightColumnCount"], 0)
+        variant["geometry"]["intersectingBaselineTriangleRegionIds"] = [10]
+        self.assertIsNone(
+            _derive_attachment_collar_domain(
+                variant,
+                coordinate,
+                raster_step_voxels=0.5,
+                transition_voxels=1.0,
+                intersection_tolerance_voxels=0.05,
+            )
+        )
+
+    def test_attachment_collar_minimally_enforces_outward_halfspace(
+        self,
+    ) -> None:
+        row, column = np.indices((3, 7), dtype=np.int32)
+        coordinate = np.column_stack((column.ravel(), row.ravel()))
+        parameter = coordinate.astype(np.float32) * 0.5
+        field_xyz = np.column_stack(
+            (parameter[:, 0], parameter[:, 1], np.zeros(len(parameter)))
+        ).astype(np.float32)
+        surface = {
+            "midpointXYZ": np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (1.0, 0.5, 0.0),
+                    (3.0, 0.0, 0.0),
+                    (3.0, 1.0, 0.0),
+                    (2.0, 0.5, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "triangleFrontierIndex": np.asarray(
+                ((0, 1, 2), (3, 5, 4)), dtype=np.int32
+            ),
+        }
+        adjusted, statistics = _apply_attachment_halfspace_collar(
+            surface,
+            np.asarray((0, 1, 4, 3), dtype=np.int32),
+            np.asarray(
+                ((0.0, 0.0), (0.0, 1.0), (3.0, 1.0), (3.0, 0.0)),
+                dtype=np.float32,
+            ),
+            parameter,
+            coordinate,
+            field_xyz,
+            {"leftColumnCount": 2, "rightColumnCount": 0},
+            first_arc_edge_count=1,
+            second_arc_edge_count=1,
+            minimum_outward_tangent_ratio=0.5,
+        )
+        lookup = {
+            tuple(int(value) for value in point): index
+            for index, point in enumerate(coordinate)
+        }
+        for v in range(3):
+            self.assertAlmostEqual(float(adjusted[lookup[(1, v)], 0]), -0.25)
+            self.assertAlmostEqual(float(adjusted[lookup[(2, v)], 0]), -0.50)
+            self.assertAlmostEqual(float(adjusted[lookup[(3, v)], 0]), 1.50)
+        self.assertEqual(statistics["adjustedFieldPointCount"], 6)
+        self.assertEqual(statistics["rightAdjustedFieldPointCount"], 0)
+
+    def test_collision_audit_treats_split_weld_vertex_as_incident(self) -> None:
+        xyz = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (2.0, 0.0, 0.0),
+                (0.0, 2.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.5, 0.5, -1.0),
+                (0.5, 0.5, 1.0),
+            ),
+            dtype=np.float32,
+        )
+        baseline = {
+            "triangleFrontierIndex": np.asarray(((0, 1, 2),), dtype=np.int32),
+            "component": np.asarray((7, 7, 7), dtype=np.int32),
+            "midpointXYZ": xyz[:3],
+            "surfaceNodeWeldGroup": np.asarray((0, 1, 2), dtype=np.int64),
+        }
+        result = _other_component_triangle_intersections(
+            baseline,
+            {
+                "midpointXYZ": xyz,
+                "surfaceNodeWeldGroup": np.asarray(
+                    (0, 1, 2, 0, 4, 5), dtype=np.int64
+                ),
+            },
+            np.asarray(((3, 4, 5),), dtype=np.int32),
+            7,
+            tolerance=0.01,
+        )
+        self.assertEqual(result["intersectingTrianglePairCount"], 0)
+        self.assertEqual(result["intersectingBaselineTriangleIndices"], [])
+
+    def test_rigid_chart_alignment_preserves_scale_and_handedness(self) -> None:
+        source = np.asarray(
+            ((0.0, 0.0), (2.0, 0.0), (0.5, 1.0)), dtype=np.float32
+        )
+        rotation = np.asarray(((0.0, -1.0), (1.0, 0.0)))
+        target = source @ rotation + np.asarray((4.0, -3.0))
+        transform, translation, rms = _rigid_chart_alignment(
+            source, target, reflected=False
+        )
+        np.testing.assert_allclose(source @ transform + translation, target)
+        self.assertAlmostEqual(rms, 0.0)
+        self.assertGreater(float(np.linalg.det(transform)), 0.0)
+        np.testing.assert_allclose(
+            np.linalg.norm(source[1] - source[0]),
+            np.linalg.norm(
+                (source[1] @ transform) - (source[0] @ transform)
+            ),
+        )
+
+    def test_structured_two_frontier_mesh_preserves_arcs_and_mouths(self) -> None:
+        boundary = np.arange(6, dtype=np.int32)
+        boundary_uv = np.asarray(
+            (
+                (0.0, 0.0),
+                (0.0, 1.0),
+                (0.0, 2.0),
+                (4.0, 2.0),
+                (4.0, 1.0),
+                (4.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        row, column = np.indices((3, 5), dtype=np.int32)
+        coordinate = np.column_stack((column.ravel(), row.ravel()))
+        field_uv = coordinate.astype(np.float32)
+        mesh, statistics = triangulate_two_frontier_strip_field(
+            boundary,
+            boundary_uv,
+            field_uv,
+            coordinate,
+            first_arc_edge_count=2,
+            second_arc_edge_count=2,
+        )
+        self.assertTrue(statistics["structuredTwoFrontierStrip"])
+        self.assertTrue(statistics["exactBoundaryPreserved"])
+        self.assertEqual(statistics["retainedFieldPixelCount"], 9)
+        self.assertEqual(statistics["triangleCount"], 16)
+        self.assertEqual(statistics["newFrontierEdgeCount"], 8)
+        incidence = Counter()
+        for triangle in mesh["trianglePointIndex"]:
+            incidence.update(
+                tuple(
+                    sorted(
+                        (
+                            int(triangle[index]),
+                            int(triangle[(index + 1) % 3]),
+                        )
+                    )
+                )
+                for index in range(3)
+            )
+        self.assertEqual(sum(value == 1 for value in incidence.values()), 12)
+        self.assertFalse(any(value > 2 for value in incidence.values()))
+
+    def test_mixed_boundary_mesh_keeps_one_complete_sampled_mouth(self) -> None:
+        field = np.asarray(
+            (
+                (1.0, 0.0),
+                (2.0, 0.0),
+                (1.0, 1.0),
+                (2.0, 1.0),
+            ),
+            dtype=np.float32,
+        )
+        mesh, statistics = triangulate_mixed_boundary_field(
+            np.asarray((0, 1, 1, 0, 0, 0), dtype=np.uint8),
+            np.asarray((10, 0, 1, 11, 12, 13), dtype=np.int32),
+            np.asarray(
+                (
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    (2.0, 0.0),
+                    (3.0, 0.0),
+                    (3.0, 2.0),
+                    (0.0, 2.0),
+                ),
+                dtype=np.float32,
+            ),
+            field,
+            new_frontier_boundary_edge=np.asarray(
+                ((0, 1), (1, 2), (2, 3)), dtype=np.int32
+            ),
+            minimum_boundary_separation=0.1,
+            maximum_edge_flip_iterations=1024,
+        )
+        self.assertTrue(statistics["exactBoundaryPreserved"])
+        self.assertTrue(statistics["mixedInheritedSyntheticBoundary"])
+        self.assertEqual(statistics["syntheticMouthVertexCount"], 2)
+        self.assertEqual(statistics["retainedInteriorFieldPixelCount"], 2)
+        self.assertEqual(statistics["retainedFieldPixelCount"], 4)
+        np.testing.assert_array_equal(
+            mesh["newFrontierLocalEdge"],
+            np.asarray(((0, 1), (1, 2), (2, 3)), dtype=np.int32),
+        )
+        incidence = Counter(
+            edge
+            for triangle in mesh["trianglePointIndex"]
+            for edge in (
+                tuple(sorted((int(triangle[0]), int(triangle[1])))),
+                tuple(sorted((int(triangle[1]), int(triangle[2])))),
+                tuple(sorted((int(triangle[2]), int(triangle[0])))),
+            )
+        )
+        self.assertEqual(sum(value == 1 for value in incidence.values()), 6)
+        self.assertFalse(any(value > 2 for value in incidence.values()))
+
+    def test_exact_clone_weld_changes_topology_without_moving_geometry(self) -> None:
+        xyz = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (2.0, 0.0, 0.0),
+                (2.0, 1.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        surface = {
+            "midpointXYZ": xyz,
+            "triangleFrontierIndex": np.asarray(
+                ((0, 1, 2), (3, 4, 5)), dtype=np.int32
+            ),
+            "surfaceNodeWeldGroup": np.asarray(
+                (0, 1, 2, 1, 4, 5), dtype=np.int64
+            ),
+            "selected": np.ones(6, dtype=np.uint8),
+            "component": np.full(6, 7, dtype=np.int32),
+            "componentSize": np.full(6, 6, dtype=np.int32),
+        }
+        welded, statistics = _weld_surface_node_pairs(surface, ((3, 1),))
+        np.testing.assert_array_equal(welded["midpointXYZ"], xyz)
+        np.testing.assert_array_equal(
+            welded["triangleFrontierIndex"],
+            np.asarray(((0, 1, 2), (1, 4, 5)), dtype=np.int32),
+        )
+        self.assertEqual(int(welded["selected"][3]), 0)
+        self.assertEqual(int(welded["component"][3]), -1)
+        self.assertFalse(statistics["geometryMoved"])
+        self.assertEqual(statistics["orphanedNodes"], [3])
+        exact_edges = set(
+            zip(
+                welded["edgeFirstFrontierIndex"].tolist(),
+                welded["edgeSecondFrontierIndex"].tolist(),
+            )
+        )
+        self.assertEqual(
+            exact_edges,
+            {(0, 1), (0, 2), (1, 2), (1, 4), (1, 5), (4, 5)},
+        )
+
+    def test_uniform_harmonic_disk_chart_is_injective(self) -> None:
+        xyz = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 1.0),
+                (0.0, 1.0, 1.0),
+                (0.5, 0.5, 0.25),
+            ),
+            dtype=np.float32,
+        )
+        triangle = np.asarray(
+            ((0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)),
+            dtype=np.int32,
+        )
+        chart, statistics = _uniform_harmonic_disk_chart(xyz, triangle)
+        self.assertTrue(np.all(np.isfinite(chart)))
+        self.assertEqual(statistics["eulerCharacteristic"], 1)
+        self.assertEqual(statistics["boundaryVertexCount"], 4)
+        self.assertEqual(_chart_overlap_count(triangle, triangle, chart), 0)
+
+    def test_corridor_merge_requires_two_distinct_baseline_regions(self) -> None:
+        patch_triangle = np.asarray(
+            ((0, 1, 4), (1, 2, 4), (2, 3, 4)), dtype=np.int32
+        )
+        attachment = {(0, 1), (2, 3)}
+        exact = _corridor_region_merge_audit(
+            patch_triangle,
+            attachment,
+            {(0, 1): 7, (2, 3): 9},
+        )
+        self.assertTrue(exact["mergesExactlyTwoTriangleRegions"])
+        self.assertEqual(exact["triangleRegionReduction"], 1)
+        self.assertEqual(exact["attachedBaselineTriangleRegionIds"], [7, 9])
+        same = _corridor_region_merge_audit(
+            patch_triangle,
+            attachment,
+            {(0, 1): 7, (2, 3): 7},
+        )
+        self.assertFalse(same["mergesExactlyTwoTriangleRegions"])
+        self.assertEqual(same["triangleRegionReduction"], 0)
+
+    def test_corridor_merge_can_join_three_declared_regions(self) -> None:
+        patch_triangle = np.asarray(
+            (
+                (0, 1, 6),
+                (1, 2, 6),
+                (2, 3, 6),
+                (3, 4, 6),
+                (4, 5, 6),
+            ),
+            dtype=np.int32,
+        )
+        result = _corridor_region_merge_audit(
+            patch_triangle,
+            {(0, 1), (2, 3), (4, 5)},
+            {(0, 1): 7, (2, 3): 9, (4, 5): 11},
+            required_region_reduction=2,
+        )
+        self.assertTrue(result["mergesRequiredTriangleRegions"])
+        self.assertFalse(result["mergesExactlyTwoTriangleRegions"])
+        self.assertEqual(result["triangleRegionReduction"], 2)
+        self.assertEqual(
+            result["attachedBaselineTriangleRegionIds"], [7, 9, 11]
+        )
 
     def test_open_mouth_is_separate_from_supported_edge_limit(self) -> None:
         result = _mesh_edge_length_audit(
@@ -1516,6 +2089,28 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
         audit["audit"]["boundaryTextureIncompatibleCompletionHoleRows"] = ()
         with self.assertRaises(ValueError):
             _texture_compatible_hole_rows(completion, audit)
+
+    def test_texture_gate_prefers_chart_invariant_native_seam_verdict(self) -> None:
+        completion = {
+            "completions": (
+                {"holeRow": 2, "accepted": True},
+                {"holeRow": 5, "accepted": True},
+            )
+        }
+        audit = {
+            "audit": {
+                "flattenedCompletionProposalCount": 2,
+                "boundaryTextureCompatibleCompletionHoleRows": (2, 5),
+                "boundaryTextureIncompatibleCompletionHoleRows": (),
+                "boundaryTextureUnmeasuredCompletionHoleRows": (),
+                "nativeSeamFiberCompatibleCompletionHoleRows": (2,),
+                "nativeSeamFiberIncompatibleCompletionHoleRows": (5,),
+                "nativeSeamFiberUnmeasuredCompletionHoleRows": (),
+            }
+        }
+        self.assertEqual(
+            _texture_compatible_hole_rows(completion, audit), frozenset((2,))
+        )
 
     def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(
         self,
@@ -1801,6 +2396,152 @@ class PhysicalRibbonOpenBayTests(unittest.TestCase):
             rejection_count=Counter(),
         )
         self.assertEqual(candidates, [])
+
+
+class PhysicalRibbonSurfaceCorridorTests(unittest.TestCase):
+    def test_saturation_requires_exhaustive_downstream_caps(self) -> None:
+        settings = (
+            PhysicalRibbonSurfaceCorridorSaturationSettings.from_record({})
+        )
+        self.assertEqual(
+            settings.surface_corridors.corridors.maximum_scored_corridors,
+            256,
+        )
+        self.assertEqual(
+            settings.dense_completion.maximum_completed_holes, 256
+        )
+        self.assertEqual(settings.flattened_audit.maximum_components, 256)
+        with self.assertRaises(ValueError):
+            PhysicalRibbonSurfaceCorridorSaturationSettings(
+                dense_completion=PhysicalRibbonDenseCompletionSettings(
+                    maximum_completed_holes=128
+                ),
+                flattened_audit=PhysicalRibbonFlattenedAuditSettings(
+                    maximum_components=256
+                ),
+            )
+
+    def test_saturation_distinguishes_exhaustion_from_a_scoring_cap(self) -> None:
+        exhausted = {
+            "corridors": {"multiAnchorCorridorCount": 149},
+            "evidence": {"scoredCorridorCount": 149},
+        }
+        capped = {
+            "corridors": {"multiAnchorCorridorCount": 400},
+            "evidence": {"scoredCorridorCount": 256},
+        }
+        self.assertTrue(_surface_corridor_enumeration_exhausted(exhausted))
+        self.assertFalse(_surface_corridor_enumeration_exhausted(capped))
+
+    def test_exact_arc_walk_handles_forward_reverse_and_wrap(self) -> None:
+        self.assertEqual(
+            _cyclic_edge_span(4, 1, 6, direction=1), [4, 5, 0, 1]
+        )
+        self.assertEqual(
+            _cyclic_edge_span(1, 4, 6, direction=-1), [1, 0, 5, 4]
+        )
+        forward, forward_edges = _arc_node_walk(
+            np.arange(6, dtype=np.int32),
+            np.asarray((4, 0, 1), dtype=np.int32),
+            direction=1,
+        )
+        reverse, reverse_edges = _arc_node_walk(
+            np.arange(6, dtype=np.int32),
+            np.asarray((1, 5, 4), dtype=np.int32),
+            direction=-1,
+        )
+        np.testing.assert_array_equal(forward, (4, 5, 0, 1, 2))
+        np.testing.assert_array_equal(reverse, (2, 1, 0, 5, 4))
+        self.assertEqual(forward_edges, 4)
+        self.assertEqual(reverse_edges, 4)
+
+    def test_completion_view_builds_explicit_rectangular_parameters(self) -> None:
+        arrays = {
+            "corridorCompletionScoredRow": np.asarray((0,), dtype=np.int32),
+            "corridorCompletionCorridorIndex": np.asarray((0,), dtype=np.int32),
+            "corridorPatchOffset": np.asarray((0, 6), dtype=np.int64),
+            "corridorPatchXYZ": np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (0.5, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (0.0, 0.5, 0.0),
+                    (0.5, 0.5, 0.0),
+                    (1.0, 0.5, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "corridorPatchNormalXYZ": np.asarray(
+                ((0.0, 0.0, 1.0),) * 6, dtype=np.float32
+            ),
+            "corridorPatchUV": np.asarray(
+                (
+                    (0.0, 0.0),
+                    (0.5, 0.0),
+                    (1.0, 0.0),
+                    (0.0, 0.5),
+                    (0.5, 0.5),
+                    (1.0, 0.5),
+                ),
+                dtype=np.float32,
+            ),
+            "corridorPatchThicknessVoxels": np.full(6, 10.0, dtype=np.float32),
+            "corridorCompletionBoundaryOffset": np.asarray((0, 6), dtype=np.int64),
+            "corridorCompletionBoundaryVertexFrontierIndex": np.arange(
+                6, dtype=np.int32
+            ),
+            "midpointXYZ": np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.25, 0.0),
+                    (0.0, 0.5, 0.0),
+                    (1.0, 0.5, 0.0),
+                    (1.0, 0.25, 0.0),
+                    (1.0, 0.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "chartUV": np.asarray(
+                (
+                    (0.0, 0.0),
+                    (0.0, 0.25),
+                    (0.0, 0.5),
+                    (1.0, 0.5),
+                    (1.0, 0.25),
+                    (1.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            "corridorCompletionFirstArcEdgeCount": np.asarray((2,), dtype=np.int32),
+            "corridorCompletionSecondArcEdgeCount": np.asarray((2,), dtype=np.int32),
+            "corridorPatchRows": np.asarray((2,), dtype=np.int32),
+            "corridorPatchColumns": np.asarray((3,), dtype=np.int32),
+            "corridorRasterStepVoxels": np.asarray((0.5,), dtype=np.float32),
+            "corridorSelectedModel": np.asarray((0,), dtype=np.int32),
+            "corridorModelRankScore": np.asarray(((2.0,),), dtype=np.float32),
+            "corridorTopologyComponent": np.asarray((4,), dtype=np.int32),
+            "corridorContextMedianProfile": np.ones((1, 7), dtype=np.float32),
+            "corridorContextPhysicalScore": np.asarray((0.8,), dtype=np.float32),
+            "corridorLocalIntensityScale": np.asarray((12.0,), dtype=np.float32),
+            "corridorCompletionMouthFrontierIndex": np.asarray(
+                (((2, 3), (5, 0)),), dtype=np.int32
+            ),
+            "corridorCompletionAttachmentEdgeCount": np.asarray((4,), dtype=np.int32),
+        }
+        view = surface_corridor_completion_view(arrays)
+        np.testing.assert_array_equal(
+            view["patchRasterCoordinateUV"],
+            np.asarray(
+                ((0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)),
+                dtype=np.int32,
+            ),
+        )
+        parameter = view["denseCorridorBoundaryParameterUV"]
+        np.testing.assert_allclose(parameter[:3, 0], 0.0)
+        np.testing.assert_allclose(parameter[3:, 0], 1.0)
+        np.testing.assert_allclose(parameter[:3, 1], (0.0, 0.25, 0.5))
+        np.testing.assert_allclose(parameter[3:, 1], (0.5, 0.25, 0.0))
+        self.assertEqual(int(view["denseCorridorMode"][0]), 1)
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):

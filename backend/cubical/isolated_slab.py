@@ -58,6 +58,42 @@ class IsolatedSlabSettings:
     profile_batch_size: int = 65_536
     maximum_preview_components: int = 96
 
+    @classmethod
+    def at_physical_scale(
+        cls,
+        voxel_size_microns: float,
+        **overrides: Any,
+    ) -> "IsolatedSlabSettings":
+        """Resolve sampling controls from papyrus-scale physical units.
+
+        The original 2-voxel sampling and smoothing defaults were calibrated
+        on 9.362 µm CT.  Applying those voxel counts unchanged to a different
+        scan silently changes the detector's physical scale.  One quarter of
+        the minimum plausible sheet thickness preserves roughly four samples
+        across the thinnest admitted ribbon without encoding a scan-specific
+        voxel size.
+        """
+
+        voxel_size = float(voxel_size_microns)
+        if not math.isfinite(voxel_size) or voxel_size <= 0.0:
+            raise ValueError("voxel size must be finite and positive")
+        minimum_thickness = float(
+            overrides.get(
+                "minimum_sheet_thickness_microns",
+                cls().minimum_sheet_thickness_microns,
+            )
+        )
+        sampling_microns = minimum_thickness / 4.0
+        overrides.setdefault(
+            "sampling_stride_voxels",
+            max(1, int(round(sampling_microns / voxel_size))),
+        )
+        overrides.setdefault(
+            "smoothing_sigma_voxels",
+            max(0.75, sampling_microns / voxel_size),
+        )
+        return cls(**overrides)
+
     def __post_init__(self) -> None:
         if self.sampling_stride_voxels < 1:
             raise ValueError("sampling stride must be positive")
@@ -1063,8 +1099,10 @@ def run_isolated_slab_detection(
     settings: IsolatedSlabSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    settings = settings or IsolatedSlabSettings()
     source = VolumeSource.open(source_path, metadata_path)
+    settings = settings or IsolatedSlabSettings.at_physical_scale(
+        source.voxel_size_microns
+    )
     source_origin = np.asarray(source.origin_xyz, dtype=np.int64)
     owned = VoxelBounds(
         tuple((np.asarray(world_start_xyz, dtype=np.int64) - source_origin).tolist()),

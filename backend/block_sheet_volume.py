@@ -12,8 +12,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
-    / "work/multiseam-2x2-b00c03c/sheet-halo-core-12x12x10-v1/halo-1"
-    / "owned-bp32-c10-u010-opposed-sides-curvature-v12"
+    / "work/multiseam-2x2-b00c03c"
+    / "material-surface-graph-v1"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -38,8 +38,7 @@ def _round_list(values: np.ndarray, digits: int = 4) -> list[float]:
     return [round(float(value), digits) for value in values]
 
 
-@lru_cache(maxsize=4)
-def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
+def _load_legacy_block_sheet_payload(root_value: str) -> dict[str, Any]:
     root = Path(root_value)
     patch_manifest_path = root / "selected-patches-v1.json"
     patch_data_path = root / "selected-patches-v1.npz"
@@ -350,6 +349,451 @@ def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     }
 
 
+def _dense_completion_paths(root: Path) -> tuple[Path, Path]:
+    stem = "physical-ribbon-dense-completion-v1"
+    return root / f"{stem}.json", root / f"{stem}.npz"
+
+
+def _material_surface_graph_paths(root: Path) -> tuple[Path, Path]:
+    stem = "material-interface-surface-graph-v1"
+    return root / f"{stem}.json", root / f"{stem}.npz"
+
+
+def _percentile(values: np.ndarray, percentile: float) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.percentile(finite, percentile)) if len(finite) else 0.0
+
+
+def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
+    manifest_path, data_path = _material_surface_graph_paths(root)
+    if not manifest_path.is_file() or not data_path.is_file():
+        raise FileNotFoundError(f"material surface graph is unavailable at {root}")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != "pareidolia.material-interface-surface-graph":
+        raise ValueError(f"unsupported material surface graph in {manifest_path}")
+    if manifest.get("state") != "complete":
+        raise ValueError(f"material surface graph is incomplete: {manifest_path}")
+    with np.load(data_path, allow_pickle=False) as stored:
+        position_world = _required(stored, "positionXYZ").astype(
+            np.float64, copy=False
+        )
+        component = _required(stored, "componentId").astype(
+            np.int64, copy=False
+        )
+        evidence = _required(stored, "localEvidenceScore").astype(
+            np.float64, copy=False
+        )
+        macro_confidence = _required(
+            stored, "macroOrientationConfidence"
+        ).astype(np.float64, copy=False)
+        raw_macro_error = _required(stored, "rawToMacroNormalDegrees").astype(
+            np.float64, copy=False
+        )
+        pre_component = _required(stored, "preCollisionComponentId").astype(
+            np.int64, copy=False
+        )
+        edge_first = _required(stored, "edgeFirstNode").astype(
+            np.int64, copy=False
+        )
+    if position_world.ndim != 2 or position_world.shape[1] != 3:
+        raise ValueError("material surface positions must have shape (node, 3)")
+    if any(
+        len(values) != len(position_world)
+        for values in (
+            component,
+            evidence,
+            macro_confidence,
+            raw_macro_error,
+            pre_component,
+        )
+    ):
+        raise ValueError("material surface node arrays have inconsistent lengths")
+    geometry = manifest.get("geometry", {})
+    owned_bounds = geometry.get("ownedWorldBounds", {})
+    origin = np.asarray(owned_bounds.get("startXYZ", ()), dtype=np.float64)
+    stop = np.asarray(
+        owned_bounds.get("stopXYZExclusive", ()), dtype=np.float64
+    )
+    if origin.shape != (3,) or stop.shape != (3,) or np.any(stop <= origin):
+        raise ValueError("material surface graph has invalid owned world bounds")
+    extent = stop - origin
+    position_local = position_world - origin[None, :]
+    if len(position_local) and (
+        not np.all(np.isfinite(position_local))
+        or np.any(position_local < -1.0e-3)
+        or np.any(position_local > extent + 1.0e-3)
+    ):
+        raise ValueError("material surface nodes lie outside the owned volume")
+
+    component_count = int(np.max(component)) + 1 if len(component) else 0
+    component_size = np.bincount(component, minlength=component_count)
+    split_pre_component = {
+        int(value)
+        for value in np.unique(pre_component)
+        if len(np.unique(component[pre_component == value])) > 1
+    }
+    maximum_display_components = 256
+    displayed_component_count = min(component_count, maximum_display_components)
+    displayed_node = component < displayed_component_count
+    displayed_index = np.flatnonzero(displayed_node)
+    components: list[dict[str, Any]] = []
+    for component_id in range(displayed_component_count):
+        member = component == component_id
+        point = position_local[member]
+        prior = np.unique(pre_component[member])
+        components.append(
+            {
+                "rank": component_id + 1,
+                "stableId": str(component_id),
+                "triangleCount": 0,
+                "nodeCount": int(np.count_nonzero(member)),
+                "surfaceAreaVoxelsSquared": 0.0,
+                "boundsMinimumXYZ": _round_list(np.min(point, axis=0)),
+                "boundsMaximumXYZ": _round_list(np.max(point, axis=0)),
+                "normalResidualDegrees": {
+                    "median": round(_percentile(raw_macro_error[member], 50), 4),
+                    "p90": round(_percentile(raw_macro_error[member], 90), 4),
+                    "maximum": round(
+                        _percentile(raw_macro_error[member], 100), 4
+                    ),
+                },
+                "experimentalTriangleCount": 0,
+                "experimentalCompletionRows": [],
+                "meanEvidence": round(float(np.mean(evidence[member])), 6),
+                "meanMacroConfidence": round(
+                    float(np.mean(macro_confidence[member])), 6
+                ),
+                "splitByStratumGuard": bool(
+                    len(prior) == 1 and int(prior[0]) in split_pre_component
+                ),
+            }
+        )
+    interface_nodes = [
+        [
+            round(float(position_local[index, 0]), 3),
+            round(float(position_local[index, 1]), 3),
+            round(float(position_local[index, 2]), 3),
+            int(component[index]) + 1,
+        ]
+        for index in displayed_index
+    ]
+    counts = manifest.get("counts", {})
+    source = manifest.get("source", {})
+    try:
+        manifest_label = str(manifest_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        manifest_label = str(manifest_path)
+    return {
+        "schema": "pareidolia.block-interface-volume",
+        "version": 1,
+        "representation": "material-interface-graph",
+        "variant": root.name,
+        "artifact": {
+            "manifestPath": manifest_label,
+            "state": str(manifest.get("state", "unknown")),
+            "method": "macro-tangent signed material-interface graph",
+        },
+        "source": {
+            "path": str(source.get("path", "")),
+            "metadataPath": str(source.get("metadataPath", "")),
+            "name": Path(str(source.get("path", "source volume"))).name,
+            "voxelSizeMicrons": float(source.get("voxelSizeMicrons", 0.0)),
+        },
+        "grid": {
+            "shapeCellsXYZ": [int(round(value)) for value in extent],
+            "cellSizeXYZ": [1.0, 1.0, 1.0],
+            "originXYZ": _round_list(origin),
+            "extentXYZ": _round_list(extent),
+            "coordinateUnit": str(geometry.get("coordinateUnit", "source-voxel")),
+        },
+        "stats": {
+            "triangleCount": 0,
+            "nodeCount": int(len(position_world)),
+            "displayedNodeCount": int(len(displayed_index)),
+            "componentCount": component_count,
+            "displayedComponentCount": displayed_component_count,
+            "largestComponentTriangleCount": 0,
+            "largestComponentNodeCount": int(component_size[0]) if len(component_size) else 0,
+            "baselineTriangleCount": 0,
+            "experimentalTriangleCount": 0,
+            "acceptedCompletionCount": 0,
+            "attemptedCompletionCount": 0,
+            "regionCountBefore": int(counts.get("preCollisionComponentCount", 0)),
+            "regionCountAfter": int(counts.get("componentCount", component_count)),
+            "medianNormalResidualDegrees": round(
+                _percentile(raw_macro_error, 50), 4
+            ),
+            "p90NormalResidualDegrees": round(
+                _percentile(raw_macro_error, 90), 4
+            ),
+            "retainedEdgeCount": int(len(edge_first)),
+            "columnConflictRejectedEdgeCount": int(
+                counts.get("columnConflictRejectedEdgeCount", 0)
+            ),
+            "eligibleNodeFraction": float(counts.get("eligibleNodeFraction", 0.0)),
+        },
+        "components": components,
+        "vertices": [],
+        "triangles": [],
+        "interfaceNodes": interface_nodes,
+    }
+
+
+def _load_dense_surface_payload(root: Path) -> dict[str, Any]:
+    manifest_path, data_path = _dense_completion_paths(root)
+    if not manifest_path.is_file() or not data_path.is_file():
+        raise FileNotFoundError(f"cubical surface geometry is unavailable at {root}")
+
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != "pareidolia.physical-ribbon-dense-completion":
+        raise ValueError(f"unsupported cubical surface schema in {manifest_path}")
+    if manifest.get("state") != "complete":
+        raise ValueError(f"cubical surface artifact is not complete: {manifest_path}")
+
+    with np.load(data_path, allow_pickle=False) as stored:
+        midpoint_world = _required(stored, "midpointXYZ").astype(
+            np.float64, copy=False
+        )
+        node_component = _required(stored, "component").astype(
+            np.int64, copy=False
+        )
+        triangle_node = _required(stored, "triangleFrontierIndex").astype(
+            np.int64, copy=False
+        )
+        triangle_area = _required(stored, "triangleAreaVoxelsSquared").astype(
+            np.float64, copy=False
+        )
+        triangle_normal_residual = _required(
+            stored, "triangleNormalResidualDegrees"
+        ).astype(np.float64, copy=False)
+        base_triangle_count_values = _required(stored, "baseTriangleCount").astype(
+            np.int64, copy=False
+        )
+        proposal_accepted = _required(stored, "proposalAccepted").astype(
+            np.uint8, copy=False
+        )
+        proposal_hole_row = _required(stored, "proposalHoleRow").astype(
+            np.int64, copy=False
+        )
+        completion_triangle_offset = _required(
+            stored, "completionTriangleOffset"
+        ).astype(np.int64, copy=False)
+
+    if midpoint_world.ndim != 2 or midpoint_world.shape[1] != 3:
+        raise ValueError("cubical surface midpointXYZ must have shape (node, 3)")
+    if triangle_node.ndim != 2 or triangle_node.shape[1] != 3:
+        raise ValueError("cubical surface triangles must have shape (triangle, 3)")
+    if len(node_component) != len(midpoint_world):
+        raise ValueError("cubical surface node arrays have inconsistent lengths")
+    if len(triangle_area) != len(triangle_node) or len(triangle_normal_residual) != len(
+        triangle_node
+    ):
+        raise ValueError("cubical surface triangle arrays have inconsistent lengths")
+    if len(base_triangle_count_values) != 1:
+        raise ValueError("cubical surface baseTriangleCount must contain one value")
+    if len(completion_triangle_offset) != len(proposal_accepted) + 1:
+        raise ValueError("cubical surface completion offsets have inconsistent lengths")
+    if len(proposal_hole_row) != len(proposal_accepted):
+        raise ValueError("cubical surface proposal arrays have inconsistent lengths")
+    if len(triangle_node) and (
+        int(np.min(triangle_node)) < 0
+        or int(np.max(triangle_node)) >= len(midpoint_world)
+    ):
+        raise ValueError("cubical surface triangle references an invalid node")
+
+    geometry = manifest.get("geometry", {})
+    owned_bounds = geometry.get("ownedWorldBounds", {})
+    origin = np.asarray(owned_bounds.get("startXYZ", ()), dtype=np.float64)
+    stop = np.asarray(owned_bounds.get("stopXYZExclusive", ()), dtype=np.float64)
+    if origin.shape != (3,) or stop.shape != (3,) or np.any(stop <= origin):
+        raise ValueError("cubical surface manifest has invalid owned world bounds")
+    extent = stop - origin
+
+    triangle_component = node_component[triangle_node]
+    if len(triangle_component) and not np.all(
+        triangle_component == triangle_component[:, :1]
+    ):
+        raise ValueError("cubical surface triangle crosses component identities")
+    triangle_component = triangle_component[:, 0]
+
+    base_triangle_count = int(base_triangle_count_values[0])
+    if not 0 <= base_triangle_count <= len(triangle_node):
+        raise ValueError("cubical surface base triangle count is out of range")
+    added_triangle_count = len(triangle_node) - base_triangle_count
+    added_hole_row = np.full(len(triangle_node), -1, dtype=np.int64)
+    for index, (low, high) in enumerate(
+        zip(completion_triangle_offset[:-1], completion_triangle_offset[1:])
+    ):
+        low_value = int(low)
+        high_value = int(high)
+        if low_value < 0 or high_value < low_value or high_value > added_triangle_count:
+            raise ValueError("cubical surface completion triangle offset is out of range")
+        if int(proposal_accepted[index]) and high_value > low_value:
+            added_hole_row[
+                base_triangle_count + low_value : base_triangle_count + high_value
+            ] = int(proposal_hole_row[index])
+    if added_triangle_count and np.any(added_hole_row[base_triangle_count:] < 0):
+        raise ValueError("cubical surface has unattributed completion triangles")
+
+    component_values, component_triangle_counts = np.unique(
+        triangle_component, return_counts=True
+    )
+    ranked_components = sorted(
+        (
+            (int(component), int(count))
+            for component, count in zip(component_values, component_triangle_counts)
+        ),
+        key=lambda value: (-value[1], value[0]),
+    )
+    rank_by_component = {
+        component: rank for rank, (component, _count) in enumerate(ranked_components, 1)
+    }
+    triangle_count_by_component = dict(ranked_components)
+
+    used_node = (
+        np.unique(triangle_node.reshape(-1))
+        if len(triangle_node)
+        else np.empty(0, dtype=np.int64)
+    )
+    compact_by_node = np.full(len(midpoint_world), -1, dtype=np.int64)
+    compact_by_node[used_node] = np.arange(len(used_node), dtype=np.int64)
+    compact_triangle_node = compact_by_node[triangle_node]
+    compact_vertices = midpoint_world[used_node] - origin
+    if len(compact_vertices) and (
+        not np.all(np.isfinite(compact_vertices))
+        or np.any(compact_vertices < -1e-3)
+        or np.any(compact_vertices > extent + 1e-3)
+    ):
+        raise ValueError("cubical surface vertices lie outside the owned volume")
+
+    components: list[dict[str, Any]] = []
+    for component, triangle_count in ranked_components:
+        triangle_mask = triangle_component == component
+        triangle_indices = np.flatnonzero(triangle_mask)
+        component_nodes = np.unique(triangle_node[triangle_indices].reshape(-1))
+        local_vertices = midpoint_world[component_nodes] - origin
+        residual = triangle_normal_residual[triangle_mask]
+        component_added_rows = sorted(
+            int(value)
+            for value in np.unique(added_hole_row[triangle_mask])
+            if int(value) >= 0
+        )
+        components.append(
+            {
+                "rank": int(rank_by_component[component]),
+                "stableId": str(component),
+                "triangleCount": int(triangle_count),
+                "nodeCount": int(len(component_nodes)),
+                "surfaceAreaVoxelsSquared": round(
+                    float(np.sum(triangle_area[triangle_mask])), 3
+                ),
+                "boundsMinimumXYZ": _round_list(np.min(local_vertices, axis=0)),
+                "boundsMaximumXYZ": _round_list(np.max(local_vertices, axis=0)),
+                "normalResidualDegrees": {
+                    "median": round(_percentile(residual, 50), 4),
+                    "p90": round(_percentile(residual, 90), 4),
+                    "maximum": round(_percentile(residual, 100), 4),
+                },
+                "experimentalTriangleCount": int(
+                    np.count_nonzero(added_hole_row[triangle_mask] >= 0)
+                ),
+                "experimentalCompletionRows": component_added_rows,
+            }
+        )
+
+    triangles = [
+        {
+            "id": int(index),
+            "component": int(rank_by_component[int(component)]),
+            "componentSize": int(triangle_count_by_component[int(component)]),
+            "vertices": [int(value) for value in compact_triangle_node[index]],
+            "areaVoxelsSquared": round(float(triangle_area[index]), 5),
+            "normalResidualDegrees": round(
+                float(triangle_normal_residual[index]), 4
+            )
+            if np.isfinite(triangle_normal_residual[index])
+            else None,
+            "experimental": bool(index >= base_triangle_count),
+            "completionRow": int(added_hole_row[index])
+            if added_hole_row[index] >= 0
+            else None,
+        }
+        for index, component in enumerate(triangle_component)
+    ]
+
+    analysis = manifest.get("analysis", {})
+    source = manifest.get("source", {})
+    try:
+        manifest_label = str(manifest_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        manifest_label = str(manifest_path)
+    return {
+        "schema": "pareidolia.block-surface-volume",
+        "version": 2,
+        "variant": root.name,
+        "artifact": {
+            "manifestPath": manifest_label,
+            "state": str(manifest.get("state", "unknown")),
+            "method": "dense cubical surface completion",
+        },
+        "source": {
+            "path": str(source.get("path", "")),
+            "metadataPath": str(source.get("metadataPath", "")),
+            "name": Path(str(source.get("path", "source volume"))).name,
+            "voxelSizeMicrons": float(source.get("voxelSizeMicrons", 0.0)),
+        },
+        "grid": {
+            "shapeCellsXYZ": [int(round(value)) for value in extent],
+            "cellSizeXYZ": [1.0, 1.0, 1.0],
+            "originXYZ": _round_list(origin),
+            "extentXYZ": _round_list(extent),
+            "coordinateUnit": str(geometry.get("coordinateUnit", "source-voxel")),
+        },
+        "stats": {
+            "triangleCount": int(len(triangle_node)),
+            "nodeCount": int(len(used_node)),
+            "componentCount": int(len(components)),
+            "largestComponentTriangleCount": int(
+                components[0]["triangleCount"] if components else 0
+            ),
+            "baselineTriangleCount": int(base_triangle_count),
+            "experimentalTriangleCount": int(added_triangle_count),
+            "acceptedCompletionCount": int(
+                analysis.get(
+                    "acceptedHoleCount", np.count_nonzero(proposal_accepted)
+                )
+            ),
+            "attemptedCompletionCount": int(
+                analysis.get("attemptedHoleCount", len(proposal_accepted))
+            ),
+            "regionCountBefore": int(analysis.get("triangleRegionCountBefore", 0)),
+            "regionCountAfter": int(analysis.get("triangleRegionCountAfter", 0)),
+            "medianNormalResidualDegrees": round(
+                _percentile(triangle_normal_residual, 50), 4
+            ),
+            "p90NormalResidualDegrees": round(
+                _percentile(triangle_normal_residual, 90), 4
+            ),
+        },
+        "components": components,
+        "vertices": [_round_list(vertex) for vertex in compact_vertices],
+        "triangles": triangles,
+    }
+
+
+@lru_cache(maxsize=4)
+def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
+    root = Path(root_value)
+    graph_manifest, graph_data = _material_surface_graph_paths(root)
+    if graph_manifest.is_file() or graph_data.is_file():
+        return _load_material_surface_graph_payload(root)
+    dense_manifest, dense_data = _dense_completion_paths(root)
+    if dense_manifest.is_file() or dense_data.is_file():
+        return _load_dense_surface_payload(root)
+    return _load_legacy_block_sheet_payload(root_value)
+
+
 def load_block_sheet_payload(root: str | Path | None = None) -> dict[str, Any]:
     selected_root = Path(root) if root is not None else configured_sheet_root()
     return _load_block_sheet_payload(str(selected_root.resolve()))
@@ -432,8 +876,17 @@ def load_block_volume(
     stride = int(stride)
     if stride not in (1, 2, 3, 4):
         raise ValueError("block volume stride must be one of 1, 2, 3, or 4")
-    selected_sheet_root = Path(sheet_root) if sheet_root is not None else configured_sheet_root()
-    selected_volume_path = Path(volume_path) if volume_path is not None else configured_volume_path()
+    selected_sheet_root = (
+        Path(sheet_root) if sheet_root is not None else configured_sheet_root()
+    )
+    if volume_path is not None:
+        selected_volume_path = Path(volume_path)
+    elif "PAREIDOLIA_BLOCK_VOLUME" in os.environ:
+        selected_volume_path = configured_volume_path()
+    else:
+        payload = load_block_sheet_payload(selected_sheet_root)
+        source_path = payload.get("source", {}).get("path")
+        selected_volume_path = Path(source_path) if source_path else configured_volume_path()
     return _load_block_volume(
         str(selected_sheet_root.resolve()),
         str(selected_volume_path.resolve()),

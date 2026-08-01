@@ -1007,7 +1007,12 @@ def _surface_view(holes: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
         "midpointXYZ",
         "thicknessVoxels",
     )
-    return {name: np.asarray(holes[name]) for name in names}
+    result = {name: np.asarray(holes[name]) for name in names}
+    if "surfaceNodeWeldGroup" in holes:
+        result["surfaceNodeWeldGroup"] = np.asarray(
+            holes["surfaceNodeWeldGroup"], dtype=np.int64
+        )
+    return result
 
 
 def _loops_view(holes: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:

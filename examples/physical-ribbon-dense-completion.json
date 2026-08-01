@@ -5,11 +5,15 @@
   "minimum_median_far_layer_margin": 0.02,
   "interior_boundary_separation_hypotheses_voxels": [0.2, 0.3, 0.5, 0.75, 1.0, 1.5],
   "minimum_triangle_area_voxels_squared": 0.03,
+  "minimum_dense_triangle_shape_ratio": 0.05,
   "maximum_triangle_edge_voxels": 6.0,
   "high_triangle_normal_residual_degrees": 45.0,
   "maximum_triangle_normal_residual_degrees": 85.0,
+  "maximum_high_normal_residual_area_fraction": 0.25,
   "maximum_native_ct_quadrature_edge_voxels": 1.0,
   "intersection_tolerance_voxels": 0.05,
+  "attachment_collar_transition_voxels": 1.0,
+  "attachment_collar_outward_tangent_ratio_hypotheses": [0.2, 0.4, 0.6, 0.8, 1.0],
   "maximum_edge_flip_iterations": 16384,
   "maximum_completed_holes": 128
 }

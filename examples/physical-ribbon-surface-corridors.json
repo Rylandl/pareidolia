@@ -1,0 +1,27 @@
+{
+  "owned_boundary_exclusion_voxels": 2.0,
+  "require_distinct_triangle_regions": true,
+  "corridors": {
+    "minimum_component_ribbon_count": 32,
+    "minimum_paired_boundary_edges": 3,
+    "maximum_pair_sequence_gap_edges": 4,
+    "maximum_reciprocal_pair_rank": 3,
+    "minimum_sequence_anchor_density": 0.5,
+    "minimum_corridor_width_boundary_edges": 1.25,
+    "maximum_corridor_width_thicknesses": 2.0,
+    "minimum_facing_cosine": 0.4,
+    "maximum_endpoint_normal_residual_degrees": 85.0,
+    "endpoint_chord_slack_degrees": 25.0,
+    "minimum_curvature_radius_thicknesses": 0.45,
+    "context_graph_hops": 2,
+    "patch_pixel_step_voxels": 0.5,
+    "maximum_patch_pixels": 8192,
+    "flatten_context_width_boundary_edges": 2.0,
+    "hermite_tensions": [0.5, 1.0, 1.5],
+    "maximum_scored_corridors": 256,
+    "maximum_preview_corridors": 32,
+    "minimum_context_profile_correlation": 0.85,
+    "minimum_boundary_trace_correlation": 0.35,
+    "minimum_zero_shift_margin": 0.2
+  }
+}

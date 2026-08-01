@@ -60,6 +60,20 @@ from .isolated_slab_audit import (
     IsolatedSlabAcusAuditSettings,
     run_isolated_slab_acus_audit,
 )
+from .known_surface_truth import (
+    prepare_known_surface_crop,
+    run_known_surface_interface_audit,
+    run_known_surface_ribbon_audit,
+)
+from .material_interface import run_material_interface_field
+from .macro_orientation import (
+    MacroOrientationSettings,
+    run_macro_orientation_field,
+)
+from .material_surface_graph import (
+    MaterialSurfaceGraphSettings,
+    run_material_surface_graph,
+)
 from .mode_bank import run_mode_bank
 from .multiseam import run_multiseam_audit
 from .needle_field import (
@@ -152,6 +166,14 @@ from .physical_ribbon_patch_states import (
 from .physical_ribbon_patch_corridors import (
     PhysicalRibbonPatchCorridorSettings,
     run_physical_ribbon_patch_corridors,
+)
+from .physical_ribbon_surface_corridors import (
+    PhysicalRibbonSurfaceCorridorSettings,
+    run_physical_ribbon_surface_corridors,
+)
+from .physical_ribbon_surface_corridor_saturation import (
+    PhysicalRibbonSurfaceCorridorSaturationSettings,
+    run_physical_ribbon_surface_corridor_saturation,
 )
 from .physical_ribbon_corridor_variants import (
     PhysicalRibbonCorridorVariantSettings,
@@ -684,18 +706,102 @@ def _block_needle_bundles(args: argparse.Namespace) -> None:
 
 
 def _isolated_slabs(args: argparse.Namespace) -> None:
-    settings_values: dict[str, object] = {}
+    settings: IsolatedSlabSettings | None = None
     if args.settings_json is not None:
         settings_values = json.loads(Path(args.settings_json).read_text())
         if not isinstance(settings_values, dict):
             raise ValueError("settings JSON must contain one object")
+        settings = IsolatedSlabSettings(**settings_values)
     summary = run_isolated_slab_detection(
         args.source,
         args.output,
         world_start_xyz=tuple(args.world_start),
         world_stop_xyz_exclusive=tuple(args.world_stop),
         metadata_path=args.metadata,
-        settings=IsolatedSlabSettings(**settings_values),
+        settings=settings,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _known_surface_crop(args: argparse.Namespace) -> None:
+    summary = prepare_known_surface_crop(
+        args.fragment,
+        args.output,
+        crop_origin_xy=tuple(args.crop_origin),
+        crop_shape_xy=tuple(args.crop_shape),
+        depth_start=args.depth_start,
+        depth_stop_exclusive=args.depth_stop,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _known_surface_ribbon_audit(args: argparse.Namespace) -> None:
+    summary = run_known_surface_ribbon_audit(
+        args.truth,
+        args.slabs,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _known_surface_interface_audit(args: argparse.Namespace) -> None:
+    summary = run_known_surface_interface_audit(
+        args.truth,
+        args.interfaces,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_interfaces(args: argparse.Namespace) -> None:
+    settings: IsolatedSlabSettings | None = None
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+        settings = IsolatedSlabSettings(**settings_values)
+    summary = run_material_interface_field(
+        args.source,
+        args.output,
+        world_start_xyz=tuple(args.world_start),
+        world_stop_xyz_exclusive=tuple(args.world_stop),
+        metadata_path=args.metadata,
+        settings=settings,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _macro_orientation(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_macro_orientation_field(
+        args.interfaces,
+        args.output,
+        settings=MacroOrientationSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_surface_graph(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_material_surface_graph(
+        args.interfaces,
+        args.macro_orientation,
+        args.output,
+        settings=MaterialSurfaceGraphSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -959,6 +1065,61 @@ def _physical_ribbon_surface_holes(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _physical_ribbon_surface_corridors(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_surface_corridors(
+        args.surface,
+        args.output,
+        settings=PhysicalRibbonSurfaceCorridorSettings.from_record(
+            settings_values
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_surface_corridor_saturation(
+    args: argparse.Namespace,
+) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+
+    def progress(
+        round_index: int, stage: str, values: Mapping[str, object]
+    ) -> None:
+        details = " · ".join(
+            f"{name} {value}"
+            for name, value in values.items()
+            if isinstance(value, (int, float, str, bool))
+        )
+        suffix = f" · {details}" if details else ""
+        print(
+            "surface-corridor saturation round "
+            f"{round_index} · {stage}{suffix}",
+            flush=True,
+        )
+
+    summary = run_physical_ribbon_surface_corridor_saturation(
+        args.surface,
+        args.output,
+        settings=(
+            PhysicalRibbonSurfaceCorridorSaturationSettings.from_record(
+                settings_values
+            )
+        ),
+        force=args.force,
+        progress=progress,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _physical_ribbon_open_bays(args: argparse.Namespace) -> None:
     settings_values: dict[str, object] = {}
     if args.settings_json is not None:
@@ -1024,6 +1185,7 @@ def _physical_ribbon_dense_completion(args: argparse.Namespace) -> None:
         "profile_depth_fractions",
         "competing_shift_thicknesses",
         "interior_boundary_separation_hypotheses_voxels",
+        "attachment_collar_outward_tangent_ratio_hypotheses",
     ):
         if name in settings_values:
             settings_values[name] = tuple(settings_values[name])
@@ -2690,6 +2852,112 @@ def main() -> None:
     )
     isolated_slabs.add_argument("--force", action="store_true")
     isolated_slabs.set_defaults(handler=_isolated_slabs)
+    known_surface_crop = subparsers.add_parser(
+        "prepare-known-surface-truth",
+        description=(
+            "Convert a crop of a legacy known-unrolled Vesuvius surface volume "
+            "into the same calibrated uint8 NPY contract used by the raw CT "
+            "pipeline."
+        ),
+    )
+    known_surface_crop.add_argument("--fragment", type=Path, required=True)
+    known_surface_crop.add_argument(
+        "--crop-origin", nargs=2, type=int, metavar=("X", "Y"), required=True
+    )
+    known_surface_crop.add_argument(
+        "--crop-shape", nargs=2, type=int, metavar=("WIDTH", "HEIGHT"), required=True
+    )
+    known_surface_crop.add_argument("--depth-start", type=int, default=0)
+    known_surface_crop.add_argument("--depth-stop", type=int)
+    known_surface_crop.add_argument("--output", type=Path, required=True)
+    known_surface_crop.add_argument("--force", action="store_true")
+    known_surface_crop.set_defaults(handler=_known_surface_crop)
+    known_surface_audit = subparsers.add_parser(
+        "audit-known-surface-ribbons",
+        description=(
+            "Evaluate isolated air-papyrus-air ribbons against a known-unrolled "
+            "surface's one-sheet, chart-normal geometry."
+        ),
+    )
+    known_surface_audit.add_argument("--truth", type=Path, required=True)
+    known_surface_audit.add_argument("--slabs", type=Path, required=True)
+    known_surface_audit.add_argument("--output", type=Path, required=True)
+    known_surface_audit.add_argument("--force", action="store_true")
+    known_surface_audit.set_defaults(handler=_known_surface_ribbon_audit)
+    known_interface_audit = subparsers.add_parser(
+        "audit-known-surface-interfaces",
+        description=(
+            "Evaluate raw signed face positions and raw normals independently "
+            "against a known-unrolled surface chart."
+        ),
+    )
+    known_interface_audit.add_argument("--truth", type=Path, required=True)
+    known_interface_audit.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    known_interface_audit.add_argument("--output", type=Path, required=True)
+    known_interface_audit.add_argument("--force", action="store_true")
+    known_interface_audit.set_defaults(handler=_known_surface_interface_audit)
+    material_interfaces = subparsers.add_parser(
+        "detect-material-interfaces",
+        description=(
+            "Extract dense signed air-to-material face samples directly from "
+            "native CT without requiring or collapsing an opposing face."
+        ),
+    )
+    material_interfaces.add_argument("--source", type=Path, required=True)
+    material_interfaces.add_argument("--metadata", type=Path)
+    material_interfaces.add_argument(
+        "--world-start", nargs=3, type=int, required=True
+    )
+    material_interfaces.add_argument(
+        "--world-stop", nargs=3, type=int, required=True
+    )
+    material_interfaces.add_argument("--output", type=Path, required=True)
+    material_interfaces.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional IsolatedSlabSettings keyword object",
+    )
+    material_interfaces.add_argument("--force", action="store_true")
+    material_interfaces.set_defaults(handler=_material_interfaces)
+    macro_orientation = subparsers.add_parser(
+        "solve-macro-sheet-orientation",
+        description=(
+            "Average dense interface normals over a physical support scale to "
+            "separate sheet orientation from local fiber and boundary texture."
+        ),
+    )
+    macro_orientation.add_argument("--interfaces", type=Path, required=True)
+    macro_orientation.add_argument("--output", type=Path, required=True)
+    macro_orientation.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MacroOrientationSettings keyword object",
+    )
+    macro_orientation.add_argument("--force", action="store_true")
+    macro_orientation.set_defaults(handler=_macro_orientation)
+    material_surface_graph = subparsers.add_parser(
+        "build-material-surface-graph",
+        description=(
+            "Connect strong signed interfaces only along the physically scaled "
+            "macro tangent plane, keeping opposite material faces distinct."
+        ),
+    )
+    material_surface_graph.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    material_surface_graph.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    material_surface_graph.add_argument("--output", type=Path, required=True)
+    material_surface_graph.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MaterialSurfaceGraphSettings keyword object",
+    )
+    material_surface_graph.add_argument("--force", action="store_true")
+    material_surface_graph.set_defaults(handler=_material_surface_graph)
     isolated_slab_acus_audit = subparsers.add_parser(
         "audit-isolated-slabs-with-acus",
         description=(
@@ -3085,6 +3353,53 @@ def main() -> None:
     physical_ribbon_surface_holes.add_argument("--force", action="store_true")
     physical_ribbon_surface_holes.set_defaults(
         handler=_physical_ribbon_surface_holes
+    )
+    physical_ribbon_surface_corridors = subparsers.add_parser(
+        "analyze-physical-ribbon-surface-corridors",
+        description=(
+            "Find aligned multi-edge outer-frontier pairs on any materialized "
+            "surface and score complete ruled or Hermite strips using native "
+            "CT and flattened boundary texture without a ribbon bank."
+        ),
+    )
+    physical_ribbon_surface_corridors.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_surface_corridors.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_surface_corridors.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_surface_corridors.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_surface_corridors.set_defaults(
+        handler=_physical_ribbon_surface_corridors
+    )
+    physical_ribbon_surface_corridor_saturation = subparsers.add_parser(
+        "saturate-physical-ribbon-surface-corridors",
+        description=(
+            "Iterate complete paired-frontier strip enumeration, collective "
+            "native-CT depth solving, exact topology admission, and flattened "
+            "fiber replay until every corridor on a stationary surface has "
+            "been evaluated."
+        ),
+    )
+    physical_ribbon_surface_corridor_saturation.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_surface_corridor_saturation.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_surface_corridor_saturation.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_surface_corridor_saturation.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_surface_corridor_saturation.set_defaults(
+        handler=_physical_ribbon_surface_corridor_saturation
     )
     physical_ribbon_open_bays = subparsers.add_parser(
         "analyze-physical-ribbon-open-bays",

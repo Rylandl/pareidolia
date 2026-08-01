@@ -217,6 +217,158 @@ class RectifierTests(unittest.TestCase):
             self.assertEqual(metadata["shapeXYZ"], [2, 2, 2])
             self.assertEqual(body, expected.tobytes(order="C"))
 
+    def test_block_sheet_volume_loads_current_cubical_surface_and_completion_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "surface"
+            root.mkdir()
+            volume_path = Path(directory) / "volume.npy"
+            volume = np.arange(10**3, dtype=np.uint8).reshape(10, 10, 10)
+            np.save(volume_path, volume)
+            volume_path.with_suffix(".json").write_text(
+                json.dumps({"originXYZ": [0, 0, 0], "name": "fixture CT"})
+            )
+            (root / "physical-ribbon-dense-completion-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.physical-ribbon-dense-completion",
+                        "version": 1,
+                        "state": "complete",
+                        "source": {
+                            "path": str(volume_path),
+                            "metadataPath": str(volume_path.with_suffix(".json")),
+                            "voxelSizeMicrons": 9.0,
+                        },
+                        "geometry": {
+                            "ownedWorldBounds": {
+                                "startXYZ": [2, 3, 4],
+                                "stopXYZExclusive": [6, 7, 8],
+                            },
+                            "coordinateUnit": "source-voxel",
+                        },
+                        "analysis": {
+                            "attemptedHoleCount": 1,
+                            "acceptedHoleCount": 1,
+                            "triangleRegionCountBefore": 2,
+                            "triangleRegionCountAfter": 1,
+                        },
+                    }
+                )
+            )
+            np.savez_compressed(
+                root / "physical-ribbon-dense-completion-v1.npz",
+                midpointXYZ=np.asarray(
+                    [
+                        [2.5, 3.5, 4.5],
+                        [4.5, 3.5, 4.5],
+                        [2.5, 5.5, 4.5],
+                        [4.5, 5.5, 4.5],
+                    ],
+                    dtype=np.float32,
+                ),
+                component=np.asarray([7, 7, 7, 7], dtype=np.int32),
+                triangleFrontierIndex=np.asarray(
+                    [[0, 1, 2], [1, 3, 2]], dtype=np.int32
+                ),
+                triangleAreaVoxelsSquared=np.asarray([2.0, 2.0], dtype=np.float32),
+                triangleNormalResidualDegrees=np.asarray(
+                    [3.0, 5.0], dtype=np.float32
+                ),
+                baseTriangleCount=np.asarray([1], dtype=np.int64),
+                proposalAccepted=np.asarray([1], dtype=np.uint8),
+                proposalHoleRow=np.asarray([9], dtype=np.int32),
+                completionTriangleOffset=np.asarray([0, 1], dtype=np.int64),
+            )
+
+            payload = load_block_sheet_payload(root)
+            self.assertEqual(payload["schema"], "pareidolia.block-surface-volume")
+            self.assertEqual(payload["grid"]["originXYZ"], [2.0, 3.0, 4.0])
+            self.assertEqual(payload["stats"]["triangleCount"], 2)
+            self.assertEqual(payload["stats"]["experimentalTriangleCount"], 1)
+            self.assertEqual(payload["stats"]["regionCountAfter"], 1)
+            self.assertEqual(payload["components"][0]["experimentalCompletionRows"], [9])
+            self.assertFalse(payload["triangles"][0]["experimental"])
+            self.assertTrue(payload["triangles"][1]["experimental"])
+            self.assertEqual(payload["triangles"][1]["completionRow"], 9)
+            self.assertEqual(payload["vertices"][0], [0.5, 0.5, 0.5])
+
+            body, metadata = load_block_volume(sheet_root=root, stride=1)
+            expected = volume[4:8, 3:7, 2:6]
+            self.assertEqual(metadata["shapeXYZ"], [4, 4, 4])
+            self.assertEqual(metadata["source"], "fixture CT")
+            self.assertEqual(body, expected.tobytes(order="C"))
+
+    def test_block_sheet_volume_loads_guarded_material_interface_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "interfaces"
+            root.mkdir()
+            volume_path = Path(directory) / "volume.npy"
+            volume = np.arange(10**3, dtype=np.uint8).reshape(10, 10, 10)
+            np.save(volume_path, volume)
+            metadata_path = volume_path.with_suffix(".json")
+            metadata_path.write_text(
+                json.dumps(
+                    {"originXYZ": [0, 0, 0], "name": "interface fixture"}
+                )
+            )
+            (root / "material-interface-surface-graph-v1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pareidolia.material-interface-surface-graph",
+                        "version": 1,
+                        "state": "complete",
+                        "source": {
+                            "path": str(volume_path),
+                            "metadataPath": str(metadata_path),
+                            "voxelSizeMicrons": 9.0,
+                        },
+                        "geometry": {
+                            "ownedWorldBounds": {
+                                "startXYZ": [2, 3, 4],
+                                "stopXYZExclusive": [6, 7, 8],
+                            },
+                            "coordinateUnit": "source-voxel",
+                        },
+                        "counts": {
+                            "eligibleNodeFraction": 0.75,
+                            "preCollisionComponentCount": 1,
+                            "componentCount": 2,
+                            "columnConflictRejectedEdgeCount": 1,
+                        },
+                    }
+                )
+            )
+            np.savez_compressed(
+                root / "material-interface-surface-graph-v1.npz",
+                positionXYZ=np.asarray(
+                    [[2.5, 3.5, 4.5], [3.5, 3.5, 4.5], [4.5, 5.5, 6.5]],
+                    dtype=np.float32,
+                ),
+                componentId=np.asarray([0, 0, 1], dtype=np.int32),
+                preCollisionComponentId=np.asarray([0, 0, 0], dtype=np.int32),
+                localEvidenceScore=np.asarray([0.9, 0.8, 0.7], dtype=np.float32),
+                macroOrientationConfidence=np.asarray(
+                    [0.95, 0.9, 0.85], dtype=np.float32
+                ),
+                rawToMacroNormalDegrees=np.asarray(
+                    [4.0, 6.0, 8.0], dtype=np.float32
+                ),
+                edgeFirstNode=np.asarray([0], dtype=np.int32),
+            )
+            payload = load_block_sheet_payload(root)
+            self.assertEqual(payload["schema"], "pareidolia.block-interface-volume")
+            self.assertEqual(payload["representation"], "material-interface-graph")
+            self.assertEqual(payload["stats"]["nodeCount"], 3)
+            self.assertEqual(payload["stats"]["componentCount"], 2)
+            self.assertEqual(payload["stats"]["columnConflictRejectedEdgeCount"], 1)
+            self.assertEqual(payload["interfaceNodes"][0], [0.5, 0.5, 0.5, 1])
+            self.assertTrue(payload["components"][0]["splitByStratumGuard"])
+
+            body, metadata = load_block_volume(sheet_root=root, stride=1)
+            self.assertEqual(metadata["shapeXYZ"], [4, 4, 4])
+            self.assertEqual(body, volume[4:8, 3:7, 2:6].tobytes(order="C"))
+
     def test_dense_termination_comparison_separates_new_and_stored_modes(
         self,
     ) -> None:

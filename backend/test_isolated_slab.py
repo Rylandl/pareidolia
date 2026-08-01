@@ -17,6 +17,17 @@ from backend.cubical.isolated_slab_audit import nearest_needle_and_segment
 
 
 class IsolatedSlabTests(unittest.TestCase):
+    def test_default_sampling_scale_is_physical_across_voxel_sizes(self) -> None:
+        scroll = IsolatedSlabSettings.at_physical_scale(9.362)
+        truth = IsolatedSlabSettings.at_physical_scale(3.24)
+        self.assertEqual(scroll.sampling_stride_voxels, 2)
+        self.assertEqual(truth.sampling_stride_voxels, 6)
+        self.assertAlmostEqual(
+            scroll.sampling_stride_voxels * 9.362,
+            truth.sampling_stride_voxels * 3.24,
+            delta=1.0,
+        )
+
     def test_finite_needle_distance_clamps_to_segment_endpoints(self) -> None:
         result = nearest_needle_and_segment(
             np.asarray(((3.0, 2.0, 0.0), (8.0, 0.0, 0.0))),

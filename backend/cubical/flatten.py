@@ -67,6 +67,7 @@ class ChartRaster:
     mask: np.ndarray
     patch_boundary_mask: np.ndarray
     overlap_mask: np.ndarray
+    triangle_index: np.ndarray
     pixel_step_voxels: float
     statistics: dict[str, Any]
 
@@ -1046,6 +1047,7 @@ def rasterize_chart(
         mask,
         boundary,
         overlap,
+        triangle_owner,
         effective_step,
         {
             "shapeYX": [height, width],

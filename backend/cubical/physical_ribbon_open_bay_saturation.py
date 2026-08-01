@@ -140,7 +140,12 @@ class PhysicalRibbonOpenBaySaturationSettings:
         )
         audit_values = _tuple_fields(
             _settings_section(record, "flattened_audit"),
-            ("depth_fractions",),
+            (
+                "depth_fractions",
+                "native_seam_inward_range_voxels",
+                "native_seam_edge_parameters",
+                "native_seam_scale_hypotheses",
+            ),
         )
         dense_values.setdefault("maximum_completed_holes", 128)
         audit_values.setdefault("maximum_components", 128)

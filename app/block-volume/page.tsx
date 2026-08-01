@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { BlockVolumeExplorer } from "../BlockVolumeExplorer";
 
 export const metadata: Metadata = {
-  title: "Solved block volume | Rectifier Lab",
-  description: "Inspect the source CT volume and every retained Acus sheet patch in one orbitable block.",
+  title: "Current surface components | Rectifier Lab",
+  description: "Inspect the current cubical surface components and experimental completions inside their aligned CT block.",
 };
 
 export default function BlockVolumePage() {

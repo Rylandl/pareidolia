@@ -981,12 +981,13 @@ element quality.  A proposal is atomic and is retained only when:
 - its realized (not merely fitted) vertex normals retain whole-patch native-CT
   air-material-air support, boundary-profile correlation, and displaced-layer
   separation; and
-- no realized triangle turns 85 degrees or more from its local fitted-normal
-  frame.  The softer greater-than-45-degree area tail and the distance to
-  neighboring components remain diagnostics: tight bends and compressed or
-  delaminated sheets are decided by direct realized-surface CT support and
-  exact intersection, not vetoed by a quadratic prior or an inferred
-  thickness ratio.
+- fitted-normal disagreement does not become a veto from one unstable
+  triangle alone. A patch is rejected for a catastrophic normal contradiction
+  only when it contains both a greater-than-85-degree extreme and more than a
+  quarter of its realized area above 45 degrees. Distance to neighboring
+  components remains diagnostic: tight bends and compressed or delaminated
+  sheets are primarily decided by direct realized-surface CT support and exact
+  intersection, not by a quadratic prior or an inferred thickness ratio.
 
 On the final 207-pixel residual, 194 samples survive the declared 0.20-voxel
 boundary spacing and produce 409 constrained triangles.  The exact replay
@@ -1165,6 +1166,210 @@ distinguishes evidence saturation from a configured maximum-round stop.  Prior
 completion and texture-audit roots may be supplied repeatedly when continuing
 an already materialized surface; the same settings and source-volume identity
 are enforced before their rejection evidence is reused.
+
+### Complete two-frontier surface corridors
+
+Residual fragmentation after interior-hole and open-bay saturation is now
+treated as a paired-frontier problem rather than one-cell growth.
+`analyze-physical-ribbon-surface-corridors` searches for two mutually facing,
+multi-edge outer-boundary arcs on the current materialized surface. One
+candidate is the complete strip between both arcs, including both replacement
+mouths. The analyzer fits ruled and Hermite alternatives, samples every model
+against native CT, compares the flattened boundary traces, and excludes strips
+approaching an owned block face. It does not consult the old ribbon bank or
+select any edge, raster pixel, or cell independently.
+
+Before boundary reasoning, the materialized triangle complex is normalized as
+a two-manifold at vertices. Two incident triangle fans that reuse an Acus node
+without sharing an edge receive distinct surface-node records at the same 3-D
+position, with explicit weld-group provenance. The exact triangle 1-skeleton
+replaces the old candidate graph. On the saturated 512-deep block this splits
+576 zero-area vertex welds and changes the boundary audit from 107 pinched
+components and 191 split fans to zero of either, without moving a point or
+changing triangle-edge connectivity. This is required for honest chart
+reasoning: edge-disconnected sheet regions cannot be forced to share one UV
+gauge merely because their discretizations touch at a point.
+
+The normalized census still finds 150 multi-anchor corridors. Fifty-six pass
+whole-strip CT and flattened-trace evidence, all connect distinct triangle
+regions, and all compile to complete exact domains. Dense ordered-depth fields
+contain 26,584 pixels; 25,652 (96.49 percent) have direct CT support and 53 of
+56 fields are classified surface-completion-ready. Full-resolution structured
+strip meshing replaces each long end cap by a sampled mouth chain, while every
+inherited arc edge remains exact. Admission requires two old triangle regions
+to become exactly one, both attachment arcs to become two-incident, both new
+mouths to remain one-incident, zero non-manifold edges, zero 3-D crossings, and
+whole-area native-CT support under at-most-one-voxel quadrature.
+
+Disconnected regions have arbitrary relative rigid placement in the intrinsic
+chart. A stale overlap is therefore not a physical veto. When all physical
+checks pass, the completion solver holds either region fixed, aligns the other
+through the complete strip parameterization, and accepts only a zero-overlap,
+noncollapsed chart. A conformal reparameterization of only the newly joined
+region is an audited fallback; it cannot rescue a self-overlapping topology.
+In the current run one strip removes its two stale overlaps and passes with
+zero patch, moved-region, or self overlaps. It adds 418 dense vertices and 800
+triangles and reduces both outer loops and triangle regions from 734 to 733.
+Two other physically tempting strips remain rejected because even their
+conformal joined charts contain 86 and 419 self overlaps. No chart threshold
+was relaxed to admit them.
+
+The accepted strip also passes the proposal-local flattened native-CT texture
+audit at all three fixed ply depths. At center depth its new boundary has 2.73
+degrees median axial disagreement versus 1.31 degrees on unchanged control
+edges, a 1.42-degree excess under the declared five-degree noise allowance.
+This makes the result a complete physical, topological, intrinsic-chart, and
+fiber-texture admission rather than a visually convenient bridge.
+
+Exact collision provenance exposes a second representation defect. One
+otherwise valid strip intersected eight triangle pairs, but all eight were in
+the same component, all hit exactly the two regions being attached, and every
+crossing was within 0.162 voxel of an inherited arc. Its joined intrinsic
+chart was already injective. The crossings occupied only the first two dense
+raster columns on each side, showing that the independently fitted strip
+turned back through its attachment triangles rather than crossing a distant
+ply. This case is not admitted by ignoring same-component collisions.
+
+Instead, dense completion derives an attachment collar from that exhaustive
+collision footprint. The deepest colliding column plus a one-physical-voxel
+transition defines the affected domain; all other CT field samples remain
+unchanged. Within the collar, the existing attachment triangle defines the
+inward half-space at each arc position. Only field points that turn into that
+half-space receive the minimum tangent-plane displacement needed for a
+declared outward exit slope. Increasing dimensionless slope hypotheses are
+tested as complete strips, and every area, edge, normal-tail, native-CT,
+competing-layer, intersection, exact-topology, and chart gate is rerun. The
+first accepted state uses a 0.60 tangent ratio over four columns per side. It
+moves 51 of 228 depth-field points by 0.361 voxel median and 0.926 voxel
+maximum, while leaving 177 points unchanged. It has zero final crossings and
+zero chart overlaps, 82.61 percent native-CT support, 0.767 median profile
+correlation, and 0.912 median displaced-layer margin.
+
+The collar strip also passes flattened fiber evidence at all three audited
+ply depths. Its center-depth boundary median is 11.09 degrees versus 15.77
+degrees on unchanged controls, so it improves rather than degrades local
+fiber agreement. The two outer depths likewise have negative median excess.
+Thus the collar is a bounded geometric continuation model selected by source
+data, not a relaxed intersection tolerance or a component-identity waiver.
+
+The reproducible sequence is:
+
+```bash
+python -m backend.cubical analyze-physical-ribbon-surface-corridors \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-saturation-v1/round-004/completion \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridors-v1 \
+  --settings-json examples/physical-ribbon-surface-corridors.json
+
+python -m backend.cubical analyze-physical-ribbon-depth-fields \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridors-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-depth-fields-v1 \
+  --settings-json examples/physical-ribbon-depth-fields.json
+
+python -m backend.cubical complete-physical-ribbon-dense-surfaces \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridors-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-depth-fields-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-completion-v1 \
+  --settings-json examples/physical-ribbon-dense-completion.json
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-completion-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-flattened-audit-v1 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+
+python -m backend.cubical complete-physical-ribbon-dense-surfaces \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridors-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-depth-fields-v1 \
+  --texture-audit work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-flattened-audit-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-completion-texture-gated-v1 \
+  --settings-json examples/physical-ribbon-dense-completion.json
+```
+
+`saturate-physical-ribbon-surface-corridors` makes the sequence a fixed-point
+stage. Each round re-enumerates paired frontiers on the texture-gated surface,
+solves every complete dense strip, audits each accepted proposal in flattened
+native CT, and explicitly replays only compatible rows. A round may claim
+saturation only when the complete multi-anchor census fits below the scoring
+cap and every enumerated state was reconstructed; a cap-limited stationary
+round stops as unsaturated instead of silently treating rank truncation as
+negative evidence.
+
+The collar-aware block reaches a fixed point in two rounds and 205.4 seconds.
+Round one scores all 150 corridors, compiles 56 exact domains, and admits two
+flattened-fiber-compatible joins: the original 418-vertex/800-triangle strip
+and the 204-vertex/380-triangle collar strip. Together they reduce outer loops
+and triangle regions from 734 to 732. Round two exhaustively scores all 148
+remaining corridors, compiles 54 exact domains, and admits none. No stationary
+candidate qualifies for another collar: the residual collisions occur with
+independent physical, CT, normal, or chart failures rather than as the sole
+seam-local defect. This proves saturation of the current paired-frontier plus
+attachment-collar representation, not general sheet saturation; the remaining
+multi-cause failures require a richer surface model rather than threshold
+relaxation.
+
+```bash
+python -m backend.cubical saturate-physical-ribbon-surface-corridors \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-saturation-v1/round-004/completion \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-collar-saturation-v1 \
+  --settings-json examples/physical-ribbon-surface-corridor-saturation.json
+```
+
+#### Complete transverse-island sectors
+
+The stationary collision audit revealed one richer but still finite decision
+unit. A candidate strip can run into a small, edge-disconnected triangle island
+whose two ends are exact physical clones of vertices on the two established
+fronts. Treating one field cell near that island as a growth frontier is
+underdetermined: almost any isolated occupied sample can be made locally
+plausible, and successive choices can create a tendril or a shear jump. The
+completion solver instead requires the entire third region to be one disk,
+requires exactly one weld-group and coordinate-identical endpoint on each
+front, and enumerates both complete island boundary paths on both sides of the
+strip. Each resulting proposal is one closed sector decision joining three
+prior triangle regions. The clone weld changes only topology and moves no
+geometry.
+
+The sector boundary mixes inherited surface vertices with a uniformly sampled
+CT mouth. It is triangulated as one constrained disk; individual samples are
+never admission decisions. The ordinary physical gates remain in force. Small
+all-CT triangles below the absolute area floor are allowed only when their
+longest edge is no greater than the native CT quadrature scale, their
+dimensionless area-to-edge shape ratio exceeds 0.05, and their local-normal
+residual stays below the soft residual threshold. This distinguishes a valid
+fine raster triangle from a physically collapsed inherited attachment.
+
+On the previous 732-region fixed point, three of 54 exact corridor domains meet
+the transverse-island precondition. Thirteen complete sector/collar hypotheses
+are evaluated and exactly one passes. It joins regions 424, 425, and 426,
+including the complete three-triangle transverse island, by adding 292 dense
+vertices and 562 triangles. Outer loops and triangle regions both fall from
+732 to 730. The accepted surface has zero 3-D crossings, zero intrinsic chart
+overlaps, 97.80 percent native-CT support, 0.937 median profile correlation,
+1.022 median displaced-layer margin, 6.11 degrees p90 normal residual, and only
+0.64 percent of its area above the 45-degree soft residual threshold.
+
+The free-boundary conformal chart for the joined hairpin is locally
+low-distortion but overlaps itself globally. A convex-boundary, positive-weight
+harmonic disk embedding is therefore tried as an intrinsic gauge only after the
+physical surface passes. The exact chart audit finds no self or stationary
+overlap. Flattened native-CT evidence independently supports the join at all
+three fixed ply depths: new-boundary median axial disagreement is 1.05, 0.70,
+and 0.73 degrees, versus 3.87, 3.80, and 3.54 degrees on unchanged controls.
+Thus the chart fallback does not manufacture apparent fiber continuity; the
+new boundary is more coherent than its local control at every sampled depth.
+
+Re-enumeration on the accepted surface produces 146 corridors and 53 exact
+domains. Two still meet the transverse-island precondition, eight complete
+sector hypotheses are audited, and none passes, establishing a new exact and
+texture-evidence fixed point in 278.2 seconds. This extension deliberately
+does not generalize into local frontier growth: the next representation change
+must again explain a complete stationary failure class.
+
+```bash
+python -m backend.cubical saturate-physical-ribbon-surface-corridors \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-collar-saturation-v1/round-001/texture-gate-001 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-corridor-multiregion-saturation-v1 \
+  --settings-json examples/physical-ribbon-surface-corridor-saturation.json
+```
 
 The equivalent single-round primitives are:
 
@@ -1475,3 +1680,40 @@ python -m backend.cubical replay-physical-ribbon-lineage-strips \
   --lineage-strips work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strips-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-lineage-strip-replay-v1
 ```
+
+## Dense signed-face pipeline
+
+The current reconstruction entry point preserves air-to-material interfaces as
+explicit faces. It does not collapse opposite faces to a ribbon midpoint. Local
+CT gradients provide face positions and signs; a physically scaled unsigned
+orientation tensor supplies the smoother page normal used for tangent growth.
+
+```bash
+python -m backend.cubical detect-material-interfaces \
+  --source /mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy \
+  --metadata /mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.json \
+  --world-start 3456 2720 7264 \
+  --world-stop 3840 3104 7584 \
+  --output work/multiseam-2x2-b00c03c/material-interface-field-v1
+
+python -m backend.cubical solve-macro-sheet-orientation \
+  --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
+  --output work/multiseam-2x2-b00c03c/macro-orientation-field-v1
+
+python -m backend.cubical build-material-surface-graph \
+  --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
+  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-field-v1 \
+  --output work/multiseam-2x2-b00c03c/material-surface-graph-v1
+```
+
+Default scale selection is physical rather than dataset-specific: CT sampling
+is approximately 20 microns, macro orientation support is approximately 240
+microns, and the local tangent-column depth band is approximately 44 microns.
+The latter is below the configured 80-micron minimum ply thickness. Graph
+membership is formed by maximum-score unions subject to one bounded depth
+interval per local tangent column, preventing a valid sequence of local shear
+edges from returning on a parallel layer.
+
+`/block-volume` loads this guarded interface graph by default. It sends the
+leading 256 components to the browser as interface samples while reporting
+statistics over the complete graph.

@@ -20,6 +20,10 @@ from .physical_ribbon_patch_holes import (
 )
 from .physical_ribbon_surface_holes import PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA
 from .physical_ribbon_open_bays import PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA
+from .physical_ribbon_surface_corridors import (
+    PHYSICAL_RIBBON_SURFACE_CORRIDORS_SCHEMA,
+    surface_corridor_completion_view,
+)
 
 
 PHYSICAL_RIBBON_DEPTH_FIELD_SCHEMA = "pareidolia.physical-ribbon-depth-field"
@@ -42,6 +46,7 @@ def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
                 PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
                 PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA,
                 PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA,
+                PHYSICAL_RIBBON_SURFACE_CORRIDORS_SCHEMA,
             }
             and manifest.get("state") == "complete"
         ):
@@ -49,7 +54,7 @@ def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
     if len(matches) != 1:
         raise ValueError(
             "holes root must identify exactly one complete patch, surface-hole, "
-            "or open-bay artifact"
+            "open-bay, or surface-corridor artifact"
         )
     return matches[0]
 
@@ -539,6 +544,15 @@ def build_physical_ribbon_depth_fields(
     patch_uv_all = np.asarray(holes["patchUV"], dtype=np.float32)
     patch_xyz_all = np.asarray(holes["patchXYZ"], dtype=np.float32)
     patch_normal_all = np.asarray(holes["patchNormalXYZ"], dtype=np.float32)
+    raster_coordinate_all = (
+        np.asarray(holes["patchRasterCoordinateUV"], dtype=np.int32)
+        if "patchRasterCoordinateUV" in holes
+        else None
+    )
+    if raster_coordinate_all is not None and len(raster_coordinate_all) != len(
+        patch_uv_all
+    ):
+        raise ValueError("explicit patch raster coordinates differ from patch pixels")
     chart_uv = np.asarray(holes["chartUV"], dtype=np.float32)
     context_profile = np.asarray(holes["contextMedianProfile"], dtype=np.float32)
     intensity_scale = np.asarray(holes["localIntensityScale"], dtype=np.float32)
@@ -546,6 +560,12 @@ def build_physical_ribbon_depth_fields(
     candidate_bank_used = bool(
         np.asarray(
             holes.get("candidateBankUsed", np.ones(1, dtype=np.uint8)),
+            dtype=np.uint8,
+        )[0]
+    )
+    corridor_mode = bool(
+        np.asarray(
+            holes.get("denseCorridorMode", np.zeros(1, dtype=np.uint8)),
             dtype=np.uint8,
         )[0]
     )
@@ -585,7 +605,13 @@ def build_physical_ribbon_depth_fields(
         patch_normal = patch_normal_all[start:stop]
         step = float(holes["rasterStepVoxels"][row])
         thickness = float(holes["loopMedianThicknessVoxels"][loop])
-        coordinates = _grid_coordinates(patch_uv, step)
+        coordinates = (
+            raster_coordinate_all[start:stop]
+            if raster_coordinate_all is not None
+            else _grid_coordinates(patch_uv, step)
+        )
+        if len(np.unique(coordinates, axis=0)) != len(coordinates):
+            raise ValueError("patch raster coordinates are not unique")
         edge_first, edge_second = _grid_edges(coordinates)
         boundary = _loop_vertices(holes, loop)
         boundary_distance = _point_segment_distance(patch_uv, chart_uv[boundary])
@@ -844,6 +870,7 @@ def build_physical_ribbon_depth_fields(
         "ctSupportedPixelCount": int(np.count_nonzero(arrays["pixelCtSupported"])),
         "failureClassCount": class_count,
         "candidateBankUsed": candidate_bank_used,
+        "surfaceCorridorMode": corridor_mode,
         "singlePixelGrowth": False,
         "selectionMutated": False,
         "identityLabelsUsed": False,
@@ -996,6 +1023,8 @@ def run_physical_ribbon_depth_fields(
     holes_path, holes_manifest = _resolve_holes_manifest(holes_root)
     holes_data_path = holes_path.parent / str(holes_manifest["data"]["path"])
     holes = _load_npz(holes_data_path, holes_manifest["data"]["sha256"])
+    if holes_manifest.get("schema") == PHYSICAL_RIBBON_SURFACE_CORRIDORS_SCHEMA:
+        holes = surface_corridor_completion_view(holes)
     source_record = holes_manifest["source"]
     source = VolumeSource.open(source_record["path"], source_record.get("metadataPath"))
     identity: dict[str, Any] = {
@@ -1008,7 +1037,19 @@ def run_physical_ribbon_depth_fields(
         },
         "source": source.source_identity,
         "settings": resolved.record(),
-        "implementationSha256": sha256_file(Path(__file__)),
+        "implementationSha256": {
+            "depthFields": sha256_file(Path(__file__)),
+            **(
+                {
+                    "surfaceCorridorAdapter": sha256_file(
+                        Path(surface_corridor_completion_view.__code__.co_filename)
+                    )
+                }
+                if holes_manifest.get("schema")
+                == PHYSICAL_RIBBON_SURFACE_CORRIDORS_SCHEMA
+                else {}
+            ),
+        },
     }
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
@@ -1059,10 +1100,21 @@ def run_physical_ribbon_depth_fields(
         },
         "artifacts": {"depthFieldMontage": montage_path.name},
         "method": {
-            "decisionUnit": "one complete missing-surface raster, never one pixel or cell",
+            "decisionUnit": (
+                "one complete two-frontier strip raster, never one edge, "
+                "pixel, or cell"
+                if statistics["surfaceCorridorMode"]
+                else "one complete missing-surface raster, never one pixel or cell"
+            ),
             "rawCtEvidence": "dense air-material-air profiles at every raster pixel and normal-depth label",
             "optimization": "multi-start alternating exact row/column Viterbi fields with truncated physical smoothness",
-            "boundaryCondition": "soft attachment to the fitted surrounding surface, strongest at the complete frontier",
+            "boundaryCondition": (
+                "soft attachment to both fitted multi-edge frontiers, "
+                "strongest along the two complete inherited arcs"
+                if statistics["surfaceCorridorMode"]
+                else "soft attachment to the fitted surrounding surface, "
+                "strongest at the complete frontier"
+            ),
             "defectHandling": "truncated depth-jump cost retains coherent delamination steps; no common layer depth is forced",
             "candidateRole": (
                 "ribbon-bank hypotheses are audited after the CT field and "

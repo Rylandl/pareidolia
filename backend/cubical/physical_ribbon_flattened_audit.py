@@ -12,6 +12,7 @@ import numpy as np
 from .contracts import VolumeSource, atomic_json, canonical_json_hash, sha256_file
 from .export import rgb_png
 from .flatten import (
+    ChartRaster,
     ComponentMesh,
     SurfaceChart,
     _draw_text,
@@ -20,12 +21,16 @@ from .flatten import (
 )
 from .physical_ribbon_bridging import _load_inputs, _load_npz, _write_npz
 from .physical_ribbon_continuity import _draw_line
-from .physical_ribbon_patch_holes import PhysicalRibbonPatchHoleSettings
+from .physical_ribbon_patch_holes import (
+    PhysicalRibbonPatchHoleSettings,
+    _sample_volume_points,
+)
 from .physical_ribbon_patch_states import (
     PHYSICAL_RIBBON_PATCH_STATE_SCHEMA,
     _prepare_component_exact_graph,
     _reconstruct_component_graph_state,
 )
+from .surface_topology import triangle_edge_region_labels
 
 
 PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA = (
@@ -46,6 +51,14 @@ class PhysicalRibbonFlattenedAuditSettings:
     minimum_boundary_edge_measurements: int = 6
     maximum_median_excess_floor_degrees: float = 5.0
     maximum_control_spread_fraction: float = 0.25
+    native_seam_along_radius_voxels: float = 4.0
+    native_seam_inward_range_voxels: tuple[float, float] = (1.5, 5.5)
+    native_seam_sample_step_voxels: float = 1.0
+    native_seam_edge_parameters: tuple[float, ...] = (0.25, 0.50, 0.75)
+    native_seam_scale_hypotheses: tuple[float, ...] = (0.50, 0.75, 1.00, 1.50)
+    native_seam_minimum_orientation_coherence: float = 0.15
+    native_seam_control_edge_multiplier: int = 3
+    native_seam_minimum_measurements: int = 6
 
     def __post_init__(self) -> None:
         if self.maximum_components < 1 or self.maximum_raster_pixels < 32:
@@ -73,6 +86,36 @@ class PhysicalRibbonFlattenedAuditSettings:
             or not 0.0 <= self.maximum_control_spread_fraction <= 1.0
         ):
             raise ValueError("texture control-spread fraction must lie in [0, 1]")
+        if (
+            not math.isfinite(self.native_seam_along_radius_voxels)
+            or self.native_seam_along_radius_voxels <= 0.0
+            or not math.isfinite(self.native_seam_sample_step_voxels)
+            or self.native_seam_sample_step_voxels <= 0.0
+        ):
+            raise ValueError("native seam sampling scales must be finite and positive")
+        inward_start, inward_stop = self.native_seam_inward_range_voxels
+        if (
+            not math.isfinite(inward_start)
+            or not math.isfinite(inward_stop)
+            or not 0.0 < inward_start < inward_stop
+        ):
+            raise ValueError("native seam inward range must be increasing and positive")
+        if not self.native_seam_edge_parameters or any(
+            not math.isfinite(value) or not 0.0 < value < 1.0
+            for value in self.native_seam_edge_parameters
+        ):
+            raise ValueError("native seam edge parameters must lie strictly in (0, 1)")
+        if not self.native_seam_scale_hypotheses or any(
+            not math.isfinite(value) or value <= 0.0
+            for value in self.native_seam_scale_hypotheses
+        ):
+            raise ValueError("native seam scale hypotheses must be finite and positive")
+        if not 0.0 <= self.native_seam_minimum_orientation_coherence <= 1.0:
+            raise ValueError("native seam coherence gate must lie in [0, 1]")
+        if self.native_seam_control_edge_multiplier < 1:
+            raise ValueError("native seam control multiplier must be positive")
+        if self.native_seam_minimum_measurements < 3:
+            raise ValueError("native seam comparison requires several measurements")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -270,6 +313,532 @@ def flattened_texture_structure(
     }, statistics
 
 
+def _native_axial_structure_axis(
+    image: np.ndarray,
+    *,
+    minimum_coherence: float,
+) -> tuple[np.ndarray | None, dict[str, float | int | bool]]:
+    """Recover one unsigned line axis from a native tangent-strip sample.
+
+    The two returned coordinates are coefficients along the physical strip's
+    along-edge and inward-tangent basis.  The lower-eigenvalue structure-tensor
+    axis follows line texture; its sign is intentionally left ambiguous.
+    """
+
+    values = np.asarray(image, dtype=np.float32)
+    if values.ndim != 2 or min(values.shape) < 3:
+        return None, {
+            "supportedSampleCount": 0,
+            "coherence": 0.0,
+            "reliable": False,
+        }
+    valid = np.isfinite(values)
+    gradient_u = np.zeros_like(values)
+    gradient_v = np.zeros_like(values)
+    gradient_u[:, 1:-1] = 0.5 * (values[:, 2:] - values[:, :-2])
+    gradient_v[1:-1] = 0.5 * (values[2:] - values[:-2])
+    supported = valid.copy()
+    supported[:, 0] = False
+    supported[:, -1] = False
+    supported[0] = False
+    supported[-1] = False
+    supported[:, 1:-1] &= valid[:, :-2] & valid[:, 2:]
+    supported[1:-1] &= valid[:-2] & valid[2:]
+    supported_count = int(np.count_nonzero(supported))
+    interior_count = max(
+        (values.shape[0] - 2) * (values.shape[1] - 2), 1
+    )
+    minimum_count = max(6, int(math.ceil(0.40 * interior_count)))
+    if supported_count < minimum_count:
+        return None, {
+            "supportedSampleCount": supported_count,
+            "coherence": 0.0,
+            "reliable": False,
+        }
+    u = gradient_u[supported].astype(np.float64)
+    v = gradient_v[supported].astype(np.float64)
+    tensor = np.asarray(
+        (
+            (float(np.dot(u, u)), float(np.dot(u, v))),
+            (float(np.dot(u, v)), float(np.dot(v, v))),
+        ),
+        dtype=np.float64,
+    )
+    eigenvalue, eigenvector = np.linalg.eigh(tensor)
+    trace = float(np.sum(eigenvalue))
+    coherence = (
+        float((eigenvalue[1] - eigenvalue[0]) / trace)
+        if trace > 1.0e-6
+        else 0.0
+    )
+    reliable = bool(
+        trace > 1.0e-6
+        and math.isfinite(coherence)
+        and coherence >= minimum_coherence
+    )
+    axis = np.asarray(eigenvector[:, 0], dtype=np.float64) if reliable else None
+    finite = values[valid]
+    contrast = (
+        float(np.percentile(finite, 90) - np.percentile(finite, 10))
+        if len(finite)
+        else 0.0
+    )
+    return axis, {
+        "supportedSampleCount": supported_count,
+        "coherence": round(coherence, 6),
+        "intensityP90MinusP10": round(contrast, 6),
+        "reliable": reliable,
+    }
+
+
+def _triangle_frame_at_edge(
+    midpoint_xyz: np.ndarray,
+    signed_normal_xyz: np.ndarray,
+    triangle: np.ndarray,
+    edge: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return shared-edge tangent, signed face normal, and inward tangent."""
+
+    points = np.asarray(midpoint_xyz, dtype=np.float64)
+    triangle_nodes = np.asarray(triangle, dtype=np.int32)
+    edge_start = points[int(edge[0])]
+    edge_stop = points[int(edge[1])]
+    tangent = edge_stop - edge_start
+    tangent_norm = float(np.linalg.norm(tangent))
+    if tangent_norm <= 1.0e-8:
+        raise ValueError("native seam edge has zero physical length")
+    tangent /= tangent_norm
+    triangle_points = points[triangle_nodes]
+    face_normal = np.cross(
+        triangle_points[1] - triangle_points[0],
+        triangle_points[2] - triangle_points[0],
+    )
+    normal_norm = float(np.linalg.norm(face_normal))
+    if normal_norm <= 1.0e-8:
+        raise ValueError("native seam triangle is physically degenerate")
+    face_normal /= normal_norm
+    fitted_normal = np.mean(
+        np.asarray(signed_normal_xyz, dtype=np.float64)[triangle_nodes], axis=0
+    )
+    if float(np.dot(face_normal, fitted_normal)) < 0.0:
+        face_normal *= -1.0
+    edge_midpoint = 0.5 * (edge_start + edge_stop)
+    inward = np.mean(triangle_points, axis=0) - edge_midpoint
+    inward -= float(np.dot(inward, tangent)) * tangent
+    inward_norm = float(np.linalg.norm(inward))
+    if inward_norm <= 1.0e-8:
+        raise ValueError("native seam triangle has no edge-transverse extent")
+    inward /= inward_norm
+    return tangent, face_normal, inward
+
+
+def _rotate_about_axis(
+    vector: np.ndarray,
+    axis: np.ndarray,
+    angle_radians: float,
+) -> np.ndarray:
+    unit_axis = np.asarray(axis, dtype=np.float64)
+    unit_axis /= max(float(np.linalg.norm(unit_axis)), 1.0e-12)
+    value = np.asarray(vector, dtype=np.float64)
+    cosine = math.cos(angle_radians)
+    sine = math.sin(angle_radians)
+    return (
+        cosine * value
+        + sine * np.cross(unit_axis, value)
+        + (1.0 - cosine) * float(np.dot(unit_axis, value)) * unit_axis
+    )
+
+
+def _transported_axial_disagreement_degrees(
+    first_axis_xyz: np.ndarray,
+    second_axis_xyz: np.ndarray,
+    edge_tangent_xyz: np.ndarray,
+    first_normal_xyz: np.ndarray,
+    second_normal_xyz: np.ndarray,
+) -> tuple[float, float]:
+    """Compare unsigned tangent axes after hinge transport around the edge."""
+
+    edge = np.asarray(edge_tangent_xyz, dtype=np.float64)
+    edge /= max(float(np.linalg.norm(edge)), 1.0e-12)
+    first_normal = np.asarray(first_normal_xyz, dtype=np.float64)
+    second_normal = np.asarray(second_normal_xyz, dtype=np.float64)
+    first_normal -= float(np.dot(first_normal, edge)) * edge
+    second_normal -= float(np.dot(second_normal, edge)) * edge
+    first_normal /= max(float(np.linalg.norm(first_normal)), 1.0e-12)
+    second_normal /= max(float(np.linalg.norm(second_normal)), 1.0e-12)
+    sine = float(np.dot(edge, np.cross(first_normal, second_normal)))
+    cosine = float(np.clip(np.dot(first_normal, second_normal), -1.0, 1.0))
+    hinge_angle = math.atan2(sine, cosine)
+    transported = _rotate_about_axis(first_axis_xyz, edge, hinge_angle)
+    transported /= max(float(np.linalg.norm(transported)), 1.0e-12)
+    second = np.asarray(second_axis_xyz, dtype=np.float64)
+    second /= max(float(np.linalg.norm(second)), 1.0e-12)
+    disagreement = math.degrees(
+        math.acos(float(np.clip(abs(np.dot(transported, second)), 0.0, 1.0)))
+    )
+    return disagreement, abs(math.degrees(hinge_angle))
+
+
+def _completion_triangle_native_edges(
+    triangle_index: np.ndarray,
+    triangles: np.ndarray,
+    *,
+    base_triangle_count: int,
+    target_triangle_indices: AbstractSet[int],
+) -> dict[str, list[tuple[tuple[int, int], int, int]]]:
+    """Classify exact proposal seams and uncontaminated local controls."""
+
+    indices = np.asarray(triangle_index, dtype=np.int64)
+    triangle_values = np.asarray(triangles, dtype=np.int32)
+    target = {int(value) for value in target_triangle_indices}
+    edge_triangle: dict[tuple[int, int], list[int]] = {}
+    for index in indices:
+        triangle = triangle_values[int(index)]
+        for edge_index, first in enumerate(triangle):
+            second = int(triangle[(edge_index + 1) % 3])
+            edge = (min(int(first), second), max(int(first), second))
+            edge_triangle.setdefault(edge, []).append(int(index))
+    seam: list[tuple[tuple[int, int], int, int]] = []
+    baseline: list[tuple[tuple[int, int], int, int]] = []
+    added: list[tuple[tuple[int, int], int, int]] = []
+    for edge, incident in edge_triangle.items():
+        if len(incident) != 2:
+            continue
+        first, second = incident
+        first_target, second_target = first in target, second in target
+        if first_target != second_target:
+            baseline_triangle = second if first_target else first
+            added_triangle = first if first_target else second
+            if baseline_triangle < base_triangle_count:
+                seam.append((edge, baseline_triangle, added_triangle))
+            continue
+        if first_target:
+            added.append((edge, first, second))
+        elif first < base_triangle_count and second < base_triangle_count:
+            baseline.append((edge, first, second))
+    seam.sort()
+    baseline.sort()
+    added.sort()
+    return {"seam": seam, "baseline": baseline, "added": added}
+
+
+def _nearby_native_control_edges(
+    seam_edges: list[tuple[tuple[int, int], int, int]],
+    control_edges: list[tuple[tuple[int, int], int, int]],
+    midpoint_xyz: np.ndarray,
+    *,
+    multiplier: int,
+) -> tuple[list[tuple[tuple[int, int], int, int]], np.ndarray]:
+    if not seam_edges or not control_edges:
+        return [], np.empty(0, dtype=np.float32)
+    points = np.asarray(midpoint_xyz, dtype=np.float64)
+    seam_midpoint = np.asarray(
+        [0.5 * (points[edge[0]] + points[edge[1]]) for edge, _, _ in seam_edges]
+    )
+    ranked: list[tuple[float, tuple[int, int], int, int]] = []
+    for edge, first, second in control_edges:
+        value = 0.5 * (points[edge[0]] + points[edge[1]])
+        distance = float(np.min(np.linalg.norm(seam_midpoint - value, axis=1)))
+        ranked.append((distance, edge, first, second))
+    ranked.sort(key=lambda value: (value[0], value[1], value[2], value[3]))
+    selected = ranked[: min(len(ranked), multiplier * len(seam_edges))]
+    return (
+        [(edge, first, second) for _, edge, first, second in selected],
+        np.asarray([distance for distance, _, _, _ in selected], dtype=np.float32),
+    )
+
+
+def _native_edge_depth_measurements(
+    edges: list[tuple[tuple[int, int], int, int]],
+    triangles: np.ndarray,
+    midpoint_xyz: np.ndarray,
+    signed_normal_xyz: np.ndarray,
+    thickness_voxels: np.ndarray,
+    source: VolumeSource,
+    volume: np.ndarray,
+    *,
+    depth_fraction: float,
+    scale: float,
+    settings: PhysicalRibbonFlattenedAuditSettings,
+) -> dict[str, Any]:
+    sample_step = scale * settings.native_seam_sample_step_voxels
+    along = np.arange(
+        -scale * settings.native_seam_along_radius_voxels,
+        scale * settings.native_seam_along_radius_voxels + 0.5 * sample_step,
+        sample_step,
+        dtype=np.float64,
+    )
+    inward_start, inward_stop = settings.native_seam_inward_range_voxels
+    inward_distance = np.arange(
+        scale * inward_start,
+        scale * inward_stop + 0.5 * sample_step,
+        sample_step,
+        dtype=np.float64,
+    )
+    along_grid, inward_grid = np.meshgrid(along, inward_distance)
+    point_values = np.asarray(midpoint_xyz, dtype=np.float64)
+    triangle_values = np.asarray(triangles, dtype=np.int32)
+    thickness = np.asarray(thickness_voxels, dtype=np.float64)
+    disagreements: list[float] = []
+    hinge_angles: list[float] = []
+    coherence: list[float] = []
+    attempted = 0
+    for edge, first_triangle, second_triangle in edges:
+        first_tangent, first_normal, first_inward = _triangle_frame_at_edge(
+            point_values,
+            signed_normal_xyz,
+            triangle_values[first_triangle],
+            edge,
+        )
+        second_tangent, second_normal, second_inward = _triangle_frame_at_edge(
+            point_values,
+            signed_normal_xyz,
+            triangle_values[second_triangle],
+            edge,
+        )
+        if float(np.dot(first_tangent, second_tangent)) < 0.0:
+            second_tangent *= -1.0
+        edge_start = point_values[edge[0]]
+        edge_stop = point_values[edge[1]]
+        side_data = (
+            (
+                first_tangent,
+                first_normal,
+                first_inward,
+                float(np.mean(thickness[triangle_values[first_triangle]])),
+            ),
+            (
+                second_tangent,
+                second_normal,
+                second_inward,
+                float(np.mean(thickness[triangle_values[second_triangle]])),
+            ),
+        )
+        sample_points: list[np.ndarray] = []
+        for tangent, normal, inward, local_thickness in side_data:
+            side_points: list[np.ndarray] = []
+            for parameter in settings.native_seam_edge_parameters:
+                edge_point = (1.0 - parameter) * edge_start + parameter * edge_stop
+                side_points.append(
+                    edge_point[None, None, :]
+                    + along_grid[:, :, None] * tangent[None, None, :]
+                    + inward_grid[:, :, None] * inward[None, None, :]
+                    + depth_fraction * local_thickness * normal[None, None, :]
+                )
+            sample_points.append(np.asarray(side_points, dtype=np.float32))
+        samples = _sample_volume_points(
+            source,
+            volume,
+            np.asarray(sample_points, dtype=np.float32),
+        )
+        for parameter_index in range(len(settings.native_seam_edge_parameters)):
+            attempted += 1
+            first_axis, first_stats = _native_axial_structure_axis(
+                samples[0, parameter_index],
+                minimum_coherence=(
+                    settings.native_seam_minimum_orientation_coherence
+                ),
+            )
+            second_axis, second_stats = _native_axial_structure_axis(
+                samples[1, parameter_index],
+                minimum_coherence=(
+                    settings.native_seam_minimum_orientation_coherence
+                ),
+            )
+            if first_axis is None or second_axis is None:
+                continue
+            first_axis_xyz = (
+                first_axis[0] * first_tangent + first_axis[1] * first_inward
+            )
+            second_axis_xyz = (
+                second_axis[0] * second_tangent + second_axis[1] * second_inward
+            )
+            disagreement, hinge_angle = _transported_axial_disagreement_degrees(
+                first_axis_xyz,
+                second_axis_xyz,
+                first_tangent,
+                first_normal,
+                second_normal,
+            )
+            disagreements.append(disagreement)
+            hinge_angles.append(hinge_angle)
+            coherence.extend(
+                (float(first_stats["coherence"]), float(second_stats["coherence"]))
+            )
+    return {
+        "scale": round(float(scale), 6),
+        "attemptedMeasurementCount": attempted,
+        "axialDisagreementDegrees": _percentiles(
+            np.asarray(disagreements, dtype=np.float32)
+        ),
+        "hingeAngleDegrees": _percentiles(np.asarray(hinge_angles, dtype=np.float32)),
+        "orientationCoherence": _percentiles(
+            np.asarray(coherence, dtype=np.float32)
+        ),
+    }
+
+
+def _native_completion_seam_audit(
+    triangle_index: np.ndarray,
+    triangles: np.ndarray,
+    target_triangle_indices: AbstractSet[int],
+    midpoint_xyz: np.ndarray,
+    signed_normal_xyz: np.ndarray,
+    thickness_voxels: np.ndarray,
+    source: VolumeSource,
+    volume: np.ndarray,
+    *,
+    base_triangle_count: int,
+    settings: PhysicalRibbonFlattenedAuditSettings,
+) -> dict[str, Any]:
+    edge_sets = _completion_triangle_native_edges(
+        triangle_index,
+        triangles,
+        base_triangle_count=base_triangle_count,
+        target_triangle_indices=target_triangle_indices,
+    )
+    controls, control_distance = _nearby_native_control_edges(
+        edge_sets["seam"],
+        edge_sets["baseline"],
+        midpoint_xyz,
+        multiplier=settings.native_seam_control_edge_multiplier,
+    )
+    depth_records: list[dict[str, Any]] = []
+    compatible_depth_count = 0
+    measured_depth_count = 0
+    for depth_index, depth_fraction in enumerate(settings.depth_fractions):
+        scale_records: list[dict[str, Any]] = []
+        for scale in settings.native_seam_scale_hypotheses:
+            seam = _native_edge_depth_measurements(
+                edge_sets["seam"],
+                triangles,
+                midpoint_xyz,
+                signed_normal_xyz,
+                thickness_voxels,
+                source,
+                volume,
+                depth_fraction=float(depth_fraction),
+                scale=float(scale),
+                settings=settings,
+            )
+            control = _native_edge_depth_measurements(
+                controls,
+                triangles,
+                midpoint_xyz,
+                signed_normal_xyz,
+                thickness_voxels,
+                source,
+                volume,
+                depth_fraction=float(depth_fraction),
+                scale=float(scale),
+                settings=settings,
+            )
+            scale_records.append(
+                {
+                    "scale": round(float(scale), 6),
+                    "seam": seam,
+                    "nearbyBaselineControl": control,
+                }
+            )
+        measurable_scale_records = [
+            record
+            for record in scale_records
+            if int(
+                record["nearbyBaselineControl"][
+                    "axialDisagreementDegrees"
+                ].get("count", 0)
+            )
+            >= settings.native_seam_minimum_measurements
+        ]
+        ranked_scale_records = (
+            measurable_scale_records if measurable_scale_records else scale_records
+        )
+        selected_scale_record = min(
+            ranked_scale_records,
+            key=lambda record: (
+                float(
+                    record["nearbyBaselineControl"][
+                        "axialDisagreementDegrees"
+                    ].get("median", float("inf"))
+                ),
+                -float(
+                    record["nearbyBaselineControl"][
+                        "orientationCoherence"
+                    ].get("median", 0.0)
+                ),
+                abs(float(record["scale"]) - 1.0),
+            ),
+        )
+        seam = selected_scale_record["seam"]
+        control = selected_scale_record["nearbyBaselineControl"]
+        compatibility = boundary_texture_compatibility(
+            seam["axialDisagreementDegrees"],
+            control["axialDisagreementDegrees"],
+            minimum_measurements=settings.native_seam_minimum_measurements,
+            median_excess_floor_degrees=(
+                settings.maximum_median_excess_floor_degrees
+            ),
+            control_spread_fraction=settings.maximum_control_spread_fraction,
+        )
+        measured = bool(compatibility["measured"])
+        compatible = (
+            bool(compatibility["compatible"])
+            if measured
+            else None
+        )
+        measured_depth_count += int(measured)
+        compatible_depth_count += int(compatible is True)
+        depth_record: dict[str, Any] = {
+            "depthIndex": depth_index,
+            "depthFraction": round(float(depth_fraction), 6),
+            "selectedScale": selected_scale_record["scale"],
+            "seam": seam,
+            "nearbyBaselineControl": control,
+            "scaleHypotheses": scale_records,
+            "nativeSeamFiberCompatibilityMeasured": measured,
+            "nativeSeamFiberCompatible": compatible,
+        }
+        if measured:
+            depth_record["nativeSeamMedianExcessDegrees"] = compatibility[
+                "medianExcessDegrees"
+            ]
+            depth_record["nativeSeamMedianExcessAllowanceDegrees"] = compatibility[
+                "medianExcessAllowanceDegrees"
+            ]
+        depth_records.append(depth_record)
+    return {
+        "seamEdgeCount": len(edge_sets["seam"]),
+        "candidateBaselineControlEdgeCount": len(edge_sets["baseline"]),
+        "selectedBaselineControlEdgeCount": len(controls),
+        "addedInteriorEdgeCount": len(edge_sets["added"]),
+        "selectedControlDistanceVoxels": _percentiles(control_distance),
+        "stripAlongRadiusVoxels": round(
+            settings.native_seam_along_radius_voxels, 6
+        ),
+        "stripInwardRangeVoxels": [
+            round(float(value), 6)
+            for value in settings.native_seam_inward_range_voxels
+        ],
+        "stripSampleStepVoxels": round(
+            settings.native_seam_sample_step_voxels, 6
+        ),
+        "edgeParameters": [
+            round(float(value), 6)
+            for value in settings.native_seam_edge_parameters
+        ],
+        "scaleHypotheses": [
+            round(float(value), 6)
+            for value in settings.native_seam_scale_hypotheses
+        ],
+        "nativeSeamFiberMeasuredDepthCount": measured_depth_count,
+        "nativeSeamFiberCompatibleDepthCount": compatible_depth_count,
+        "nativeSeamFiberCompatible": (
+            bool(compatible_depth_count) if measured_depth_count else None
+        ),
+        "depths": depth_records,
+    }
+
+
 def _resolve_surface_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
     value = Path(root).resolve()
     if value.is_file():
@@ -456,6 +1025,173 @@ def _point_pair_orientation_disagreement(
     return _percentiles(np.asarray(values, dtype=np.float32))
 
 
+def _sample_chart_jacobian_fiber_axis(
+    angle: np.ndarray,
+    coherence: np.ndarray,
+    raster: ChartRaster,
+    point_uv: np.ndarray,
+    expected_local_triangle: int,
+    triangle: np.ndarray,
+    chart_uv: np.ndarray,
+    midpoint_xyz: np.ndarray,
+    chart_low: np.ndarray,
+    padding: float,
+    minimum_coherence: float,
+    *,
+    search_radius_pixels: int = 4,
+    structure_radius_pixels: int = 2,
+) -> tuple[np.ndarray | None, float]:
+    """Map one local raster fiber axis back through its triangle Jacobian."""
+
+    value = (
+        (np.asarray(point_uv, dtype=np.float64) - chart_low)
+        / raster.pixel_step_voxels
+        + padding
+    )
+    target_x, target_y = float(value[0]), float(value[1])
+    rounded_x, rounded_y = int(round(target_x)), int(round(target_y))
+    y_start = max(rounded_y - search_radius_pixels, 0)
+    y_stop = min(rounded_y + search_radius_pixels + 1, angle.shape[0])
+    x_start = max(rounded_x - search_radius_pixels, 0)
+    x_stop = min(rounded_x + search_radius_pixels + 1, angle.shape[1])
+    owner = raster.triangle_index[y_start:y_stop, x_start:x_stop]
+    owner_y, owner_x = np.nonzero(owner == expected_local_triangle)
+    if not len(owner_y):
+        return None, 0.0
+    global_y = owner_y + y_start
+    global_x = owner_x + x_start
+    distance_squared = (global_x - target_x) ** 2 + (global_y - target_y) ** 2
+    closest = int(np.argmin(distance_squared))
+    center_y, center_x = int(global_y[closest]), int(global_x[closest])
+    local_y_start = max(center_y - structure_radius_pixels, 0)
+    local_y_stop = min(center_y + structure_radius_pixels + 1, angle.shape[0])
+    local_x_start = max(center_x - structure_radius_pixels, 0)
+    local_x_stop = min(center_x + structure_radius_pixels + 1, angle.shape[1])
+    local_coherence = coherence[
+        local_y_start:local_y_stop, local_x_start:local_x_stop
+    ]
+    local_angle = angle[local_y_start:local_y_stop, local_x_start:local_x_stop]
+    member = np.isfinite(local_angle) & (local_coherence >= minimum_coherence)
+    if np.count_nonzero(member) < 3:
+        return None, 0.0
+    weight = np.square(local_coherence[member].astype(np.float64))
+    doubled = 2.0 * local_angle[member].astype(np.float64)
+    vector_x = float(np.sum(weight * np.cos(doubled)))
+    vector_y = float(np.sum(weight * np.sin(doubled)))
+    if math.hypot(vector_x, vector_y) < 0.15 * float(np.sum(weight)):
+        return None, 0.0
+    gradient_angle = 0.5 * math.atan2(vector_y, vector_x)
+    # The structure tensor reports the dominant gradient covector.  Its
+    # perpendicular is the chart-space tangent to the same intensity line.
+    fiber_uv = np.asarray(
+        (-math.sin(gradient_angle), math.cos(gradient_angle)),
+        dtype=np.float64,
+    )
+    triangle_nodes = np.asarray(triangle, dtype=np.int32)
+    uv = np.asarray(chart_uv, dtype=np.float64)[triangle_nodes]
+    xyz = np.asarray(midpoint_xyz, dtype=np.float64)[triangle_nodes]
+    uv_basis = np.column_stack((uv[1] - uv[0], uv[2] - uv[0]))
+    determinant = float(np.linalg.det(uv_basis))
+    if abs(determinant) <= 1.0e-10:
+        return None, 0.0
+    xyz_basis = np.column_stack((xyz[1] - xyz[0], xyz[2] - xyz[0]))
+    axis_xyz = xyz_basis @ np.linalg.solve(uv_basis, fiber_uv)
+    axis_norm = float(np.linalg.norm(axis_xyz))
+    if axis_norm <= 1.0e-10:
+        return None, 0.0
+    return axis_xyz / axis_norm, round(float(np.median(local_coherence[member])), 6)
+
+
+def _chart_jacobian_edge_measurements(
+    edges: list[tuple[tuple[int, int], int, int]],
+    component_triangle_index: np.ndarray,
+    triangles: np.ndarray,
+    chart_uv: np.ndarray,
+    midpoint_xyz: np.ndarray,
+    signed_normal_xyz: np.ndarray,
+    structure: Mapping[str, np.ndarray],
+    raster: ChartRaster,
+    chart_low: np.ndarray,
+    *,
+    minimum_coherence: float,
+) -> dict[str, Any]:
+    global_to_local = {
+        int(global_index): local_index
+        for local_index, global_index in enumerate(
+            np.asarray(component_triangle_index, dtype=np.int64)
+        )
+    }
+    triangle_values = np.asarray(triangles, dtype=np.int32)
+    uv = np.asarray(chart_uv, dtype=np.float64)
+    disagreements: list[float] = []
+    hinge_angles: list[float] = []
+    coherence_values: list[float] = []
+    attempted = 0
+    for edge, first_triangle, second_triangle in edges:
+        if first_triangle not in global_to_local or second_triangle not in global_to_local:
+            continue
+        first_tangent, first_normal, _ = _triangle_frame_at_edge(
+            midpoint_xyz,
+            signed_normal_xyz,
+            triangle_values[first_triangle],
+            edge,
+        )
+        _, second_normal, _ = _triangle_frame_at_edge(
+            midpoint_xyz,
+            signed_normal_xyz,
+            triangle_values[second_triangle],
+            edge,
+        )
+        edge_start, edge_stop = uv[np.asarray(edge, dtype=np.int32)]
+        for parameter in (0.25, 0.50, 0.75):
+            attempted += 1
+            edge_point = (1.0 - parameter) * edge_start + parameter * edge_stop
+            axes: list[np.ndarray] = []
+            coherences: list[float] = []
+            for triangle_index in (first_triangle, second_triangle):
+                centroid = np.mean(uv[triangle_values[triangle_index]], axis=0)
+                sample_uv = edge_point + 0.40 * (centroid - edge_point)
+                axis, local_coherence = _sample_chart_jacobian_fiber_axis(
+                    structure["angleRadians"],
+                    structure["coherence"],
+                    raster,
+                    sample_uv,
+                    global_to_local[triangle_index],
+                    triangle_values[triangle_index],
+                    uv,
+                    midpoint_xyz,
+                    chart_low,
+                    5.0,
+                    minimum_coherence,
+                )
+                if axis is None:
+                    break
+                axes.append(axis)
+                coherences.append(local_coherence)
+            if len(axes) != 2:
+                continue
+            disagreement, hinge_angle = _transported_axial_disagreement_degrees(
+                axes[0],
+                axes[1],
+                first_tangent,
+                first_normal,
+                second_normal,
+            )
+            disagreements.append(disagreement)
+            hinge_angles.append(hinge_angle)
+            coherence_values.extend(coherences)
+    return {
+        "attemptedMeasurementCount": attempted,
+        "axialDisagreementDegrees": _percentiles(
+            np.asarray(disagreements, dtype=np.float32)
+        ),
+        "hingeAngleDegrees": _percentiles(np.asarray(hinge_angles, dtype=np.float32)),
+        "orientationCoherence": _percentiles(
+            np.asarray(coherence_values, dtype=np.float32)
+        ),
+    }
+
+
 def _edge_orientation_disagreement(
     angle: np.ndarray,
     coherence: np.ndarray,
@@ -611,6 +1347,7 @@ def _completion_proposals_by_component(
         surface["completionTriangleFrontierIndex"], dtype=np.int32
     ).reshape((-1, 3))
     triangle_values = np.asarray(triangles, dtype=np.int32).reshape((-1, 3))
+    triangle_region = triangle_edge_region_labels(triangle_values)
     if len(hole_row) != len(accepted) or len(offset) != len(accepted) + 1:
         raise ValueError("completion proposal provenance offsets differ")
     if offset[0] != 0 or np.any(np.diff(offset) < 0) or offset[-1] != len(catalog):
@@ -639,12 +1376,18 @@ def _completion_proposals_by_component(
         if len(component_values) != 1 or int(component_values[0]) < 0:
             raise ValueError("completion triangles do not belong to one component")
         component_id = int(component_values[0])
+        region_values = np.unique(triangle_region[final_indices])
+        if len(region_values) != 1:
+            raise ValueError(
+                "one completion proposal spans multiple chart atlas pages"
+            )
         result.setdefault(component_id, []).append(
             {
                 "proposalIndex": proposal_index,
                 "holeRow": int(hole_row[proposal_index]),
                 "triangleIndex": final_indices,
                 "triangleCount": int(stop - start),
+                "triangleRegionId": int(region_values[0]),
             }
         )
     return result
@@ -1034,7 +1777,12 @@ def run_physical_ribbon_flattened_audit(
         },
         "source": source.source_identity,
         "settings": resolved.record(),
-        "implementationSha256": sha256_file(Path(__file__)),
+        "implementationSha256": {
+            "flattenedAudit": sha256_file(Path(__file__)),
+            "surfaceTopology": sha256_file(
+                Path(triangle_edge_region_labels.__code__.co_filename)
+            ),
+        },
     }
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
@@ -1088,6 +1836,7 @@ def run_physical_ribbon_flattened_audit(
     midpoint = np.asarray(surface["midpointXYZ"], dtype=np.float32)
     normal = np.asarray(surface["signedNormalXYZ"], dtype=np.float32)
     thickness = np.asarray(surface["thicknessVoxels"], dtype=np.float32)
+    triangle_region = triangle_edge_region_labels(triangle)
     completion_proposals_by_component = (
         _completion_proposals_by_component(
             surface,
@@ -1099,31 +1848,71 @@ def run_physical_ribbon_flattened_audit(
         else {}
     )
     if completion_triangle_provenance:
-        added_triangle = triangle[base_triangle_count:]
-        added_triangle_component = component[added_triangle[:, 0]]
-        changed_component, changed_count = np.unique(
-            added_triangle_component[added_triangle_component >= 0],
+        added_triangle_index = np.arange(
+            base_triangle_count, len(triangle), dtype=np.int32
+        )
+        changed_region, changed_count = np.unique(
+            triangle_region[added_triangle_index],
             return_counts=True,
         )
+        page_candidates: list[tuple[int, int, int, int]] = []
+        for region_id, added_count in zip(changed_region, changed_count):
+            page_triangle_index = np.flatnonzero(
+                triangle_region == int(region_id)
+            )
+            page_vertex = np.unique(triangle[page_triangle_index])
+            component_values = np.unique(component[page_vertex])
+            if len(component_values) != 1 or int(component_values[0]) < 0:
+                raise ValueError(
+                    "one edge-connected chart page spans surface components"
+                )
+            page_candidates.append(
+                (
+                    int(component_values[0]),
+                    int(region_id),
+                    int(added_count),
+                    int(len(page_triangle_index)),
+                )
+            )
+        page_candidates.sort(
+            key=lambda value: (-value[2], -value[3], value[0], value[1])
+        )
+        ranked: list[tuple[int, int | None]] = [
+            (component_id, region_id)
+            for component_id, region_id, _added_count, _triangle_count in (
+                page_candidates[: resolved.maximum_components]
+            )
+        ]
+        changed_component = np.asarray(
+            sorted({value[0] for value in page_candidates}), dtype=np.int32
+        )
+        changed_atlas_page_count = len(page_candidates)
     else:
         changed_component, changed_count = np.unique(
             component[added & (component >= 0)], return_counts=True
         )
-    if not len(changed_component):
-        labels, counts = np.unique(component[selected], return_counts=True)
-        order = np.argsort(-counts)
-        ranked = labels[order[: resolved.maximum_components]]
-    else:
-        size = np.bincount(component[selected])
-        order = sorted(
-            range(len(changed_component)),
-            key=lambda index: (
-                -int(changed_count[index]),
-                -int(size[changed_component[index]]),
-                int(changed_component[index]),
-            ),
-        )
-        ranked = changed_component[order[: resolved.maximum_components]]
+        changed_atlas_page_count = int(len(changed_component))
+        if not len(changed_component):
+            labels, counts = np.unique(component[selected], return_counts=True)
+            order = np.argsort(-counts)
+            ranked = [
+                (int(value), None)
+                for value in labels[order[: resolved.maximum_components]]
+            ]
+        else:
+            size = np.bincount(component[selected])
+            order = sorted(
+                range(len(changed_component)),
+                key=lambda index: (
+                    -int(changed_count[index]),
+                    -int(size[changed_component[index]]),
+                    int(changed_component[index]),
+                ),
+            )
+            ranked = [
+                (int(changed_component[index]), None)
+                for index in order[: resolved.maximum_components]
+            ]
 
     columns = 2
     tile_width, tile_height = 650, 560
@@ -1136,15 +1925,20 @@ def run_physical_ribbon_flattened_audit(
     records: list[dict[str, Any]] = []
     completion_records: list[dict[str, Any]] = []
     displayed = 0
-    for component_id_value in ranked:
-        component_id = int(component_id_value)
-        component_triangle_index = np.flatnonzero(
-            np.all(component[triangle] == component_id, axis=1)
+    for component_id, atlas_region_id in ranked:
+        component_triangle_index = (
+            np.flatnonzero(triangle_region == atlas_region_id)
+            if atlas_region_id is not None
+            else np.flatnonzero(
+                np.all(component[triangle] == component_id, axis=1)
+            )
         )
         component_triangle = triangle[component_triangle_index]
         if not len(component_triangle):
             continue
         vertex = np.unique(component_triangle)
+        if not np.all(component[vertex] == component_id):
+            raise ValueError("chart atlas page spans component identities")
         if not np.all(np.isfinite(chart_uv[vertex])):
             continue
         local_triangle = np.searchsorted(vertex, component_triangle).astype(np.int32)
@@ -1184,7 +1978,8 @@ def run_physical_ribbon_flattened_audit(
         depth_records: list[dict[str, Any]] = []
         structures: list[dict[str, np.ndarray]] = []
         chart_low = np.min(chart.uv, axis=0)
-        component_added = added & (component == component_id)
+        component_added = np.zeros_like(added)
+        component_added[vertex] = added[vertex]
         component_added_triangle_count = int(
             np.count_nonzero(component_triangle_index >= base_triangle_count)
             if completion_triangle_provenance
@@ -1228,22 +2023,51 @@ def run_physical_ribbon_flattened_audit(
             boundary_edge = provenance_mask("seamEdge")
             interior_added_edge = provenance_mask("addedInteriorEdge")
             baseline_edge = provenance_mask("baselineInteriorEdge")
-            for proposal in completion_proposals_by_component.get(component_id, ()):
+            page_proposals = [
+                proposal
+                for proposal in completion_proposals_by_component.get(
+                    component_id, ()
+                )
+                if atlas_region_id is None
+                or int(proposal["triangleRegionId"]) == atlas_region_id
+            ]
+            for proposal in page_proposals:
+                proposal_triangle_indices = {
+                    int(value) for value in proposal["triangleIndex"]
+                }
                 proposal_pairs = _completion_triangle_texture_pairs(
                     component_triangle_index,
                     triangle,
                     chart_uv,
                     base_triangle_count=base_triangle_count,
                     pixel_step=raster.pixel_step_voxels,
-                    target_triangle_indices={
-                        int(value) for value in proposal["triangleIndex"]
-                    },
+                    target_triangle_indices=proposal_triangle_indices,
+                )
+                chart_edge_sets = _completion_triangle_native_edges(
+                    component_triangle_index,
+                    triangle,
+                    base_triangle_count=base_triangle_count,
+                    target_triangle_indices=proposal_triangle_indices,
+                )
+                chart_control_edges, chart_control_distance = (
+                    _nearby_native_control_edges(
+                        chart_edge_sets["seam"],
+                        chart_edge_sets["baseline"],
+                        midpoint,
+                        multiplier=resolved.native_seam_control_edge_multiplier,
+                    )
                 )
                 component_completion_records.append(
                     {
                         "proposalIndex": int(proposal["proposalIndex"]),
                         "holeRow": int(proposal["holeRow"]),
                         "componentId": component_id,
+                        "triangleRegionId": int(
+                            proposal["triangleRegionId"]
+                        ),
+                        "chartAtlasPage": (
+                            f"{component_id}:{proposal['triangleRegionId']}"
+                        ),
                         "triangleCount": int(proposal["triangleCount"]),
                         "boundaryEdgeCount": int(
                             len(proposal_pairs["seamEdge"])
@@ -1251,6 +2075,21 @@ def run_physical_ribbon_flattened_audit(
                         "interiorEdgeCount": int(
                             len(proposal_pairs["addedInteriorEdge"])
                         ),
+                        "nativeSeamFiber": {
+                            "seamEdgeCount": len(chart_edge_sets["seam"]),
+                            "candidateBaselineControlEdgeCount": len(
+                                chart_edge_sets["baseline"]
+                            ),
+                            "selectedBaselineControlEdgeCount": len(
+                                chart_control_edges
+                            ),
+                            "selectedControlDistanceVoxels": _percentiles(
+                                chart_control_distance
+                            ),
+                            "depths": [],
+                        },
+                        "_nativeSeamEdges": chart_edge_sets["seam"],
+                        "_nativeControlEdges": chart_control_edges,
                         "texturePairs": proposal_pairs,
                         "depths": [],
                     }
@@ -1361,6 +2200,68 @@ def run_physical_ribbon_flattened_audit(
                         resolved.minimum_orientation_coherence,
                     )
                 )
+                chart_jacobian_seam = _chart_jacobian_edge_measurements(
+                    proposal_record["_nativeSeamEdges"],
+                    component_triangle_index,
+                    triangle,
+                    chart_uv,
+                    midpoint,
+                    normal,
+                    structure,
+                    raster,
+                    chart_low,
+                    minimum_coherence=resolved.minimum_orientation_coherence,
+                )
+                chart_jacobian_control = _chart_jacobian_edge_measurements(
+                    proposal_record["_nativeControlEdges"],
+                    component_triangle_index,
+                    triangle,
+                    chart_uv,
+                    midpoint,
+                    normal,
+                    structure,
+                    raster,
+                    chart_low,
+                    minimum_coherence=resolved.minimum_orientation_coherence,
+                )
+                chart_jacobian_compatibility = boundary_texture_compatibility(
+                    chart_jacobian_seam["axialDisagreementDegrees"],
+                    chart_jacobian_control["axialDisagreementDegrees"],
+                    minimum_measurements=resolved.native_seam_minimum_measurements,
+                    median_excess_floor_degrees=(
+                        resolved.maximum_median_excess_floor_degrees
+                    ),
+                    control_spread_fraction=(
+                        resolved.maximum_control_spread_fraction
+                    ),
+                )
+                chart_jacobian_depth: dict[str, Any] = {
+                    "depthIndex": depth_index,
+                    "depthFraction": round(float(depth_fraction), 6),
+                    "depthOffsetVoxels": round(float(depth_offset), 6),
+                    "seam": chart_jacobian_seam,
+                    "nearbyBaselineControl": chart_jacobian_control,
+                    "nativeSeamFiberCompatibilityMeasured": bool(
+                        chart_jacobian_compatibility["measured"]
+                    ),
+                    "nativeSeamFiberCompatible": (
+                        bool(chart_jacobian_compatibility["compatible"])
+                        if chart_jacobian_compatibility["measured"]
+                        else None
+                    ),
+                }
+                if chart_jacobian_compatibility["measured"]:
+                    chart_jacobian_depth[
+                        "nativeSeamMedianExcessDegrees"
+                    ] = chart_jacobian_compatibility["medianExcessDegrees"]
+                    chart_jacobian_depth[
+                        "nativeSeamMedianExcessAllowanceDegrees"
+                    ] = chart_jacobian_compatibility[
+                        "medianExcessAllowanceDegrees"
+                    ]
+                proposal_record["nativeSeamFiber"]["depths"].append(
+                    chart_jacobian_depth
+                )
                 proposal_record["depths"].append(
                     {
                         "depthIndex": depth_index,
@@ -1393,7 +2294,35 @@ def run_physical_ribbon_flattened_audit(
                 proposal_record["depths"], resolved
             )
             proposal_record.update(proposal_summary)
+            chart_jacobian_depths = proposal_record[
+                "nativeSeamFiber"
+            ]["depths"]
+            chart_jacobian_measured_count = sum(
+                bool(record["nativeSeamFiberCompatibilityMeasured"])
+                for record in chart_jacobian_depths
+            )
+            chart_jacobian_compatible_count = sum(
+                record["nativeSeamFiberCompatible"] is True
+                for record in chart_jacobian_depths
+            )
+            proposal_record["nativeSeamFiber"].update(
+                {
+                    "nativeSeamFiberMeasuredDepthCount": (
+                        chart_jacobian_measured_count
+                    ),
+                    "nativeSeamFiberCompatibleDepthCount": (
+                        chart_jacobian_compatible_count
+                    ),
+                    "nativeSeamFiberCompatible": (
+                        bool(chart_jacobian_compatible_count)
+                        if chart_jacobian_measured_count
+                        else None
+                    ),
+                }
+            )
             proposal_record.pop("texturePairs")
+            proposal_record.pop("_nativeSeamEdges")
+            proposal_record.pop("_nativeControlEdges")
             completion_records.append(proposal_record)
         chosen_depth = max(
             range(len(depth_records)),
@@ -1485,7 +2414,9 @@ def run_physical_ribbon_flattened_audit(
             tile_x + 10,
             tile_y + 12,
             (
-                f"C {component_id} N {len(vertex)} +{np.count_nonzero(component_added)} "
+                f"C {component_id}"
+                f"{f' R {atlas_region_id}' if atlas_region_id is not None else ''} "
+                f"N {len(vertex)} +{np.count_nonzero(component_added)} "
                 f"T+{component_added_triangle_count} "
                 f"D {resolved.depth_fractions[chosen_depth]:+.2f} "
                 f"Q {chosen_record['medianCoherence']:.2f}"
@@ -1495,7 +2426,18 @@ def run_physical_ribbon_flattened_audit(
         records.append(
             {
                 "componentId": component_id,
+                "triangleRegionId": (
+                    int(atlas_region_id)
+                    if atlas_region_id is not None
+                    else None
+                ),
+                "chartAtlasPage": (
+                    f"{component_id}:{atlas_region_id}"
+                    if atlas_region_id is not None
+                    else str(component_id)
+                ),
                 "ribbonCount": int(np.count_nonzero(component == component_id)),
+                "atlasPageVertexCount": int(len(vertex)),
                 "surfaceVertexCount": int(len(vertex)),
                 "triangleCount": int(len(component_triangle)),
                 "addedRibbonCount": int(np.count_nonzero(component_added)),
@@ -1507,6 +2449,24 @@ def run_physical_ribbon_flattened_audit(
                     int(record["holeRow"])
                     for record in component_completion_records
                 ],
+                "nativeSeamFiberMeasuredCompletionCount": int(
+                    sum(
+                        record["nativeSeamFiber"][
+                            "nativeSeamFiberCompatible"
+                        ]
+                        is not None
+                        for record in component_completion_records
+                    )
+                ),
+                "nativeSeamFiberCompatibleCompletionCount": int(
+                    sum(
+                        record["nativeSeamFiber"][
+                            "nativeSeamFiberCompatible"
+                        ]
+                        is True
+                        for record in component_completion_records
+                    )
+                ),
                 "chosenDepthIndex": int(chosen_depth),
                 "boundaryTextureMeasuredDepthCount": measured_depth_count,
                 "boundaryTextureCompatibleDepthCount": compatible_depth_count,
@@ -1521,18 +2481,33 @@ def run_physical_ribbon_flattened_audit(
         _draw_text(canvas, 20, 20, "NO ELIGIBLE CHANGED SURFACE", (224, 231, 239), scale=2)
     montage_path.write_bytes(rgb_png(canvas))
     finished = time.monotonic()
-    compatible_component = [
+    compatible_component = sorted({
         int(record["componentId"])
         for record in records
         if record["boundaryTextureCompatible"] is True
-    ]
-    incompatible_component = [
+    })
+    incompatible_component = sorted({
         int(record["componentId"])
         for record in records
         if record["boundaryTextureCompatible"] is False
-    ]
-    unmeasured_component = [
+    })
+    unmeasured_component = sorted({
         int(record["componentId"])
+        for record in records
+        if record["boundaryTextureCompatible"] is None
+    })
+    compatible_page = [
+        str(record["chartAtlasPage"])
+        for record in records
+        if record["boundaryTextureCompatible"] is True
+    ]
+    incompatible_page = [
+        str(record["chartAtlasPage"])
+        for record in records
+        if record["boundaryTextureCompatible"] is False
+    ]
+    unmeasured_page = [
+        str(record["chartAtlasPage"])
         for record in records
         if record["boundaryTextureCompatible"] is None
     ]
@@ -1551,6 +2526,21 @@ def run_physical_ribbon_flattened_audit(
         for record in completion_records
         if record["boundaryTextureCompatible"] is None
     ]
+    native_compatible_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["nativeSeamFiber"]["nativeSeamFiberCompatible"] is True
+    ]
+    native_incompatible_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["nativeSeamFiber"]["nativeSeamFiberCompatible"] is False
+    ]
+    native_unmeasured_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["nativeSeamFiber"]["nativeSeamFiberCompatible"] is None
+    ]
     payload: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA,
         "version": PHYSICAL_RIBBON_FLATTENED_AUDIT_VERSION,
@@ -1565,7 +2555,11 @@ def run_physical_ribbon_flattened_audit(
                 else 0
             ),
             "changedComponentCount": int(len(changed_component)),
-            "flattenedComponentCount": int(displayed),
+            "changedAtlasPageCount": int(changed_atlas_page_count),
+            "flattenedComponentCount": int(
+                len({int(record["componentId"]) for record in records})
+            ),
+            "flattenedAtlasPageCount": int(displayed),
             "boundaryTextureCompatibleComponentCount": len(
                 compatible_component
             ),
@@ -1578,6 +2572,14 @@ def run_physical_ribbon_flattened_audit(
             "boundaryTextureCompatibleComponents": compatible_component,
             "boundaryTextureIncompatibleComponents": incompatible_component,
             "boundaryTextureUnmeasuredComponents": unmeasured_component,
+            "boundaryTextureCompatibleAtlasPageCount": len(compatible_page),
+            "boundaryTextureIncompatibleAtlasPageCount": len(
+                incompatible_page
+            ),
+            "boundaryTextureUnmeasuredAtlasPageCount": len(unmeasured_page),
+            "boundaryTextureCompatibleAtlasPages": compatible_page,
+            "boundaryTextureIncompatibleAtlasPages": incompatible_page,
+            "boundaryTextureUnmeasuredAtlasPages": unmeasured_page,
             "flattenedCompletionProposalCount": len(completion_records),
             "boundaryTextureCompatibleCompletionCount": len(
                 compatible_completion
@@ -1596,6 +2598,24 @@ def run_physical_ribbon_flattened_audit(
             ),
             "boundaryTextureUnmeasuredCompletionHoleRows": (
                 unmeasured_completion
+            ),
+            "nativeSeamFiberCompatibleCompletionCount": len(
+                native_compatible_completion
+            ),
+            "nativeSeamFiberIncompatibleCompletionCount": len(
+                native_incompatible_completion
+            ),
+            "nativeSeamFiberUnmeasuredCompletionCount": len(
+                native_unmeasured_completion
+            ),
+            "nativeSeamFiberCompatibleCompletionHoleRows": (
+                native_compatible_completion
+            ),
+            "nativeSeamFiberIncompatibleCompletionHoleRows": (
+                native_incompatible_completion
+            ),
+            "nativeSeamFiberUnmeasuredCompletionHoleRows": (
+                native_unmeasured_completion
             ),
             "completionProposals": completion_records,
             "components": records,
@@ -1617,10 +2637,17 @@ def run_physical_ribbon_flattened_audit(
             "measurement": (
                 "native CT sampled on exact intrinsic charts at fixed physical "
                 "depth fractions with local axial structure-tensor continuity; "
+                "edge-disconnected triangle regions are independent chart "
+                "atlas pages, so arbitrary cross-page UV overlap cannot veto "
+                "or contaminate a physical join; "
                 "dense completions use exact baseline-versus-added triangle "
                 "provenance so boundary-only patches remain measurable, and "
                 "each proposal is scored independently so component averages "
-                "cannot conceal a locally incompatible closure"
+                "cannot conceal a locally incompatible closure; completion "
+                "seams additionally map local fiber axes through each owning "
+                "triangle's chart-to-physical Jacobian and compare them after "
+                "physical hinge transport, making their verdict independent "
+                "of global atlas distortion"
             ),
             "compatibility": (
                 "a changed boundary is compatible when at least one fixed "

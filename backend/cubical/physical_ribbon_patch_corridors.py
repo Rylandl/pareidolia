@@ -2607,7 +2607,14 @@ def write_patch_corridor_montage(
     selected_model = np.asarray(scored["corridorSelectedModel"], dtype=np.int32)
     rank = np.asarray(scored["corridorModelRankScore"], dtype=np.float32)
     selected_rank = rank[np.arange(len(scored_corridor)), selected_model]
-    order = np.argsort(-selected_rank, kind="stable")[:maximum_corridors]
+    evidence_eligible = (
+        np.asarray(reconfiguration["corridorEvidenceEligible"]) > 0
+        if reconfiguration is not None
+        else np.ones(len(scored_corridor), dtype=bool)
+    )
+    order = np.lexsort((-selected_rank, ~evidence_eligible))[
+        :maximum_corridors
+    ]
     columns = 4
     tile_width, tile_height = 320, 230
     rows = max(int(math.ceil(len(order) / columns)), 1)
@@ -2640,11 +2647,6 @@ def write_patch_corridor_montage(
         scored["corridorZeroShiftCompetingMargin"], dtype=np.float32
     )
     pair_offset = np.asarray(corridors["corridorPairOffset"], dtype=np.int64)
-    evidence_eligible = (
-        np.asarray(reconfiguration["corridorEvidenceEligible"]) > 0
-        if reconfiguration is not None
-        else np.ones(len(scored_corridor), dtype=bool)
-    )
     successful = (
         np.asarray(replay["corridorReplayProposalSuccessful"]) > 0
         if replay is not None
