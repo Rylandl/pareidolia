@@ -1,0 +1,8 @@
+{
+  "maximum_variants_per_corridor": 8,
+  "minimum_one_sided_additions_per_variant": 1,
+  "maximum_preview_components": 8,
+  "component_assignment_beam_width": 256,
+  "maximum_retained_states_per_component": 16,
+  "global_assignment_beam_width": 4096
+}

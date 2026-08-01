@@ -126,6 +126,7 @@ def build_paired_boundary_continuity(
     processing_world_start_xyz: np.ndarray,
     sampling_stride_voxels: int,
     settings: PhysicalRibbonContinuitySettings,
+    frontier_bank_index: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Build and select a label-free paired-boundary continuation graph."""
 
@@ -135,13 +136,23 @@ def build_paired_boundary_continuity(
     rank_target_all = np.asarray(ribbon["targetRayRank"], dtype=np.int32)
     score_all = np.asarray(ribbon["physicalEvidenceScore"], dtype=np.float32)
     mutual_all = np.asarray(ribbon["mutualFirstHit"]) > 0
-    frontier_mask = (
-        (np.asarray(ribbon["bidirectional"]) > 0)
-        & (rank_source_all <= settings.maximum_bidirectional_ray_rank)
-        & (rank_target_all >= 0)
-        & (rank_target_all <= settings.maximum_bidirectional_ray_rank)
-    )
-    bank_index = np.flatnonzero(frontier_mask).astype(np.int32)
+    if frontier_bank_index is None:
+        frontier_mask = (
+            (np.asarray(ribbon["bidirectional"]) > 0)
+            & (rank_source_all <= settings.maximum_bidirectional_ray_rank)
+            & (rank_target_all >= 0)
+            & (rank_target_all <= settings.maximum_bidirectional_ray_rank)
+        )
+        bank_index = np.flatnonzero(frontier_mask).astype(np.int32)
+    else:
+        bank_index = np.unique(
+            np.asarray(frontier_bank_index, dtype=np.int32)
+        )
+        if (
+            np.any(bank_index < 0)
+            or np.any(bank_index >= len(source_all))
+        ):
+            raise ValueError("explicit continuity frontier leaves the ribbon bank")
     source = source_all[bank_index]
     target = target_all[bank_index]
     midpoint = np.asarray(ribbon["midpointXYZ"], dtype=np.float32)[bank_index]
@@ -314,12 +325,22 @@ def build_paired_boundary_continuity(
         (degree >= settings.minimum_support_degree)
         & (tangent_rank_ratio >= settings.minimum_tangent_rank_ratio)
     ) | (mutual & (degree > 0))
+    effective_source_rank = np.where(
+        rank_source >= 0,
+        rank_source,
+        settings.maximum_bidirectional_ray_rank + 1,
+    )
+    effective_target_rank = np.where(
+        rank_target >= 0,
+        rank_target,
+        settings.maximum_bidirectional_ray_rank + 1,
+    )
     objective = (
         score
         + 0.16 * np.log1p(degree)
         + 0.30 * np.clip(tangent_rank_ratio, 0.0, 1.0)
         + 0.25 * mutual
-        - 0.035 * (rank_source + rank_target)
+        - 0.035 * (effective_source_rank + effective_target_rank)
     )
     order = np.argsort(-objective)
     used_interface = np.zeros(len(interface_position), dtype=bool)
@@ -410,9 +431,16 @@ def build_paired_boundary_continuity(
         "edgeThicknessChangeVoxels": thickness_change.astype(np.float32),
         "edgeBoundaryShiftDifferenceVoxels": shift_difference.astype(np.float32),
     }
+    frontier_bidirectional = np.asarray(ribbon["bidirectional"])[bank_index] > 0
     stats = {
         "ribbonBankCandidateCount": int(len(source_all)),
-        "bidirectionalFrontierCount": int(node_count),
+        "frontierCandidateCount": int(node_count),
+        "bidirectionalFrontierCount": int(
+            np.count_nonzero(frontier_bidirectional)
+        ),
+        "unidirectionalFrontierCount": int(
+            np.count_nonzero(~frontier_bidirectional)
+        ),
         "rawNeighborPairCount": int(len(raw_first)),
         "compatibleContinuationEdgeCount": int(len(edge_first)),
         "eligibleTwoDimensionalCandidateCount": int(np.count_nonzero(eligible)),

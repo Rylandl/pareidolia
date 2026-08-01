@@ -266,11 +266,23 @@ def _condition_configuration_on_expanded_frontier(
     target_rank = np.asarray(ribbon["targetRayRank"], dtype=np.int32)[
         expanded_frontier
     ]
+    missing_rank_penalty = int(
+        continuity_manifest["identity"]["settings"][
+            "maximum_bidirectional_ray_rank"
+        ]
+    ) + 1
+    effective_source_rank = np.where(
+        source_rank >= 0, source_rank, missing_rank_penalty
+    )
+    effective_target_rank = np.where(
+        target_rank >= 0, target_rank, missing_rank_penalty
+    )
     mutual = np.asarray(ribbon["mutualFirstHit"])[expanded_frontier] > 0
     unary = (
         physical_score
         - configuration_settings.node_selection_cost
-        - configuration_settings.ray_rank_penalty * (source_rank + target_rank)
+        - configuration_settings.ray_rank_penalty
+        * (effective_source_rank + effective_target_rank)
         + configuration_settings.mutual_first_hit_bonus * mutual
     ).astype(np.float32)
     conditioned = {
@@ -321,6 +333,7 @@ def _condition_configuration_on_expanded_frontier(
         "mappedSelectedRibbonCount": int(np.count_nonzero(selected)),
         "mappedComponentCount": len(component_size),
         "partitionPreservedExactly": True,
+        "missingRayRankPenalty": missing_rank_penalty,
         "crossings": {
             **crossing_stats,
             **crossing_conditioning_stats,

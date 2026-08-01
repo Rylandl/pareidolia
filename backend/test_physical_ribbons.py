@@ -18,6 +18,10 @@ from backend.cubical.physical_ribbon_configuration import (
     build_profile_crossing_conflicts,
     optimize_physical_ribbon_configuration,
 )
+from backend.cubical.physical_ribbon_continuity import (
+    PhysicalRibbonContinuitySettings,
+    build_paired_boundary_continuity,
+)
 from backend.cubical.physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
     _beam_set_packing,
@@ -48,6 +52,9 @@ from backend.cubical.physical_ribbon_corridor_dormant import (
     _condition_crossings_on_immutable_baseline,
     _union_crossing_continuity,
     _variant_dormant_addition_count,
+)
+from backend.cubical.physical_ribbon_corridor_one_sided import (
+    _variant_one_sided_addition_count,
 )
 
 
@@ -87,6 +94,45 @@ class PhysicalRibbonBankTests(unittest.TestCase):
 
 
 class PhysicalRibbonConfigurationTests(unittest.TestCase):
+    def test_explicit_continuity_frontier_can_include_one_sided_ribbon(self) -> None:
+        ribbon = {
+            "sourceInterface": np.asarray((0,), dtype=np.int32),
+            "targetInterface": np.asarray((1,), dtype=np.int32),
+            "sourceRayRank": np.asarray((0,), dtype=np.int16),
+            "targetRayRank": np.asarray((-1,), dtype=np.int16),
+            "physicalEvidenceScore": np.asarray((0.9,), dtype=np.float32),
+            "mutualFirstHit": np.asarray((0,), dtype=np.uint8),
+            "bidirectional": np.asarray((0,), dtype=np.uint8),
+            "midpointXYZ": np.asarray(((5.0, 5.0, 5.0),), dtype=np.float32),
+            "normalXYZ": np.asarray(((1.0, 0.0, 0.0),), dtype=np.float32),
+            "thicknessVoxels": np.asarray((10.0,), dtype=np.float32),
+        }
+        interfaces = {
+            "positionXYZ": np.asarray(
+                ((0.0, 5.0, 5.0), (10.0, 5.0, 5.0)), dtype=np.float32
+            ),
+            "signedNormalXYZ": np.asarray(
+                ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)), dtype=np.float32
+            ),
+        }
+        topology, stats = build_paired_boundary_continuity(
+            ribbon,
+            interfaces,
+            processing_world_start_xyz=np.zeros(3, dtype=np.float32),
+            sampling_stride_voxels=1,
+            settings=PhysicalRibbonContinuitySettings(
+                minimum_support_degree=1,
+                minimum_selected_degree=0,
+                peeling_sweeps=0,
+            ),
+            frontier_bank_index=np.asarray((0,), dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            topology["frontierRibbonCandidate"], (0,)
+        )
+        self.assertEqual(stats["unidirectionalFrontierCount"], 1)
+        self.assertLess(float(topology["selectionObjective"][0]), 0.9)
+
     def setUp(self) -> None:
         self.interfaces = {
             "positionXYZ": np.asarray(
@@ -428,6 +474,25 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_one_sided_variant_count_uses_bank_identity(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray(
+                (0, 2, 3), dtype=np.int64
+            ),
+            "corridorVariantAddedFrontierIndex": np.asarray(
+                (0, 2, 1), dtype=np.int32
+            ),
+        }
+        frontier = np.asarray((7, 4, 9), dtype=np.int32)
+        one_sided = np.zeros(10, dtype=bool)
+        one_sided[[7, 9]] = True
+        np.testing.assert_array_equal(
+            _variant_one_sided_addition_count(
+                variants, frontier, one_sided
+            ),
+            (2, 0),
+        )
+
     def test_crossing_screen_unions_strict_and_support_edges(self) -> None:
         expanded = {
             "frontierRibbonCandidate": np.asarray((1, 2, 3), dtype=np.int32),

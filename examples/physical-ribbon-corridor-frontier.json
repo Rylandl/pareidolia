@@ -1,0 +1,4 @@
+{
+  "require_unidirectional_candidates": true,
+  "target_only_unresolved_ct_corridors": true
+}

@@ -406,6 +406,53 @@ new profile crossing, interface collision, component split, cross-sheet fusion,
 or flattened chart overlap. The complete conditioned screen and cumulative
 replay take about 243 seconds.
 
+`build-physical-ribbon-corridor-frontier` admits the next candidate class
+without turning the solve into unconstrained one-cell growth. It takes the
+cumulative 31-corridor replay as immutable context, finds the 28 remaining
+native-CT-supported strips, and queries the complete 1,702,134-ribbon bank only
+inside those strips. Every one-sided hypothesis must pass the same patch-height,
+tangent, unsigned-normal, and physical-thickness gates as a bidirectional
+candidate. The union is then rebuilt with the unchanged strict-continuation and
+crossing contracts. A missing reverse-ray rank receives a conservative rank-16
+penalty rather than the accidental bonus a negative sentinel would otherwise
+produce.
+
+The current targeted frontier adds 4,238 unique one-sided hypotheses to the
+218,698-candidate rank-15 frontier. It contains 5,585,520 strict edges; 4,222
+of the new hypotheses have at least three strict neighbors and their median
+support degree is 88. The cumulative 37,882-ribbon selection maps into it with
+the same 4,307 component partition and zero crossing or interface conflict.
+Candidate collection, topology, crossings, conditioning, and compressed
+artifact writing take 20.6 seconds. The other 1,474,156 one-sided hypotheses
+remain dormant.
+
+`analyze-physical-ribbon-one-sided-corridors` keeps the complete strip as the
+decision unit. It enumerates only matchings that add at least one explicitly
+targeted one-sided ribbon, reconstructs every matching in its complete source
+sheet, and jointly optimizes exact states within components and across the
+block before cumulative replay. Thus an individual ribbon can contribute to a
+repair but cannot independently grow a tendril.
+
+The pilot enumerates 193 such states across 26 of the 28 residual corridors.
+Forty-three connect exactly, 42 retain sheet density, and 11 distinct corridors
+survive component/global optimization and replay (rows 29, 35, 38, 40, 54, 80,
+87, 100, 106, 107, and 124). Cumulative resolved corridors rise from 31 to 42.
+The selection adds 75 ribbons and removes 35 alternatives for a net change from
+37,882 to 37,922. Supported triangles rise from 28,211 to 28,323 and true
+edge-connected triangle regions fall from 792 to 776. Two prior components
+disappear, but they contain only three ribbons and one ribbon; neither reaches
+the 32-ribbon minimum for a reconstructable surface. No surface component is
+lost or split, and the replay has zero interface collision, profile crossing,
+cross-sheet fusion, or flattened chart overlap.
+
+The accepted strips have native-CT profile correlations of 0.901--0.987,
+competing-layer margins of 0.427--1.014, and boundary-texture correlations of
+0.367--0.716. The selected ruled/Hermite models include minimum local curvature
+radii down to 0.105 sheet thicknesses, so the candidate expansion materially
+improves support for the observed hairpin geometry rather than merely filling
+flat holes. Exact reconstruction dominates the 382-second solve; the exact
+bank is checkpointed separately from later objective and preview iterations.
+
 The reproducible commands are:
 
 ```bash
@@ -470,4 +517,17 @@ python -m backend.cubical analyze-physical-ribbon-dormant-corridors \
   --expanded-continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-rank15-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-dormant-corridors-v1 \
   --settings-json examples/physical-ribbon-dormant-corridors.json
+
+python -m backend.cubical build-physical-ribbon-corridor-frontier \
+  --corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-v1 \
+  --prior-replay work/multiseam-2x2-b00c03c/physical-ribbon-dormant-corridors-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --bidirectional-continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-rank15-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-v1 \
+  --settings-json examples/physical-ribbon-corridor-frontier.json
+
+python -m backend.cubical analyze-physical-ribbon-one-sided-corridors \
+  --frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-v1 \
+  --settings-json examples/physical-ribbon-one-sided-corridors.json
 ```

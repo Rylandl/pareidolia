@@ -135,6 +135,14 @@ from .physical_ribbon_corridor_dormant import (
     PhysicalRibbonDormantCorridorSettings,
     run_physical_ribbon_dormant_corridors,
 )
+from .physical_ribbon_corridor_frontier import (
+    PhysicalRibbonCorridorFrontierSettings,
+    run_physical_ribbon_corridor_frontier,
+)
+from .physical_ribbon_corridor_one_sided import (
+    PhysicalRibbonOneSidedCorridorSettings,
+    run_physical_ribbon_one_sided_corridors,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -908,6 +916,41 @@ def _physical_ribbon_corridor_dormant(args: argparse.Namespace) -> None:
         args.expanded_continuity,
         args.output,
         settings=PhysicalRibbonDormantCorridorSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_frontier(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_corridor_frontier(
+        args.corridors,
+        args.prior_replay,
+        args.configuration,
+        args.bidirectional_continuity,
+        args.output,
+        settings=PhysicalRibbonCorridorFrontierSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_one_sided(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_one_sided_corridors(
+        args.frontier,
+        args.output,
+        settings=PhysicalRibbonOneSidedCorridorSettings(**settings_values),
         force=args.force,
         progress=print,
     )
@@ -2636,6 +2679,61 @@ def main() -> None:
     )
     physical_ribbon_corridor_dormant.set_defaults(
         handler=_physical_ribbon_corridor_dormant
+    )
+    physical_ribbon_corridor_frontier = subparsers.add_parser(
+        "build-physical-ribbon-corridor-frontier",
+        description=(
+            "Add one-sided ribbon hypotheses only inside still-unresolved "
+            "native-CT corridor strips, then build their strict continuation "
+            "and crossing topology without mutating the cumulative replay."
+        ),
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--corridors", type=Path, required=True
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--prior-replay", type=Path, required=True
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--bidirectional-continuity", type=Path, required=True
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_corridor_frontier.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_frontier.set_defaults(
+        handler=_physical_ribbon_corridor_frontier
+    )
+    physical_ribbon_corridor_one_sided = subparsers.add_parser(
+        "analyze-physical-ribbon-one-sided-corridors",
+        description=(
+            "Enumerate complete residual-corridor matchings that use the "
+            "targeted one-sided frontier, reconstruct them in their full "
+            "sheets, optimize compatible states, and replay cumulatively."
+        ),
+    )
+    physical_ribbon_corridor_one_sided.add_argument(
+        "--frontier", type=Path, required=True
+    )
+    physical_ribbon_corridor_one_sided.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_one_sided.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_corridor_one_sided.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_one_sided.set_defaults(
+        handler=_physical_ribbon_corridor_one_sided
     )
     gap_census = subparsers.add_parser(
         "gap-census",
