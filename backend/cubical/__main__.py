@@ -956,6 +956,13 @@ def _physical_ribbon_dense_completion(args: argparse.Namespace) -> None:
         settings_values = json.loads(Path(args.settings_json).read_text())
         if not isinstance(settings_values, dict):
             raise ValueError("settings JSON must contain one object")
+    for name in (
+        "profile_depth_fractions",
+        "competing_shift_thicknesses",
+        "interior_boundary_separation_hypotheses_voxels",
+    ):
+        if name in settings_values:
+            settings_values[name] = tuple(settings_values[name])
     summary = run_physical_ribbon_dense_completion(
         args.holes,
         args.depth_field,

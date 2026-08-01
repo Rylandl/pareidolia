@@ -5,7 +5,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import AbstractSet, Any, Mapping
 
 import numpy as np
 
@@ -138,6 +138,48 @@ def boundary_texture_compatibility(
         "compatible": bool(excess <= allowance),
         "medianExcessDegrees": round(excess, 6),
         "medianExcessAllowanceDegrees": round(allowance, 6),
+    }
+
+
+def _summarize_boundary_texture_depths(
+    depth_records: list[dict[str, Any]],
+    settings: PhysicalRibbonFlattenedAuditSettings,
+) -> dict[str, int | bool | None]:
+    """Evaluate one realized boundary independently at every fixed depth."""
+
+    compatible_depth_count = 0
+    measured_depth_count = 0
+    for record in depth_records:
+        compatibility = boundary_texture_compatibility(
+            record["addedBoundaryAxialDisagreementDegrees"],
+            record["baselineMeshAxialDisagreementDegrees"],
+            minimum_measurements=settings.minimum_boundary_edge_measurements,
+            median_excess_floor_degrees=(
+                settings.maximum_median_excess_floor_degrees
+            ),
+            control_spread_fraction=settings.maximum_control_spread_fraction,
+        )
+        if not compatibility["measured"]:
+            record["boundaryTextureCompatibilityMeasured"] = False
+            record["boundaryTextureCompatible"] = None
+            continue
+        measured_depth_count += 1
+        compatible = bool(compatibility["compatible"])
+        compatible_depth_count += int(compatible)
+        record["boundaryTextureCompatibilityMeasured"] = True
+        record["boundaryTextureMedianExcessDegrees"] = compatibility[
+            "medianExcessDegrees"
+        ]
+        record["boundaryTextureMedianExcessAllowanceDegrees"] = compatibility[
+            "medianExcessAllowanceDegrees"
+        ]
+        record["boundaryTextureCompatible"] = compatible
+    return {
+        "boundaryTextureMeasuredDepthCount": measured_depth_count,
+        "boundaryTextureCompatibleDepthCount": compatible_depth_count,
+        "boundaryTextureCompatible": (
+            bool(compatible_depth_count) if measured_depth_count else None
+        ),
     }
 
 
@@ -330,6 +372,90 @@ def _node_pixel(
     return int(round(float(value[1]))), int(round(float(value[0])))
 
 
+def _sample_axial_angle(
+    angle: np.ndarray,
+    coherence: np.ndarray,
+    point_uv: np.ndarray,
+    chart_low: np.ndarray,
+    pixel_step: float,
+    padding: float,
+    minimum_coherence: float,
+    sample_radius_pixels: int,
+) -> float | None:
+    value = (np.asarray(point_uv) - chart_low) / pixel_step + padding
+    x_value, y_value = int(round(float(value[0]))), int(round(float(value[1])))
+    if not (0 <= y_value < angle.shape[0] and 0 <= x_value < angle.shape[1]):
+        return None
+    y_start = max(y_value - sample_radius_pixels, 0)
+    y_stop = min(y_value + sample_radius_pixels + 1, angle.shape[0])
+    x_start = max(x_value - sample_radius_pixels, 0)
+    x_stop = min(x_value + sample_radius_pixels + 1, angle.shape[1])
+    local_coherence = coherence[y_start:y_stop, x_start:x_stop]
+    local_angle = angle[y_start:y_stop, x_start:x_stop]
+    member = local_coherence >= minimum_coherence
+    if np.count_nonzero(member) < 3:
+        return None
+    weight = np.square(local_coherence[member].astype(np.float64))
+    doubled = 2.0 * local_angle[member].astype(np.float64)
+    vector_x = float(np.sum(weight * np.cos(doubled)))
+    vector_y = float(np.sum(weight * np.sin(doubled)))
+    if math.hypot(vector_x, vector_y) < 0.15 * float(np.sum(weight)):
+        return None
+    return 0.5 * math.atan2(vector_y, vector_x)
+
+
+def _point_pair_orientation_disagreement(
+    angle: np.ndarray,
+    coherence: np.ndarray,
+    first_uv: np.ndarray,
+    second_uv: np.ndarray,
+    chart_low: np.ndarray,
+    pixel_step: float,
+    padding: float,
+    minimum_coherence: float,
+    sample_radius_pixels: int = 2,
+) -> dict[str, float | int]:
+    values: list[float] = []
+    for first, second in zip(np.asarray(first_uv), np.asarray(second_uv)):
+        first_angle = _sample_axial_angle(
+            angle,
+            coherence,
+            first,
+            chart_low,
+            pixel_step,
+            padding,
+            minimum_coherence,
+            sample_radius_pixels,
+        )
+        second_angle = _sample_axial_angle(
+            angle,
+            coherence,
+            second,
+            chart_low,
+            pixel_step,
+            padding,
+            minimum_coherence,
+            sample_radius_pixels,
+        )
+        if first_angle is None or second_angle is None:
+            continue
+        values.append(
+            0.5
+            * math.degrees(
+                math.acos(
+                    float(
+                        np.clip(
+                            math.cos(2.0 * (first_angle - second_angle)),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
+            )
+        )
+    return _percentiles(np.asarray(values, dtype=np.float32))
+
+
 def _edge_orientation_disagreement(
     angle: np.ndarray,
     coherence: np.ndarray,
@@ -343,62 +469,185 @@ def _edge_orientation_disagreement(
     minimum_coherence: float,
     sample_radius_pixels: int = 2,
 ) -> dict[str, float | int]:
-    def sample(y_value: int, x_value: int) -> float | None:
-        y_start = max(y_value - sample_radius_pixels, 0)
-        y_stop = min(y_value + sample_radius_pixels + 1, angle.shape[0])
-        x_start = max(x_value - sample_radius_pixels, 0)
-        x_stop = min(x_value + sample_radius_pixels + 1, angle.shape[1])
-        local_coherence = coherence[y_start:y_stop, x_start:x_stop]
-        local_angle = angle[y_start:y_stop, x_start:x_stop]
-        member = local_coherence >= minimum_coherence
-        if np.count_nonzero(member) < 3:
-            return None
-        weight = np.square(local_coherence[member].astype(np.float64))
-        doubled = 2.0 * local_angle[member].astype(np.float64)
-        vector_x = float(np.sum(weight * np.cos(doubled)))
-        vector_y = float(np.sum(weight * np.sin(doubled)))
-        if math.hypot(vector_x, vector_y) < 0.15 * float(np.sum(weight)):
-            return None
-        return 0.5 * math.atan2(vector_y, vector_x)
+    return _point_pair_orientation_disagreement(
+        angle,
+        coherence,
+        chart_uv[np.asarray(edge_first)[edge_mask]],
+        chart_uv[np.asarray(edge_second)[edge_mask]],
+        chart_low,
+        pixel_step,
+        padding,
+        minimum_coherence,
+        sample_radius_pixels,
+    )
 
-    values: list[float] = []
-    rows, columns = angle.shape
-    for first, second in zip(edge_first[edge_mask], edge_second[edge_mask]):
-        first_y, first_x = _node_pixel(
-            chart_uv, int(first), chart_low, pixel_step, padding
+
+def _completion_triangle_texture_pairs(
+    triangle_index: np.ndarray,
+    triangles: np.ndarray,
+    chart_uv: np.ndarray,
+    *,
+    base_triangle_count: int,
+    pixel_step: float,
+    target_triangle_indices: AbstractSet[int] | None = None,
+) -> dict[str, np.ndarray]:
+    """Build exact seam and control samples from triangle provenance.
+
+    With no target, every triangle appended after ``base_triangle_count`` is
+    treated as one collective completion.  A target isolates one proposal so
+    a locally bad closure cannot be hidden by other good closures in the same
+    final component.
+    """
+
+    indices = np.asarray(triangle_index, dtype=np.int64)
+    triangle_values = np.asarray(triangles, dtype=np.int32)
+    centroids = np.mean(chart_uv[triangle_values], axis=1)
+    edge_triangle: dict[tuple[int, int], list[int]] = {}
+    for index in indices:
+        triangle = triangle_values[int(index)]
+        for edge_index, first in enumerate(triangle):
+            second = int(triangle[(edge_index + 1) % 3])
+            edge = (min(int(first), second), max(int(first), second))
+            edge_triangle.setdefault(edge, []).append(int(index))
+
+    seam_edge: list[tuple[int, int]] = []
+    seam_first: list[np.ndarray] = []
+    seam_second: list[np.ndarray] = []
+    added_edge: list[tuple[int, int]] = []
+    added_first: list[np.ndarray] = []
+    added_second: list[np.ndarray] = []
+    baseline_edge: list[tuple[int, int]] = []
+    baseline_first: list[np.ndarray] = []
+    baseline_second: list[np.ndarray] = []
+
+    def is_target(index: int) -> bool:
+        return (
+            index >= base_triangle_count
+            if target_triangle_indices is None
+            else index in target_triangle_indices
         )
-        second_y, second_x = _node_pixel(
-            chart_uv, int(second), chart_low, pixel_step, padding
-        )
-        if not (
-            0 <= first_y < rows
-            and 0 <= first_x < columns
-            and 0 <= second_y < rows
-            and 0 <= second_x < columns
-        ):
+
+    for edge, incident in edge_triangle.items():
+        if len(incident) != 2:
             continue
-        first_angle = sample(first_y, first_x)
-        second_angle = sample(second_y, second_x)
-        if first_angle is None or second_angle is None:
-            continue
-        delta = 0.5 * math.degrees(
-            math.acos(
-                float(
-                    np.clip(
-                        math.cos(
-                            2.0
-                            * (
-                                first_angle - second_angle
-                            )
-                        ),
-                        -1.0,
-                        1.0,
-                    )
+        first_triangle, second_triangle = incident
+        first_added = is_target(first_triangle)
+        second_added = is_target(second_triangle)
+        if first_added != second_added:
+            baseline_triangle = second_triangle if first_added else first_triangle
+            added_triangle = first_triangle if first_added else second_triangle
+            # When one proposal is isolated, another completion is neither its
+            # original boundary context nor a valid same-surface control.
+            if baseline_triangle >= base_triangle_count:
+                continue
+            seam_edge.append(edge)
+            edge_start, edge_stop = chart_uv[np.asarray(edge, dtype=np.int32)]
+            for parameter in (0.25, 0.50, 0.75):
+                edge_point = (
+                    (1.0 - parameter) * edge_start + parameter * edge_stop
                 )
-            )
+
+                def inward(triangle_id: int) -> np.ndarray:
+                    centroid = centroids[triangle_id]
+                    distance = float(np.linalg.norm(centroid - edge_point))
+                    fraction = min(
+                        0.75,
+                        pixel_step / max(distance, 1.0e-6),
+                    )
+                    return edge_point + fraction * (centroid - edge_point)
+
+                seam_first.append(inward(baseline_triangle))
+                seam_second.append(inward(added_triangle))
+            continue
+        if first_added:
+            added_edge.append(edge)
+            added_first.append(centroids[first_triangle])
+            added_second.append(centroids[second_triangle])
+        elif first_triangle < base_triangle_count and second_triangle < base_triangle_count:
+            baseline_edge.append(edge)
+            baseline_first.append(centroids[first_triangle])
+            baseline_second.append(centroids[second_triangle])
+
+    def points(values: list[np.ndarray]) -> np.ndarray:
+        return np.asarray(values, dtype=np.float32).reshape((-1, 2))
+
+    def edges(values: list[tuple[int, int]]) -> np.ndarray:
+        return np.asarray(values, dtype=np.int32).reshape((-1, 2))
+
+    return {
+        "seamEdge": edges(seam_edge),
+        "seamFirstUV": points(seam_first),
+        "seamSecondUV": points(seam_second),
+        "addedInteriorEdge": edges(added_edge),
+        "addedFirstUV": points(added_first),
+        "addedSecondUV": points(added_second),
+        "baselineInteriorEdge": edges(baseline_edge),
+        "baselineFirstUV": points(baseline_first),
+        "baselineSecondUV": points(baseline_second),
+    }
+
+
+def _completion_proposals_by_component(
+    surface: Mapping[str, np.ndarray],
+    triangles: np.ndarray,
+    component: np.ndarray,
+    *,
+    base_triangle_count: int,
+) -> dict[int, list[dict[str, Any]]]:
+    """Recover each accepted completion's exact final-surface triangles."""
+
+    required = {
+        "proposalAccepted",
+        "proposalHoleRow",
+        "completionTriangleOffset",
+        "completionTriangleFrontierIndex",
+    }
+    if not required.issubset(surface):
+        return {}
+    accepted = np.asarray(surface["proposalAccepted"], dtype=np.uint8) > 0
+    hole_row = np.asarray(surface["proposalHoleRow"], dtype=np.int32)
+    offset = np.asarray(surface["completionTriangleOffset"], dtype=np.int64)
+    catalog = np.asarray(
+        surface["completionTriangleFrontierIndex"], dtype=np.int32
+    ).reshape((-1, 3))
+    triangle_values = np.asarray(triangles, dtype=np.int32).reshape((-1, 3))
+    if len(hole_row) != len(accepted) or len(offset) != len(accepted) + 1:
+        raise ValueError("completion proposal provenance offsets differ")
+    if offset[0] != 0 or np.any(np.diff(offset) < 0) or offset[-1] != len(catalog):
+        raise ValueError("completion triangle provenance offsets are invalid")
+    if base_triangle_count + len(catalog) != len(triangle_values):
+        raise ValueError("completion catalog does not span the final triangle tail")
+    if not np.array_equal(triangle_values[base_triangle_count:], catalog):
+        raise ValueError("completion catalog and final triangle tail differ")
+
+    result: dict[int, list[dict[str, Any]]] = {}
+    for proposal_index in range(len(accepted)):
+        start, stop = int(offset[proposal_index]), int(offset[proposal_index + 1])
+        if not accepted[proposal_index]:
+            if start != stop:
+                raise ValueError("rejected completion owns realized triangles")
+            continue
+        if start == stop:
+            raise ValueError("accepted completion has no realized triangles")
+        final_indices = np.arange(
+            base_triangle_count + start,
+            base_triangle_count + stop,
+            dtype=np.int32,
         )
-        values.append(delta)
-    return _percentiles(np.asarray(values, dtype=np.float32))
+        vertex = np.unique(triangle_values[final_indices])
+        component_values = np.unique(component[vertex])
+        if len(component_values) != 1 or int(component_values[0]) < 0:
+            raise ValueError("completion triangles do not belong to one component")
+        component_id = int(component_values[0])
+        result.setdefault(component_id, []).append(
+            {
+                "proposalIndex": proposal_index,
+                "holeRow": int(hole_row[proposal_index]),
+                "triangleIndex": final_indices,
+                "triangleCount": int(stop - start),
+            }
+        )
+    return result
 
 
 def _variant_topology_key(record: Mapping[str, Any]) -> tuple[float, ...]:
@@ -825,13 +1074,41 @@ def run_physical_ribbon_flattened_audit(
     component = np.asarray(surface["component"], dtype=np.int32)
     added = _added_nodes(surface_manifest, surface)
     triangle = np.asarray(surface["triangleFrontierIndex"], dtype=np.int32)
+    base_triangle_count = int(
+        np.asarray(
+            surface.get("baseTriangleCount", np.asarray([len(triangle)])),
+            dtype=np.int64,
+        )[0]
+    )
+    completion_triangle_provenance = bool(
+        0 <= base_triangle_count < len(triangle)
+        and "completionTriangleFrontierIndex" in surface
+    )
     chart_uv = np.asarray(surface["chartUV"], dtype=np.float32)
     midpoint = np.asarray(surface["midpointXYZ"], dtype=np.float32)
     normal = np.asarray(surface["signedNormalXYZ"], dtype=np.float32)
     thickness = np.asarray(surface["thicknessVoxels"], dtype=np.float32)
-    changed_component, changed_count = np.unique(
-        component[added & (component >= 0)], return_counts=True
+    completion_proposals_by_component = (
+        _completion_proposals_by_component(
+            surface,
+            triangle,
+            component,
+            base_triangle_count=base_triangle_count,
+        )
+        if completion_triangle_provenance
+        else {}
     )
+    if completion_triangle_provenance:
+        added_triangle = triangle[base_triangle_count:]
+        added_triangle_component = component[added_triangle[:, 0]]
+        changed_component, changed_count = np.unique(
+            added_triangle_component[added_triangle_component >= 0],
+            return_counts=True,
+        )
+    else:
+        changed_component, changed_count = np.unique(
+            component[added & (component >= 0)], return_counts=True
+        )
     if not len(changed_component):
         labels, counts = np.unique(component[selected], return_counts=True)
         order = np.argsort(-counts)
@@ -857,12 +1134,14 @@ def run_physical_ribbon_flattened_audit(
         dtype=np.uint8,
     )
     records: list[dict[str, Any]] = []
+    completion_records: list[dict[str, Any]] = []
     displayed = 0
     for component_id_value in ranked:
         component_id = int(component_id_value)
-        component_triangle = triangle[
+        component_triangle_index = np.flatnonzero(
             np.all(component[triangle] == component_id, axis=1)
-        ]
+        )
+        component_triangle = triangle[component_triangle_index]
         if not len(component_triangle):
             continue
         vertex = np.unique(component_triangle)
@@ -906,6 +1185,11 @@ def run_physical_ribbon_flattened_audit(
         structures: list[dict[str, np.ndarray]] = []
         chart_low = np.min(chart.uv, axis=0)
         component_added = added & (component == component_id)
+        component_added_triangle_count = int(
+            np.count_nonzero(component_triangle_index >= base_triangle_count)
+            if completion_triangle_provenance
+            else 0
+        )
         mesh_edge = np.sort(
             np.concatenate(
                 (
@@ -920,13 +1204,61 @@ def run_physical_ribbon_flattened_audit(
         mesh_edge = np.unique(mesh_edge, axis=0)
         mesh_first = mesh_edge[:, 0]
         mesh_second = mesh_edge[:, 1]
-        boundary_edge = (
-            added[mesh_first] ^ added[mesh_second]
-        )
-        interior_added_edge = (
-            added[mesh_first] & added[mesh_second]
-        )
-        baseline_edge = ~added[mesh_first] & ~added[mesh_second]
+        texture_pairs: dict[str, np.ndarray] | None = None
+        component_completion_records: list[dict[str, Any]] = []
+        if completion_triangle_provenance:
+            texture_pairs = _completion_triangle_texture_pairs(
+                component_triangle_index,
+                triangle,
+                chart_uv,
+                base_triangle_count=base_triangle_count,
+                pixel_step=raster.pixel_step_voxels,
+            )
+
+            def provenance_mask(name: str) -> np.ndarray:
+                values = {
+                    tuple(int(value) for value in row)
+                    for row in np.asarray(texture_pairs[name], dtype=np.int32)
+                }
+                return np.asarray(
+                    [tuple(int(value) for value in row) in values for row in mesh_edge],
+                    dtype=bool,
+                )
+
+            boundary_edge = provenance_mask("seamEdge")
+            interior_added_edge = provenance_mask("addedInteriorEdge")
+            baseline_edge = provenance_mask("baselineInteriorEdge")
+            for proposal in completion_proposals_by_component.get(component_id, ()):
+                proposal_pairs = _completion_triangle_texture_pairs(
+                    component_triangle_index,
+                    triangle,
+                    chart_uv,
+                    base_triangle_count=base_triangle_count,
+                    pixel_step=raster.pixel_step_voxels,
+                    target_triangle_indices={
+                        int(value) for value in proposal["triangleIndex"]
+                    },
+                )
+                component_completion_records.append(
+                    {
+                        "proposalIndex": int(proposal["proposalIndex"]),
+                        "holeRow": int(proposal["holeRow"]),
+                        "componentId": component_id,
+                        "triangleCount": int(proposal["triangleCount"]),
+                        "boundaryEdgeCount": int(
+                            len(proposal_pairs["seamEdge"])
+                        ),
+                        "interiorEdgeCount": int(
+                            len(proposal_pairs["addedInteriorEdge"])
+                        ),
+                        "texturePairs": proposal_pairs,
+                        "depths": [],
+                    }
+                )
+        else:
+            boundary_edge = added[mesh_first] ^ added[mesh_second]
+            interior_added_edge = added[mesh_first] & added[mesh_second]
+            baseline_edge = ~added[mesh_first] & ~added[mesh_second]
         for depth_index, (depth_fraction, depth_offset) in enumerate(
             zip(resolved.depth_fractions, depth_offsets)
         ):
@@ -938,8 +1270,8 @@ def run_physical_ribbon_flattened_audit(
             )
             structure_stats["depthFraction"] = round(float(depth_fraction), 6)
             structure_stats["depthOffsetVoxels"] = round(float(depth_offset), 6)
-            structure_stats["addedBoundaryAxialDisagreementDegrees"] = (
-                _edge_orientation_disagreement(
+            if texture_pairs is None:
+                boundary_disagreement = _edge_orientation_disagreement(
                     structure["angleRadians"],
                     structure["coherence"],
                     chart_uv,
@@ -951,9 +1283,7 @@ def run_physical_ribbon_flattened_audit(
                     5.0,
                     resolved.minimum_orientation_coherence,
                 )
-            )
-            structure_stats["addedInteriorAxialDisagreementDegrees"] = (
-                _edge_orientation_disagreement(
+                added_disagreement = _edge_orientation_disagreement(
                     structure["angleRadians"],
                     structure["coherence"],
                     chart_uv,
@@ -965,9 +1295,7 @@ def run_physical_ribbon_flattened_audit(
                     5.0,
                     resolved.minimum_orientation_coherence,
                 )
-            )
-            structure_stats["baselineMeshAxialDisagreementDegrees"] = (
-                _edge_orientation_disagreement(
+                baseline_disagreement = _edge_orientation_disagreement(
                     structure["angleRadians"],
                     structure["coherence"],
                     chart_uv,
@@ -979,47 +1307,94 @@ def run_physical_ribbon_flattened_audit(
                     5.0,
                     resolved.minimum_orientation_coherence,
                 )
+            else:
+                boundary_disagreement = _point_pair_orientation_disagreement(
+                    structure["angleRadians"],
+                    structure["coherence"],
+                    texture_pairs["seamFirstUV"],
+                    texture_pairs["seamSecondUV"],
+                    chart_low,
+                    raster.pixel_step_voxels,
+                    5.0,
+                    resolved.minimum_orientation_coherence,
+                )
+                added_disagreement = _point_pair_orientation_disagreement(
+                    structure["angleRadians"],
+                    structure["coherence"],
+                    texture_pairs["addedFirstUV"],
+                    texture_pairs["addedSecondUV"],
+                    chart_low,
+                    raster.pixel_step_voxels,
+                    5.0,
+                    resolved.minimum_orientation_coherence,
+                )
+                baseline_disagreement = _point_pair_orientation_disagreement(
+                    structure["angleRadians"],
+                    structure["coherence"],
+                    texture_pairs["baselineFirstUV"],
+                    texture_pairs["baselineSecondUV"],
+                    chart_low,
+                    raster.pixel_step_voxels,
+                    5.0,
+                    resolved.minimum_orientation_coherence,
+                )
+            structure_stats["addedBoundaryAxialDisagreementDegrees"] = (
+                boundary_disagreement
             )
+            structure_stats["addedInteriorAxialDisagreementDegrees"] = (
+                added_disagreement
+            )
+            structure_stats["baselineMeshAxialDisagreementDegrees"] = (
+                baseline_disagreement
+            )
+            for proposal_record in component_completion_records:
+                proposal_pairs = proposal_record["texturePairs"]
+                proposal_boundary_disagreement = (
+                    _point_pair_orientation_disagreement(
+                        structure["angleRadians"],
+                        structure["coherence"],
+                        proposal_pairs["seamFirstUV"],
+                        proposal_pairs["seamSecondUV"],
+                        chart_low,
+                        raster.pixel_step_voxels,
+                        5.0,
+                        resolved.minimum_orientation_coherence,
+                    )
+                )
+                proposal_record["depths"].append(
+                    {
+                        "depthIndex": depth_index,
+                        "depthFraction": round(float(depth_fraction), 6),
+                        "depthOffsetVoxels": round(float(depth_offset), 6),
+                        "addedBoundaryAxialDisagreementDegrees": (
+                            proposal_boundary_disagreement
+                        ),
+                        "baselineMeshAxialDisagreementDegrees": (
+                            baseline_disagreement
+                        ),
+                    }
+                )
             structures.append(structure)
             depth_records.append(structure_stats)
-        compatible_depth_count = 0
-        measured_depth_count = 0
-        for record in depth_records:
-            added_statistics = record[
-                "addedBoundaryAxialDisagreementDegrees"
-            ]
-            baseline_statistics = record[
-                "baselineMeshAxialDisagreementDegrees"
-            ]
-            compatibility = boundary_texture_compatibility(
-                added_statistics,
-                baseline_statistics,
-                minimum_measurements=resolved.minimum_boundary_edge_measurements,
-                median_excess_floor_degrees=(
-                    resolved.maximum_median_excess_floor_degrees
-                ),
-                control_spread_fraction=resolved.maximum_control_spread_fraction,
-            )
-            if not compatibility["measured"]:
-                record["boundaryTextureCompatibilityMeasured"] = False
-                record["boundaryTextureCompatible"] = None
-                continue
-            measured_depth_count += 1
-            compatible = bool(compatibility["compatible"])
-            compatible_depth_count += int(compatible)
-            record["boundaryTextureCompatibilityMeasured"] = True
-            record["boundaryTextureMedianExcessDegrees"] = compatibility[
-                "medianExcessDegrees"
-            ]
-            record["boundaryTextureMedianExcessAllowanceDegrees"] = (
-                compatibility["medianExcessAllowanceDegrees"]
-            )
-            record["boundaryTextureCompatible"] = bool(compatible)
-        texture_compatible = (
-            bool(compatible_depth_count)
-            if measured_depth_count
-            else None
+        component_texture_summary = _summarize_boundary_texture_depths(
+            depth_records, resolved
         )
+        compatible_depth_count = int(
+            component_texture_summary["boundaryTextureCompatibleDepthCount"]
+        )
+        measured_depth_count = int(
+            component_texture_summary["boundaryTextureMeasuredDepthCount"]
+        )
+        texture_compatible = component_texture_summary[
+            "boundaryTextureCompatible"
+        ]
+        for proposal_record in component_completion_records:
+            proposal_summary = _summarize_boundary_texture_depths(
+                proposal_record["depths"], resolved
+            )
+            proposal_record.update(proposal_summary)
+            proposal_record.pop("texturePairs")
+            completion_records.append(proposal_record)
         chosen_depth = max(
             range(len(depth_records)),
             key=lambda index: (
@@ -1111,6 +1486,7 @@ def run_physical_ribbon_flattened_audit(
             tile_y + 12,
             (
                 f"C {component_id} N {len(vertex)} +{np.count_nonzero(component_added)} "
+                f"T+{component_added_triangle_count} "
                 f"D {resolved.depth_fractions[chosen_depth]:+.2f} "
                 f"Q {chosen_record['medianCoherence']:.2f}"
             ),
@@ -1123,8 +1499,14 @@ def run_physical_ribbon_flattened_audit(
                 "surfaceVertexCount": int(len(vertex)),
                 "triangleCount": int(len(component_triangle)),
                 "addedRibbonCount": int(np.count_nonzero(component_added)),
+                "addedSurfaceTriangleCount": component_added_triangle_count,
                 "addedBoundaryEdgeCount": int(np.count_nonzero(boundary_edge)),
                 "addedInteriorEdgeCount": int(np.count_nonzero(interior_added_edge)),
+                "completionProposalCount": len(component_completion_records),
+                "completionHoleRows": [
+                    int(record["holeRow"])
+                    for record in component_completion_records
+                ],
                 "chosenDepthIndex": int(chosen_depth),
                 "boundaryTextureMeasuredDepthCount": measured_depth_count,
                 "boundaryTextureCompatibleDepthCount": compatible_depth_count,
@@ -1154,6 +1536,21 @@ def run_physical_ribbon_flattened_audit(
         for record in records
         if record["boundaryTextureCompatible"] is None
     ]
+    compatible_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["boundaryTextureCompatible"] is True
+    ]
+    incompatible_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["boundaryTextureCompatible"] is False
+    ]
+    unmeasured_completion = [
+        int(record["holeRow"])
+        for record in completion_records
+        if record["boundaryTextureCompatible"] is None
+    ]
     payload: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA,
         "version": PHYSICAL_RIBBON_FLATTENED_AUDIT_VERSION,
@@ -1162,6 +1559,11 @@ def run_physical_ribbon_flattened_audit(
         "source": source_record,
         "audit": {
             "addedRibbonCount": int(np.count_nonzero(added)),
+            "addedSurfaceTriangleCount": int(
+                len(triangle) - base_triangle_count
+                if completion_triangle_provenance
+                else 0
+            ),
             "changedComponentCount": int(len(changed_component)),
             "flattenedComponentCount": int(displayed),
             "boundaryTextureCompatibleComponentCount": len(
@@ -1176,13 +1578,37 @@ def run_physical_ribbon_flattened_audit(
             "boundaryTextureCompatibleComponents": compatible_component,
             "boundaryTextureIncompatibleComponents": incompatible_component,
             "boundaryTextureUnmeasuredComponents": unmeasured_component,
+            "flattenedCompletionProposalCount": len(completion_records),
+            "boundaryTextureCompatibleCompletionCount": len(
+                compatible_completion
+            ),
+            "boundaryTextureIncompatibleCompletionCount": len(
+                incompatible_completion
+            ),
+            "boundaryTextureUnmeasuredCompletionCount": len(
+                unmeasured_completion
+            ),
+            "boundaryTextureCompatibleCompletionHoleRows": (
+                compatible_completion
+            ),
+            "boundaryTextureIncompatibleCompletionHoleRows": (
+                incompatible_completion
+            ),
+            "boundaryTextureUnmeasuredCompletionHoleRows": (
+                unmeasured_completion
+            ),
+            "completionProposals": completion_records,
             "components": records,
             "depthChoice": (
                 "display choice maximizes a fixed-depth local structure score; "
                 "all fixed depth metrics remain reported"
             ),
             "magenta": "new collectively admitted ribbon centers",
-            "yellow": "strict continuation edges from new ribbons to the prior sheet",
+            "yellow": (
+                "exact shared edges between completion and baseline triangles"
+                if completion_triangle_provenance
+                else "strict continuation edges from new ribbons to the prior sheet"
+            ),
             "red": "nonadjacent chart overlap",
         },
         "timingSeconds": {"total": round(finished - started, 6)},
@@ -1190,7 +1616,11 @@ def run_physical_ribbon_flattened_audit(
         "method": {
             "measurement": (
                 "native CT sampled on exact intrinsic charts at fixed physical "
-                "depth fractions with local axial structure-tensor continuity"
+                "depth fractions with local axial structure-tensor continuity; "
+                "dense completions use exact baseline-versus-added triangle "
+                "provenance so boundary-only patches remain measurable, and "
+                "each proposal is scored independently so component averages "
+                "cannot conceal a locally incompatible closure"
             ),
             "compatibility": (
                 "a changed boundary is compatible when at least one fixed "

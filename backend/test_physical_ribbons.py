@@ -26,6 +26,8 @@ from backend.cubical.physical_ribbon_collective import (
     optimize_collective_patch,
 )
 from backend.cubical.physical_ribbon_flattened_audit import (
+    _completion_proposals_by_component,
+    _completion_triangle_texture_pairs,
     _rank_exact_variant_rows,
     boundary_texture_compatibility,
     flattened_texture_structure,
@@ -40,6 +42,7 @@ from backend.cubical.physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
     decompose_weak_boundary_cycles,
     _improve_physical_triangulation,
+    _triangle_quadrature_samples,
     triangulate_weak_boundary_field,
 )
 from backend.cubical.physical_ribbon_patch_states import (
@@ -687,6 +690,90 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
             0.01,
         )
 
+    def test_flattened_audit_tracks_boundary_only_completion_triangles(self) -> None:
+        pairs = _completion_triangle_texture_pairs(
+            np.arange(4, dtype=np.int32),
+            np.asarray(
+                ((0, 1, 2), (0, 2, 3), (1, 4, 2), (1, 5, 4)),
+                dtype=np.int32,
+            ),
+            np.asarray(
+                (
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    (1.0, 1.0),
+                    (0.0, 1.0),
+                    (2.0, 1.0),
+                    (2.0, 0.0),
+                ),
+                dtype=np.float32,
+            ),
+            base_triangle_count=2,
+            pixel_step=0.5,
+        )
+        np.testing.assert_array_equal(pairs["seamEdge"], ((1, 2),))
+        np.testing.assert_array_equal(pairs["baselineInteriorEdge"], ((0, 2),))
+        np.testing.assert_array_equal(pairs["addedInteriorEdge"], ((1, 4),))
+        self.assertEqual(len(pairs["seamFirstUV"]), 3)
+        self.assertEqual(len(pairs["seamSecondUV"]), 3)
+
+    def test_flattened_audit_isolates_each_completion_proposal(self) -> None:
+        triangle = np.asarray(
+            (
+                (0, 1, 2),
+                (0, 2, 3),
+                (1, 4, 2),
+                (1, 5, 4),
+                (0, 3, 6),
+            ),
+            dtype=np.int32,
+        )
+        chart = np.asarray(
+            (
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (2.0, 1.0),
+                (2.0, 0.0),
+                (-1.0, 1.0),
+            ),
+            dtype=np.float32,
+        )
+        pairs = _completion_triangle_texture_pairs(
+            np.arange(len(triangle), dtype=np.int32),
+            triangle,
+            chart,
+            base_triangle_count=2,
+            pixel_step=0.5,
+            target_triangle_indices={2, 3},
+        )
+        np.testing.assert_array_equal(pairs["seamEdge"], ((1, 2),))
+        np.testing.assert_array_equal(pairs["addedInteriorEdge"], ((1, 4),))
+        np.testing.assert_array_equal(pairs["baselineInteriorEdge"], ((0, 2),))
+
+    def test_flattened_audit_maps_completion_triangles_to_hole_rows(self) -> None:
+        triangle = np.asarray(
+            ((0, 1, 2), (0, 2, 3), (1, 4, 2), (0, 3, 5)),
+            dtype=np.int32,
+        )
+        proposals = _completion_proposals_by_component(
+            {
+                "proposalAccepted": np.asarray((1, 0, 1), dtype=np.uint8),
+                "proposalHoleRow": np.asarray((8, 9, 12), dtype=np.int32),
+                "completionTriangleOffset": np.asarray(
+                    (0, 1, 1, 2), dtype=np.int64
+                ),
+                "completionTriangleFrontierIndex": triangle[2:],
+            },
+            triangle,
+            np.zeros(6, dtype=np.int32),
+            base_triangle_count=2,
+        )
+        self.assertEqual([value["holeRow"] for value in proposals[0]], [8, 12])
+        np.testing.assert_array_equal(proposals[0][0]["triangleIndex"], (2,))
+        np.testing.assert_array_equal(proposals[0][1]["triangleIndex"], (3,))
+
     def test_texture_compatibility_scales_with_same_surface_control(self) -> None:
         compatible = boundary_texture_compatibility(
             {"count": 20, "median": 27.0},
@@ -1274,6 +1361,42 @@ class PhysicalRibbonDepthFieldTests(unittest.TestCase):
 
 
 class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
+    def test_adaptive_mesh_hypotheses_must_be_densest_first(self) -> None:
+        settings = PhysicalRibbonDenseCompletionSettings()
+        self.assertEqual(
+            settings.interior_boundary_separation_hypotheses_voxels,
+            tuple(
+                sorted(
+                    settings.interior_boundary_separation_hypotheses_voxels
+                )
+            ),
+        )
+        with self.assertRaises(ValueError):
+            PhysicalRibbonDenseCompletionSettings(
+                interior_boundary_separation_hypotheses_voxels=(0.5, 0.2)
+            )
+        with self.assertRaises(ValueError):
+            PhysicalRibbonDenseCompletionSettings(
+                interior_boundary_separation_hypotheses_voxels=(0.2, 0.2)
+            )
+
+    def test_triangle_quadrature_covers_area_at_declared_spacing(self) -> None:
+        points, normals, triangle = _triangle_quadrature_samples(
+            np.asarray(
+                (((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 2.0, 0.0)),),
+                dtype=np.float32,
+            ),
+            np.asarray(((0.0, 0.0, 1.0),), dtype=np.float32),
+            maximum_edge_voxels=1.0,
+        )
+        # The 2*sqrt(2) hypotenuse requires three divisions, producing nine
+        # equal-area subtriangle centroids.
+        self.assertEqual(len(points), 9)
+        np.testing.assert_array_equal(triangle, np.zeros(9, dtype=np.int32))
+        np.testing.assert_allclose(normals, ((0.0, 0.0, 1.0),) * 9)
+        self.assertTrue(np.all(points[:, :2] >= 0.0))
+        self.assertTrue(np.all(np.sum(points[:, :2], axis=1) <= 2.0))
+
     def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(self) -> None:
         chart = np.asarray(
             ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),

@@ -95,14 +95,22 @@ class PhysicalRibbonDenseCompletionSettings:
     """
 
     minimum_depth_field_supported_fraction: float = 0.90
-    minimum_reconstructed_supported_fraction: float = 0.85
-    minimum_median_profile_correlation: float = 0.70
+    minimum_reconstructed_supported_fraction: float = 0.70
+    minimum_median_profile_correlation: float = 0.65
     minimum_median_far_layer_margin: float = 0.02
-    minimum_interior_boundary_separation_voxels: float = 0.20
+    interior_boundary_separation_hypotheses_voxels: tuple[float, ...] = (
+        0.20,
+        0.30,
+        0.50,
+        0.75,
+        1.00,
+        1.50,
+    )
     minimum_triangle_area_voxels_squared: float = 0.03
     maximum_triangle_edge_voxels: float = 6.0
     high_triangle_normal_residual_degrees: float = 45.0
     maximum_triangle_normal_residual_degrees: float = 85.0
+    maximum_native_ct_quadrature_edge_voxels: float = 1.0
     intersection_tolerance_voxels: float = 0.05
     maximum_edge_flip_iterations: int = 16_384
     maximum_completed_holes: int = 64
@@ -136,15 +144,27 @@ class PhysicalRibbonDenseCompletionSettings:
         if not -1.0 <= self.minimum_median_profile_correlation <= 1.0:
             raise ValueError("profile-correlation gate must lie in [-1, 1]")
         positive = (
-            self.minimum_interior_boundary_separation_voxels,
             self.minimum_triangle_area_voxels_squared,
             self.maximum_triangle_edge_voxels,
             self.high_triangle_normal_residual_degrees,
             self.maximum_triangle_normal_residual_degrees,
+            self.maximum_native_ct_quadrature_edge_voxels,
             self.intersection_tolerance_voxels,
         )
         if any(not math.isfinite(value) or value <= 0.0 for value in positive):
             raise ValueError("dense-completion geometric scales must be positive")
+        separations = tuple(
+            float(value)
+            for value in self.interior_boundary_separation_hypotheses_voxels
+        )
+        if (
+            not separations
+            or any(not math.isfinite(value) or value <= 0.0 for value in separations)
+            or tuple(sorted(set(separations))) != separations
+        ):
+            raise ValueError(
+                "boundary-separation hypotheses must be unique, positive, and sorted"
+            )
         if (
             self.maximum_triangle_normal_residual_degrees >= 90.0
             or self.high_triangle_normal_residual_degrees
@@ -892,6 +912,69 @@ def _normal_frame(normal_xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return tangent_u.astype(np.float32), tangent_v.astype(np.float32)
 
 
+def _triangle_quadrature_samples(
+    triangle_xyz: np.ndarray,
+    triangle_normal_xyz: np.ndarray,
+    *,
+    maximum_edge_voxels: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Uniformly cover every realized facet with subtriangle centroids.
+
+    A single centroid can alias a planar facet across a tightly curved sheet.
+    Dividing each triangle until every subtriangle edge is at most the
+    declared physical spacing makes native-CT support an area measurement.
+    The returned triangle index preserves provenance for diagnostics.
+    """
+
+    triangles = np.asarray(triangle_xyz, dtype=np.float64)
+    normals = np.asarray(triangle_normal_xyz, dtype=np.float64)
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
+        raise ValueError("triangle quadrature expects T x 3 x 3 positions")
+    if normals.shape != (len(triangles), 3):
+        raise ValueError("triangle quadrature normals differ from triangles")
+    if not math.isfinite(maximum_edge_voxels) or maximum_edge_voxels <= 0.0:
+        raise ValueError("triangle quadrature spacing must be positive")
+    point_values: list[np.ndarray] = []
+    normal_values: list[np.ndarray] = []
+    triangle_values: list[int] = []
+    for triangle_index, points in enumerate(triangles):
+        edge = (
+            float(np.linalg.norm(points[1] - points[0])),
+            float(np.linalg.norm(points[2] - points[1])),
+            float(np.linalg.norm(points[0] - points[2])),
+        )
+        divisions = max(int(math.ceil(max(edge) / maximum_edge_voxels)), 1)
+        for first in range(divisions):
+            for second in range(divisions - first):
+                # Centroid of (i,j), (i+1,j), (i,j+1).
+                first_weight = (first + 1.0 / 3.0) / divisions
+                second_weight = (second + 1.0 / 3.0) / divisions
+                point_values.append(
+                    (1.0 - first_weight - second_weight) * points[0]
+                    + first_weight * points[1]
+                    + second_weight * points[2]
+                )
+                normal_values.append(normals[triangle_index])
+                triangle_values.append(triangle_index)
+                if second >= divisions - first - 1:
+                    continue
+                # Centroid of (i+1,j), (i+1,j+1), (i,j+1).
+                first_weight = (first + 2.0 / 3.0) / divisions
+                second_weight = (second + 2.0 / 3.0) / divisions
+                point_values.append(
+                    (1.0 - first_weight - second_weight) * points[0]
+                    + first_weight * points[1]
+                    + second_weight * points[2]
+                )
+                normal_values.append(normals[triangle_index])
+                triangle_values.append(triangle_index)
+    return (
+        np.asarray(point_values, dtype=np.float32).reshape((-1, 3)),
+        np.asarray(normal_values, dtype=np.float32).reshape((-1, 3)),
+        np.asarray(triangle_values, dtype=np.int32),
+    )
+
+
 def _other_component_clearance(
     point_xyz: np.ndarray,
     surface: Mapping[str, np.ndarray],
@@ -1167,6 +1250,286 @@ def _loop_counts(loops: Mapping[str, np.ndarray]) -> dict[str, int]:
     }
 
 
+def _evaluate_dense_completion_variant(
+    current: Mapping[str, np.ndarray],
+    current_incidence: Counter[tuple[int, int]],
+    holes: Mapping[str, np.ndarray],
+    source: VolumeSource,
+    volume: np.ndarray,
+    *,
+    row: int,
+    component_id: int,
+    thickness: float,
+    boundary: np.ndarray,
+    field_uv: np.ndarray,
+    field_xyz: np.ndarray,
+    field_reference: np.ndarray,
+    boundary_separation_voxels: float,
+    settings: PhysicalRibbonDenseCompletionSettings,
+) -> dict[str, Any]:
+    """Construct and audit one complete mesh-density hypothesis."""
+
+    try:
+        mesh, mesh_stats = triangulate_weak_boundary_field(
+            boundary,
+            np.asarray(current["chartUV"], dtype=np.float32)[boundary],
+            field_uv,
+            minimum_boundary_separation=boundary_separation_voxels,
+            maximum_edge_flip_iterations=settings.maximum_edge_flip_iterations,
+        )
+    except ValueError as error:
+        return {
+            "constructed": False,
+            "accepted": False,
+            "rejectionReasons": [str(error)],
+            "boundarySeparationVoxels": boundary_separation_voxels,
+        }
+
+    reasons: list[str] = []
+    retained_pixel = np.asarray(mesh["retainedFieldPixel"], dtype=np.int32)
+    point_kind = np.asarray(mesh["pointKind"], dtype=np.uint8)
+    point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
+    boundary_local = np.flatnonzero(point_kind == 0)
+    field_local = np.flatnonzero(point_kind == 1)
+    local_xyz = np.empty((len(point_kind), 3), dtype=np.float32)
+    local_reference = np.empty((len(point_kind), 3), dtype=np.float32)
+    local_xyz[boundary_local] = np.asarray(current["midpointXYZ"])[
+        point_source[boundary_local]
+    ]
+    local_reference[boundary_local] = np.asarray(current["signedNormalXYZ"])[
+        point_source[boundary_local]
+    ]
+    local_xyz[field_local] = field_xyz[point_source[field_local]]
+    local_reference[field_local] = field_reference[point_source[field_local]]
+    local_triangle, physical_flips = _improve_physical_triangulation(
+        np.asarray(mesh["trianglePointIndex"], dtype=np.int32),
+        np.asarray(mesh["pointUV"], dtype=np.float32),
+        local_xyz,
+        local_reference,
+        maximum_iterations=settings.maximum_edge_flip_iterations,
+    )
+    mesh_stats = {
+        **mesh_stats,
+        "physicalEdgeFlipIterations": int(physical_flips),
+    }
+    oriented: list[tuple[int, int, int]] = []
+    triangle_area: list[float] = []
+    triangle_residual: list[float] = []
+    triangle_edge: list[float] = []
+    for triangle in local_triangle:
+        values, area, residual, maximum_edge = _triangle_geometry(
+            tuple(int(value) for value in triangle),
+            local_xyz,
+            local_reference,
+        )
+        oriented.append(values)
+        triangle_area.append(area)
+        triangle_residual.append(residual)
+        triangle_edge.append(maximum_edge)
+    mesh = dict(mesh)
+    mesh["trianglePointIndex"] = np.asarray(oriented, dtype=np.int32)
+    minimum_area = min(triangle_area, default=0.0)
+    maximum_edge = max(triangle_edge, default=float("inf"))
+    maximum_residual = max(triangle_residual, default=float("inf"))
+    if minimum_area < settings.minimum_triangle_area_voxels_squared:
+        reasons.append("completion contains a physically degenerate triangle")
+    if maximum_edge > settings.maximum_triangle_edge_voxels:
+        reasons.append("completion contains an overlong triangle edge")
+    triangle_area_array = np.asarray(triangle_area, dtype=np.float64)
+    triangle_residual_array = np.asarray(triangle_residual, dtype=np.float64)
+    high_normal_area_fraction = float(
+        np.sum(
+            triangle_area_array[
+                triangle_residual_array
+                > settings.high_triangle_normal_residual_degrees
+            ]
+        )
+        / max(float(np.sum(triangle_area_array)), 1.0e-12)
+    )
+    if maximum_residual > settings.maximum_triangle_normal_residual_degrees:
+        reasons.append("completion triangle contradicts the local CT normal field")
+
+    local_normal = _mesh_vertex_normals(
+        np.asarray(mesh["trianglePointIndex"], dtype=np.int32),
+        local_xyz,
+        local_reference,
+    )
+    triangle_point = local_xyz[
+        np.asarray(mesh["trianglePointIndex"], dtype=np.int32)
+    ]
+    triangle_centroid_xyz = np.mean(triangle_point, axis=1)
+    triangle_normal = np.cross(
+        triangle_point[:, 1] - triangle_point[:, 0],
+        triangle_point[:, 2] - triangle_point[:, 0],
+    )
+    triangle_normal /= np.maximum(
+        np.linalg.norm(triangle_normal, axis=1, keepdims=True), 1.0e-12
+    )
+    quadrature_xyz, quadrature_normal, quadrature_triangle = (
+        _triangle_quadrature_samples(
+            triangle_point,
+            triangle_normal,
+            maximum_edge_voxels=(
+                settings.maximum_native_ct_quadrature_edge_voxels
+            ),
+        )
+    )
+    audit_xyz = np.vstack((local_xyz[field_local], quadrature_xyz)).astype(
+        np.float32
+    )
+    audit_normal = np.vstack(
+        (local_normal[field_local], quadrature_normal)
+    ).astype(np.float32)
+    native_arrays, native_stats = _completion_native_ct_audit(
+        source,
+        volume,
+        audit_xyz,
+        audit_normal,
+        thickness,
+        np.asarray(holes["contextMedianProfile"], dtype=np.float32)[row],
+        float(holes["contextPhysicalScore"][row]),
+        float(holes["localIntensityScale"][row]),
+        settings=settings,
+    )
+    native_stats["fieldVertexSampleCount"] = int(len(field_local))
+    native_stats["triangleQuadratureSampleCount"] = int(len(quadrature_xyz))
+    native_stats["quadratureTriangleCount"] = int(
+        len(np.unique(quadrature_triangle))
+    )
+    native_stats["maximumQuadratureEdgeVoxels"] = round(
+        settings.maximum_native_ct_quadrature_edge_voxels, 6
+    )
+    if (
+        float(native_stats["supportedFraction"])
+        < settings.minimum_reconstructed_supported_fraction
+    ):
+        reasons.append("constructed mesh normals lose whole-patch CT support")
+    if (
+        float(native_stats["medianProfileCorrelation"])
+        < settings.minimum_median_profile_correlation
+    ):
+        reasons.append(
+            "constructed surface profile does not match its boundary context"
+        )
+    if (
+        float(native_stats["medianFarLayerMargin"])
+        < settings.minimum_median_far_layer_margin
+    ):
+        reasons.append("a displaced competing layer explains the constructed surface")
+    clearance = _other_component_clearance(
+        np.vstack((local_xyz[field_local], triangle_centroid_xyz)),
+        current,
+        component_id,
+        thickness,
+    )
+
+    trial, synthetic_node, patch_triangle, added_edge = _append_completion_surface(
+        current,
+        mesh,
+        field_xyz,
+        field_reference,
+        component_id,
+        thickness,
+        triangle_area=np.asarray(triangle_area, dtype=np.float32),
+        triangle_normal_residual=np.asarray(
+            triangle_residual, dtype=np.float32
+        ),
+        existing_surface_edges=current_incidence.keys(),
+    )
+    trial_incidence = current_incidence.copy()
+    trial_incidence.update(_edge_incidence(patch_triangle))
+    boundary_edges = {
+        tuple(
+            sorted(
+                (
+                    int(boundary[index]),
+                    int(boundary[(index + 1) % len(boundary)]),
+                )
+            )
+        )
+        for index in range(len(boundary))
+    }
+    boundary_before_once = all(
+        current_incidence[edge] == 1 for edge in boundary_edges
+    )
+    boundary_after_twice = all(
+        trial_incidence[edge] == 2 for edge in boundary_edges
+    )
+    nonmanifold = sum(value > 2 for value in trial_incidence.values())
+    if not boundary_before_once:
+        reasons.append("target loop is no longer an exact open boundary")
+    if not boundary_after_twice:
+        reasons.append("completion does not attach to every target boundary edge once")
+    if nonmanifold:
+        reasons.append("completion creates a non-manifold mesh edge")
+
+    intersections = _other_component_triangle_intersections(
+        current,
+        trial,
+        patch_triangle,
+        component_id,
+        tolerance=settings.intersection_tolerance_voxels,
+    )
+    if int(intersections["intersectingTrianglePairCount"]):
+        reasons.append("completion intersects another selected surface")
+    base_triangle = np.asarray(current["triangleFrontierIndex"], dtype=np.int32)
+    base_component = np.asarray(current["component"], dtype=np.int32)
+    same_component_triangle = base_triangle[
+        np.all(base_component[base_triangle] == component_id, axis=1)
+    ]
+    chart_overlap = _chart_overlap_count(
+        same_component_triangle,
+        patch_triangle,
+        np.asarray(trial["chartUV"], dtype=np.float32),
+    )
+    if chart_overlap:
+        reasons.append("completion overlaps an existing triangle in its intrinsic chart")
+    topology_exact = bool(
+        boundary_before_once and boundary_after_twice and not nonmanifold
+    )
+    geometry = {
+        "minimumTriangleAreaVoxelsSquared": round(float(minimum_area), 6),
+        "maximumTriangleEdgeVoxels": round(float(maximum_edge), 6),
+        "medianTriangleNormalResidualDegrees": round(
+            float(np.median(triangle_residual)), 6
+        ),
+        "p90TriangleNormalResidualDegrees": round(
+            float(np.percentile(triangle_residual, 90)), 6
+        ),
+        "maximumTriangleNormalResidualDegrees": round(
+            float(maximum_residual), 6
+        ),
+        "highNormalResidualAreaFraction": round(
+            high_normal_area_fraction, 6
+        ),
+        "intrinsicChartOverlapCount": int(chart_overlap),
+        "nonManifoldEdgeCount": int(nonmanifold),
+        "everyBoundaryEdgeOpenBefore": bool(boundary_before_once),
+        "everyBoundaryEdgeClosedAfter": bool(boundary_after_twice),
+        **clearance,
+        **intersections,
+    }
+    return {
+        "constructed": True,
+        "accepted": not reasons,
+        "rejectionReasons": reasons,
+        "boundarySeparationVoxels": boundary_separation_voxels,
+        "mesh": mesh,
+        "meshStatistics": mesh_stats,
+        "geometry": geometry,
+        "nativeArrays": native_arrays,
+        "nativeStatistics": native_stats,
+        "trial": trial,
+        "syntheticNode": synthetic_node,
+        "patchTriangle": patch_triangle,
+        "addedEdge": added_edge,
+        "trialIncidence": trial_incidence,
+        "retainedFieldPixel": retained_pixel,
+        "fieldAuditCount": int(len(field_local)),
+        "topologyExact": topology_exact,
+    }
+
+
 def build_physical_ribbon_dense_completion(
     holes: Mapping[str, np.ndarray],
     depth_field: Mapping[str, np.ndarray],
@@ -1248,30 +1611,118 @@ def build_physical_ribbon_dense_completion(
         field_xyz = np.asarray(depth_field["patchXYZ"], dtype=np.float32)[pixel_slice] + (
             field_reference * (chosen_shift * thickness)[:, None]
         )
-        reasons: list[str] = []
         depth_support_fraction = (
             float(np.mean(field_supported[pixel_slice])) if stop > start else 0.0
         )
+        depth_reasons: list[str] = []
         if depth_support_fraction < settings.minimum_depth_field_supported_fraction:
-            reasons.append("insufficient collective depth-field CT support")
-        try:
-            mesh, mesh_stats = triangulate_weak_boundary_field(
-                boundary,
-                np.asarray(current["chartUV"], dtype=np.float32)[boundary],
-                field_uv,
-                minimum_boundary_separation=(
-                    settings.minimum_interior_boundary_separation_voxels
-                ),
-                maximum_edge_flip_iterations=settings.maximum_edge_flip_iterations,
+            depth_reasons.append("insufficient collective depth-field CT support")
+
+        hypothesis_records: list[dict[str, Any]] = []
+        selected_variant: dict[str, Any] | None = None
+        selected_hypothesis_index: int | None = None
+        selected_separation: float | None = None
+        last_variant: dict[str, Any] | None = None
+        for hypothesis_index, separation in enumerate(
+            settings.interior_boundary_separation_hypotheses_voxels
+        ):
+            variant = _evaluate_dense_completion_variant(
+                current,
+                current_incidence,
+                holes,
+                source,
+                volume,
+                row=row,
+                component_id=component_id,
+                thickness=thickness,
+                boundary=boundary,
+                field_uv=field_uv,
+                field_xyz=field_xyz,
+                field_reference=field_reference,
+                boundary_separation_voxels=float(separation),
+                settings=settings,
             )
-        except ValueError as error:
+            last_variant = variant
+            variant_reasons = [
+                *depth_reasons,
+                *variant["rejectionReasons"],
+            ]
+            hypothesis_records.append(
+                {
+                    "hypothesisIndex": hypothesis_index,
+                    "boundarySeparationVoxels": float(separation),
+                    "accepted": not variant_reasons,
+                    "rejectionReasons": variant_reasons,
+                    "mesh": variant.get("meshStatistics"),
+                    "geometry": variant.get("geometry"),
+                    "nativeCt": variant.get("nativeStatistics"),
+                }
+            )
+            if not variant_reasons:
+                selected_variant = variant
+                selected_hypothesis_index = hypothesis_index
+                selected_separation = float(separation)
+                break
+            # Mesh density cannot repair a depth field that already lacks
+            # collective CT support, so do not manufacture redundant variants.
+            if depth_reasons:
+                break
+
+        target_was_macro = bool(
+            np.asarray(holes["loopMacroEligible"], dtype=np.uint8)[loop]
+        )
+        current_loop_count = dict(predicted_loop_count)
+        if selected_variant is None:
+            reasons = list(hypothesis_records[-1]["rejectionReasons"])
             records.append(
                 {
                     "holeRow": row,
                     "loopIndex": loop,
                     "component": component_id,
                     "accepted": False,
-                    "rejectionReasons": [*reasons, str(error)],
+                    "rejectionReasons": reasons,
+                    "selectedHypothesisIndex": None,
+                    "selectedBoundarySeparationVoxels": None,
+                    "hypotheses": hypothesis_records,
+                    "depthFieldSupportedFraction": round(
+                        depth_support_fraction, 6
+                    ),
+                    "mesh": (
+                        last_variant.get("meshStatistics")
+                        if last_variant is not None
+                        else None
+                    ),
+                    "geometry": (
+                        last_variant.get("geometry")
+                        if last_variant is not None
+                        else None
+                    ),
+                    "nativeCt": (
+                        last_variant.get("nativeStatistics")
+                        if last_variant is not None
+                        else None
+                    ),
+                    "topology": {
+                        "interiorHoleCountBefore": current_loop_count[
+                            "interiorHoleCount"
+                        ],
+                        "interiorHoleCountAfter": current_loop_count[
+                            "interiorHoleCount"
+                        ],
+                        "macroHoleCountBefore": current_loop_count[
+                            "macroHoleCount"
+                        ],
+                        "macroHoleCountAfter": current_loop_count[
+                            "macroHoleCount"
+                        ],
+                        "targetWasMacroEligible": target_was_macro,
+                        "componentTriangleRegionCountBefore": (
+                            current_region_count.get(component_id, 0)
+                        ),
+                        "componentTriangleRegionCountAfter": (
+                            current_region_count.get(component_id, 0)
+                        ),
+                    },
                 }
             )
             proposal_offset.append(proposal_offset[-1])
@@ -1279,275 +1730,97 @@ def build_physical_ribbon_dense_completion(
             completion_field_offset.append(completion_field_offset[-1])
             proposal_accepted.append(0)
             continue
-        retained_pixel = np.asarray(mesh["retainedFieldPixel"], dtype=np.int32)
-        # Raster centers within the boundary-separation band are intentionally
-        # omitted to avoid skinny triangles.  Their *fraction* is a
-        # perimeter-to-area artifact, especially for three-to-five-edge
-        # holes, rather than missing physical support.  Sampling density is
-        # instead bounded by triangle edge length and the realized triangles
-        # are audited from native CT at both retained vertices and centroids.
 
-        point_kind = np.asarray(mesh["pointKind"], dtype=np.uint8)
-        point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
-        boundary_local = np.flatnonzero(point_kind == 0)
-        field_local = np.flatnonzero(point_kind == 1)
-        local_xyz = np.empty((len(point_kind), 3), dtype=np.float32)
-        local_reference = np.empty((len(point_kind), 3), dtype=np.float32)
-        local_xyz[boundary_local] = np.asarray(current["midpointXYZ"])[
-            point_source[boundary_local]
-        ]
-        local_reference[boundary_local] = np.asarray(current["signedNormalXYZ"])[
-            point_source[boundary_local]
-        ]
-        local_xyz[field_local] = field_xyz[point_source[field_local]]
-        local_reference[field_local] = field_reference[point_source[field_local]]
-        local_triangle = np.asarray(mesh["trianglePointIndex"], dtype=np.int32)
-        local_triangle, physical_flips = _improve_physical_triangulation(
-            local_triangle,
-            np.asarray(mesh["pointUV"], dtype=np.float32),
-            local_xyz,
-            local_reference,
-            maximum_iterations=settings.maximum_edge_flip_iterations,
-        )
-        mesh_stats = {
-            **mesh_stats,
-            "physicalEdgeFlipIterations": int(physical_flips),
-        }
-        oriented: list[tuple[int, int, int]] = []
-        triangle_area: list[float] = []
-        triangle_residual: list[float] = []
-        triangle_edge: list[float] = []
-        for triangle in local_triangle:
-            values, area, residual, maximum_edge = _triangle_geometry(
-                tuple(int(value) for value in triangle),
-                local_xyz,
-                local_reference,
-            )
-            oriented.append(values)
-            triangle_area.append(area)
-            triangle_residual.append(residual)
-            triangle_edge.append(maximum_edge)
-        mesh = dict(mesh)
-        mesh["trianglePointIndex"] = np.asarray(oriented, dtype=np.int32)
-        if min(triangle_area, default=0.0) < settings.minimum_triangle_area_voxels_squared:
-            reasons.append("completion contains a physically degenerate triangle")
-        if max(triangle_edge, default=float("inf")) > settings.maximum_triangle_edge_voxels:
-            reasons.append("completion contains an overlong triangle edge")
-        triangle_area_array = np.asarray(triangle_area, dtype=np.float64)
-        triangle_residual_array = np.asarray(triangle_residual, dtype=np.float64)
-        high_normal_area_fraction = float(
-            np.sum(
-                triangle_area_array[
-                    triangle_residual_array
-                    > settings.high_triangle_normal_residual_degrees
-                ]
-            )
-            / max(float(np.sum(triangle_area_array)), 1.0e-12)
-        )
-        if (
-            max(triangle_residual, default=float("inf"))
-            > settings.maximum_triangle_normal_residual_degrees
-        ):
-            reasons.append("completion triangle contradicts the local CT normal field")
+        if selected_hypothesis_index is None or selected_separation is None:
+            raise RuntimeError("accepted completion lacks hypothesis provenance")
+        if not bool(selected_variant["topologyExact"]):
+            raise RuntimeError("accepted completion lacks exact boundary topology")
 
-        local_normal = _mesh_vertex_normals(
-            np.asarray(mesh["trianglePointIndex"], dtype=np.int32),
-            local_xyz,
-            local_reference,
+        trial = selected_variant["trial"]
+        synthetic_node = np.asarray(
+            selected_variant["syntheticNode"], dtype=np.int32
         )
-        triangle_point = local_xyz[
-            np.asarray(mesh["trianglePointIndex"], dtype=np.int32)
-        ]
-        triangle_audit_xyz = np.mean(triangle_point, axis=1)
-        triangle_audit_normal = np.cross(
-            triangle_point[:, 1] - triangle_point[:, 0],
-            triangle_point[:, 2] - triangle_point[:, 0],
+        patch_triangle = np.asarray(
+            selected_variant["patchTriangle"], dtype=np.int32
         )
-        triangle_audit_normal /= np.maximum(
-            np.linalg.norm(triangle_audit_normal, axis=1, keepdims=True),
-            1.0e-12,
+        added_edge = np.asarray(selected_variant["addedEdge"], dtype=np.int32)
+        trial_incidence = selected_variant["trialIncidence"]
+        retained_pixel = np.asarray(
+            selected_variant["retainedFieldPixel"], dtype=np.int32
         )
-        audit_xyz = np.vstack(
-            (local_xyz[field_local], triangle_audit_xyz)
-        ).astype(np.float32)
-        audit_normal = np.vstack(
-            (local_normal[field_local], triangle_audit_normal)
-        ).astype(np.float32)
-        native_arrays, native_stats = _completion_native_ct_audit(
-            source,
-            volume,
-            audit_xyz,
-            audit_normal,
-            thickness,
-            np.asarray(holes["contextMedianProfile"], dtype=np.float32)[row],
-            float(holes["contextPhysicalScore"][row]),
-            float(holes["localIntensityScale"][row]),
-            settings=settings,
-        )
-        native_stats["fieldVertexSampleCount"] = int(len(field_local))
-        native_stats["triangleCentroidSampleCount"] = int(
-            len(triangle_audit_xyz)
-        )
-        if (
-            float(native_stats["supportedFraction"])
-            < settings.minimum_reconstructed_supported_fraction
-        ):
-            reasons.append("constructed mesh normals lose whole-patch CT support")
-        if (
-            float(native_stats["medianProfileCorrelation"])
-            < settings.minimum_median_profile_correlation
-        ):
-            reasons.append("constructed surface profile does not match its boundary context")
-        if (
-            float(native_stats["medianFarLayerMargin"])
-            < settings.minimum_median_far_layer_margin
-        ):
-            reasons.append("a displaced competing layer explains the constructed surface")
-        clearance = _other_component_clearance(
-            audit_xyz, current, component_id, thickness
-        )
+        field_audit_count = int(selected_variant["fieldAuditCount"])
+        native_arrays = selected_variant["nativeArrays"]
+        native_stats = selected_variant["nativeStatistics"]
+        mesh_stats = selected_variant["meshStatistics"]
+        geometry_record = selected_variant["geometry"]
 
-        trial, synthetic_node, patch_triangle, added_edge = _append_completion_surface(
-            current,
-            mesh,
-            field_xyz,
-            field_reference,
-            component_id,
-            thickness,
-            triangle_area=np.asarray(triangle_area, dtype=np.float32),
-            triangle_normal_residual=np.asarray(triangle_residual, dtype=np.float32),
-            existing_surface_edges=current_incidence.keys(),
-        )
-        base_incidence = current_incidence
-        trial_incidence = base_incidence.copy()
-        trial_incidence.update(_edge_incidence(patch_triangle))
-        boundary_edges = {
-            tuple(sorted((int(boundary[index]), int(boundary[(index + 1) % len(boundary)]))))
-            for index in range(len(boundary))
-        }
-        boundary_before_once = all(base_incidence[edge] == 1 for edge in boundary_edges)
-        boundary_after_twice = all(trial_incidence[edge] == 2 for edge in boundary_edges)
-        nonmanifold = sum(value > 2 for value in trial_incidence.values())
-        if not boundary_before_once:
-            reasons.append("target loop is no longer an exact open boundary")
-        if not boundary_after_twice:
-            reasons.append("completion does not attach to every target boundary edge once")
-        if nonmanifold:
-            reasons.append("completion creates a non-manifold mesh edge")
-
-        intersections = _other_component_triangle_intersections(
-            current,
-            trial,
-            patch_triangle,
-            component_id,
-            tolerance=settings.intersection_tolerance_voxels,
-        )
-        if int(intersections["intersectingTrianglePairCount"]):
-            reasons.append("completion intersects another selected surface")
-
-        base_triangle = np.asarray(current["triangleFrontierIndex"], dtype=np.int32)
-        base_component = np.asarray(current["component"], dtype=np.int32)
-        same_component_triangle = base_triangle[
-            np.all(base_component[base_triangle] == component_id, axis=1)
-        ]
-        chart_overlap = _chart_overlap_count(
-            same_component_triangle,
-            patch_triangle,
-            np.asarray(trial["chartUV"], dtype=np.float32),
-        )
-        if chart_overlap:
-            reasons.append("completion overlaps an existing triangle in its intrinsic chart")
-
-        target_was_macro = bool(
-            np.asarray(holes["loopMacroEligible"], dtype=np.uint8)[loop]
-        )
-        topology_exact = bool(
-            boundary_before_once and boundary_after_twice and not nonmanifold
-        )
-        current_loop_count = dict(predicted_loop_count)
         trial_loop_count = dict(current_loop_count)
-        if topology_exact:
-            trial_loop_count["interiorHoleCount"] -= 1
-            trial_loop_count["macroHoleCount"] -= int(target_was_macro)
+        trial_loop_count["interiorHoleCount"] -= 1
+        trial_loop_count["macroHoleCount"] -= int(target_was_macro)
         trial_region = current_region_count
 
-        accepted = not reasons
-        if accepted:
-            current = trial
-            current_incidence = trial_incidence
-            predicted_loop_count = trial_loop_count
-            accepted_added_edge.extend(
-                (int(value[0]), int(value[1])) for value in added_edge
-            )
-            proposal_node.extend(int(value) for value in synthetic_node)
-            completion_triangle.extend(int(value) for value in patch_triangle.ravel())
-            completion_field_pixel.extend(int(value) for value in retained_pixel)
-            field_audit_count = len(field_local)
-            completion_profile.extend(
-                native_arrays["normalProfile"][:field_audit_count]
-            )
-            completion_physical.extend(
-                float(value)
-                for value in native_arrays["physicalScore"][:field_audit_count]
-            )
-            completion_correlation.extend(
-                float(value)
-                for value in native_arrays["profileCorrelation"][
-                    :field_audit_count
-                ]
-            )
-            completion_margin.extend(
-                float(value)
-                for value in native_arrays["farLayerMargin"][:field_audit_count]
-            )
-            completion_supported.extend(
-                int(value)
-                for value in native_arrays["ctSupported"][:field_audit_count]
-            )
+        current = trial
+        current_incidence = trial_incidence
+        predicted_loop_count = trial_loop_count
+        accepted_added_edge.extend(
+            (int(value[0]), int(value[1])) for value in added_edge
+        )
+        proposal_node.extend(int(value) for value in synthetic_node)
+        completion_triangle.extend(int(value) for value in patch_triangle.ravel())
+        completion_field_pixel.extend(int(value) for value in retained_pixel)
+        completion_profile.extend(
+            native_arrays["normalProfile"][:field_audit_count]
+        )
+        completion_physical.extend(
+            float(value)
+            for value in native_arrays["physicalScore"][:field_audit_count]
+        )
+        completion_correlation.extend(
+            float(value)
+            for value in native_arrays["profileCorrelation"][:field_audit_count]
+        )
+        completion_margin.extend(
+            float(value)
+            for value in native_arrays["farLayerMargin"][:field_audit_count]
+        )
+        completion_supported.extend(
+            int(value)
+            for value in native_arrays["ctSupported"][:field_audit_count]
+        )
         proposal_offset.append(len(proposal_node))
         completion_triangle_offset.append(len(completion_triangle) // 3)
         completion_field_offset.append(len(completion_field_pixel))
-        proposal_accepted.append(int(accepted))
+        proposal_accepted.append(1)
         records.append(
             {
                 "holeRow": row,
                 "loopIndex": loop,
                 "component": component_id,
-                "accepted": accepted,
-                "rejectionReasons": reasons,
+                "accepted": True,
+                "rejectionReasons": [],
+                "selectedHypothesisIndex": selected_hypothesis_index,
+                "selectedBoundarySeparationVoxels": selected_separation,
+                "hypotheses": hypothesis_records,
                 "depthFieldSupportedFraction": round(depth_support_fraction, 6),
                 "mesh": mesh_stats,
-                "geometry": {
-                    "minimumTriangleAreaVoxelsSquared": round(float(min(triangle_area)), 6),
-                    "maximumTriangleEdgeVoxels": round(float(max(triangle_edge)), 6),
-                    "medianTriangleNormalResidualDegrees": round(
-                        float(np.median(triangle_residual)), 6
-                    ),
-                    "p90TriangleNormalResidualDegrees": round(
-                        float(np.percentile(triangle_residual, 90)), 6
-                    ),
-                    "maximumTriangleNormalResidualDegrees": round(
-                        float(max(triangle_residual)), 6
-                    ),
-                    "highNormalResidualAreaFraction": round(
-                        high_normal_area_fraction, 6
-                    ),
-                    "intrinsicChartOverlapCount": int(chart_overlap),
-                    "nonManifoldEdgeCount": int(nonmanifold),
-                    "everyBoundaryEdgeOpenBefore": bool(boundary_before_once),
-                    "everyBoundaryEdgeClosedAfter": bool(boundary_after_twice),
-                    **clearance,
-                    **intersections,
-                },
+                "geometry": geometry_record,
                 "nativeCt": native_stats,
                 "topology": {
-                    "interiorHoleCountBefore": current_loop_count["interiorHoleCount"],
-                    "interiorHoleCountAfter": trial_loop_count["interiorHoleCount"],
+                    "interiorHoleCountBefore": current_loop_count[
+                        "interiorHoleCount"
+                    ],
+                    "interiorHoleCountAfter": trial_loop_count[
+                        "interiorHoleCount"
+                    ],
                     "macroHoleCountBefore": current_loop_count["macroHoleCount"],
                     "macroHoleCountAfter": trial_loop_count["macroHoleCount"],
                     "targetWasMacroEligible": target_was_macro,
-                    "componentTriangleRegionCountBefore": current_region_count.get(component_id, 0),
-                    "componentTriangleRegionCountAfter": trial_region.get(component_id, 0),
+                    "componentTriangleRegionCountBefore": (
+                        current_region_count.get(component_id, 0)
+                    ),
+                    "componentTriangleRegionCountAfter": (
+                        trial_region.get(component_id, 0)
+                    ),
                 },
             }
         )
@@ -1635,6 +1908,11 @@ def build_physical_ribbon_dense_completion(
             final_loops["loopMacroEligible"], dtype=np.uint8
         ),
     }
+    accepted_records = [record for record in records if record["accepted"]]
+    selected_separation_count = Counter(
+        str(record["selectedBoundarySeparationVoxels"])
+        for record in accepted_records
+    )
     return arrays, records, {
         "attemptedHoleCount": len(ranked_rows),
         "acceptedHoleCount": accepted_count,
@@ -1663,6 +1941,19 @@ def build_physical_ribbon_dense_completion(
                     _triangle_region_labels(current["triangleFrontierIndex"])
                 )
             )
+        ),
+        "adaptiveMeshHypotheses": True,
+        "evaluatedMeshHypothesisCount": int(
+            sum(len(record.get("hypotheses", ())) for record in records)
+        ),
+        "fallbackAcceptedHoleCount": int(
+            sum(
+                int(record.get("selectedHypothesisIndex", 0) > 0)
+                for record in accepted_records
+            )
+        ),
+        "selectedBoundarySeparationCount": dict(
+            sorted(selected_separation_count.items(), key=lambda item: float(item[0]))
         ),
         "finalBoundaryAudit": final_loop_stats,
         "decisionUnit": (
@@ -1797,11 +2088,17 @@ def run_physical_ribbon_dense_completion(
                 "samples; ribbon-bank nodes are boundary and collision "
                 "evidence only"
             ),
+            "adaptiveMeshDensity": (
+                "each full boundary is tested densest-first at declared "
+                "boundary-separation scales; the first complete mesh whose "
+                "entire realized area passes native CT and exact topology is "
+                "selected, rather than growing individual pixels or cells"
+            ),
             "nativeCtAudit": (
                 "the realized triangles are re-sampled at retained dense "
-                "field vertices and triangle centroids using their mesh "
-                "normals against boundary context and displaced competing "
-                "layers"
+                "field vertices and uniform subtriangle quadrature points "
+                "using their mesh normals against boundary context and "
+                "displaced competing layers"
             ),
             "defectHandling": (
                 "fitted-normal tails and thickness-normalized proximity are "

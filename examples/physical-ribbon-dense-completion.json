@@ -1,13 +1,14 @@
 {
   "minimum_depth_field_supported_fraction": 0.9,
-  "minimum_reconstructed_supported_fraction": 0.85,
-  "minimum_median_profile_correlation": 0.7,
+  "minimum_reconstructed_supported_fraction": 0.7,
+  "minimum_median_profile_correlation": 0.65,
   "minimum_median_far_layer_margin": 0.02,
-  "minimum_interior_boundary_separation_voxels": 0.2,
+  "interior_boundary_separation_hypotheses_voxels": [0.2, 0.3, 0.5, 0.75, 1.0, 1.5],
   "minimum_triangle_area_voxels_squared": 0.03,
   "maximum_triangle_edge_voxels": 6.0,
   "high_triangle_normal_residual_degrees": 45.0,
   "maximum_triangle_normal_residual_degrees": 85.0,
+  "maximum_native_ct_quadrature_edge_voxels": 1.0,
   "intersection_tolerance_voxels": 0.05,
   "maximum_edge_flip_iterations": 16384,
   "maximum_completed_holes": 128
