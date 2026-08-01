@@ -362,7 +362,9 @@ class RectifierTests(unittest.TestCase):
             self.assertEqual(payload["stats"]["nodeCount"], 3)
             self.assertEqual(payload["stats"]["componentCount"], 2)
             self.assertEqual(payload["stats"]["columnConflictRejectedEdgeCount"], 1)
-            self.assertEqual(payload["interfaceNodes"][0], [0.5, 0.5, 0.5, 1])
+            self.assertEqual(
+                payload["interfaceNodes"][0], [0.5, 0.5, 0.5, 1, 0]
+            )
             self.assertTrue(payload["components"][0]["splitByStratumGuard"])
 
             body, metadata = load_block_volume(sheet_root=root, stride=1)

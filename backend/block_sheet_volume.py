@@ -8,12 +8,15 @@ from typing import Any
 
 import numpy as np
 
+from .cubical.contracts import sha256_file
+from .cubical.physical_mid_surface import PHYSICAL_MID_SURFACE_STEM
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c"
-    / "material-surface-graph-v1"
+    / "physical-mid-surface-catalog-v1"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -359,18 +362,46 @@ def _material_surface_graph_paths(root: Path) -> tuple[Path, Path]:
     return root / f"{stem}.json", root / f"{stem}.npz"
 
 
+def _material_surface_growth_paths(root: Path) -> tuple[Path, Path]:
+    stem = "material-interface-interior-growth-v1"
+    return root / f"{stem}.json", root / f"{stem}.npz"
+
+
+def _material_surface_bridging_paths(root: Path) -> tuple[Path, Path]:
+    stem = "material-interface-boundary-bridging-v1"
+    return root / f"{stem}.json", root / f"{stem}.npz"
+
+
+def _material_surface_fixed_point_path(root: Path) -> Path:
+    return root / "material-surface-fixed-point-v1.json"
+
+
 def _percentile(values: np.ndarray, percentile: float) -> float:
     finite = np.asarray(values, dtype=np.float64)
     finite = finite[np.isfinite(finite)]
     return float(np.percentile(finite, percentile)) if len(finite) else 0.0
 
 
-def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
-    manifest_path, data_path = _material_surface_graph_paths(root)
+def _load_material_surface_graph_payload(
+    root: Path, *, growth: bool = False, bridging: bool = False
+) -> dict[str, Any]:
+    if growth and bridging:
+        raise ValueError("material surface artifact cannot be growth and bridging")
+    if bridging:
+        manifest_path, data_path = _material_surface_bridging_paths(root)
+    elif growth:
+        manifest_path, data_path = _material_surface_growth_paths(root)
+    else:
+        manifest_path, data_path = _material_surface_graph_paths(root)
     if not manifest_path.is_file() or not data_path.is_file():
         raise FileNotFoundError(f"material surface graph is unavailable at {root}")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != "pareidolia.material-interface-surface-graph":
+    expected_schema = {
+        "bridging": "pareidolia.material-interface-boundary-bridging",
+        "growth": "pareidolia.material-interface-interior-growth",
+        "graph": "pareidolia.material-interface-surface-graph",
+    }["bridging" if bridging else "growth" if growth else "graph"]
+    if manifest.get("schema") != expected_schema:
         raise ValueError(f"unsupported material surface graph in {manifest_path}")
     if manifest.get("state") != "complete":
         raise ValueError(f"material surface graph is incomplete: {manifest_path}")
@@ -390,8 +421,44 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
         raw_macro_error = _required(stored, "rawToMacroNormalDegrees").astype(
             np.float64, copy=False
         )
-        pre_component = _required(stored, "preCollisionComponentId").astype(
-            np.int64, copy=False
+        pre_component = _required(
+            stored,
+            "sourceComponentId"
+            if bridging
+            else "seedComponentId"
+            if growth
+            else "preCollisionComponentId",
+        ).astype(np.int64, copy=False)
+        growth_round = (
+            _required(stored, "growthRound").astype(np.int64, copy=False)
+            if growth or bridging
+            else np.zeros(len(position_world), dtype=np.int64)
+        )
+        bridge_bundle = (
+            _required(stored, "bridgeBundleId").astype(np.int64, copy=False)
+            if bridging
+            else np.full(len(position_world), -1, dtype=np.int64)
+        )
+        orientation_source = (
+            np.asarray(stored["orientationSource"], dtype=np.uint8)
+            if "orientationSource" in stored
+            else np.zeros(len(position_world), dtype=np.uint8)
+        )
+        physical_seed_anchor = (
+            np.asarray(stored["physicalSeedAnchor"], dtype=np.uint8)
+            if "physicalSeedAnchor" in stored
+            else np.zeros(len(position_world), dtype=np.uint8)
+        )
+        physical_sheet_label = (
+            np.asarray(stored["physicalSheetLabel"], dtype=np.int32)
+            if "physicalSheetLabel" in stored
+            else np.full(len(position_world), -1, dtype=np.int32)
+        )
+        physical_side_available = "physicalBoundarySide" in stored
+        physical_boundary_side = (
+            np.asarray(stored["physicalBoundarySide"], dtype=np.uint8)
+            if physical_side_available
+            else np.full(len(position_world), 255, dtype=np.uint8)
         )
         edge_first = _required(stored, "edgeFirstNode").astype(
             np.int64, copy=False
@@ -406,6 +473,12 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
             macro_confidence,
             raw_macro_error,
             pre_component,
+            growth_round,
+            bridge_bundle,
+            orientation_source,
+            physical_seed_anchor,
+            physical_sheet_label,
+            physical_boundary_side,
         )
     ):
         raise ValueError("material surface node arrays have inconsistent lengths")
@@ -442,6 +515,28 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
         member = component == component_id
         point = position_local[member]
         prior = np.unique(pre_component[member])
+        member_physical_labels = np.unique(
+            physical_sheet_label[member & (physical_sheet_label >= 0)]
+        )
+        if len(member_physical_labels) > 1:
+            raise ValueError(
+                f"material surface component {component_id} crosses physical sheet identities"
+            )
+        member_physical_label = (
+            int(member_physical_labels[0]) if len(member_physical_labels) else None
+        )
+        member_physical_side: int | None = None
+        if member_physical_label is not None and physical_side_available:
+            member_physical_sides = np.unique(
+                physical_boundary_side[
+                    member & (physical_sheet_label == member_physical_label)
+                ]
+            )
+            if len(member_physical_sides) != 1 or int(member_physical_sides[0]) > 1:
+                raise ValueError(
+                    f"material surface component {component_id} crosses physical boundary sides"
+                )
+            member_physical_side = int(member_physical_sides[0])
         components.append(
             {
                 "rank": component_id + 1,
@@ -464,8 +559,28 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
                 "meanMacroConfidence": round(
                     float(np.mean(macro_confidence[member])), 6
                 ),
+                "grownNodeCount": int(
+                    np.count_nonzero(growth_round[member] > 0)
+                ),
+                "bridgeNodeCount": int(
+                    np.count_nonzero(bridge_bundle[member] >= 0)
+                ),
+                "physicallyGuidedNodeCount": int(
+                    np.count_nonzero(orientation_source[member] == 1)
+                ),
+                "physicallyGuidedNodeFraction": round(
+                    float(np.mean(orientation_source[member] == 1)), 6
+                ),
+                "physicalAnchorNodeCount": int(
+                    np.count_nonzero(physical_seed_anchor[member])
+                ),
+                "physicallyAnchored": member_physical_label is not None,
+                "physicalSheetLabel": member_physical_label,
+                "physicalBoundarySide": member_physical_side,
                 "splitByStratumGuard": bool(
-                    len(prior) == 1 and int(prior[0]) in split_pre_component
+                    not (growth or bridging)
+                    and len(prior) == 1
+                    and int(prior[0]) in split_pre_component
                 ),
             }
         )
@@ -475,6 +590,13 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
             round(float(position_local[index, 1]), 3),
             round(float(position_local[index, 2]), 3),
             int(component[index]) + 1,
+            3
+            if physical_seed_anchor[index]
+            else 2
+            if bridge_bundle[index] >= 0
+            else 1
+            if growth_round[index] > 0
+            else 0,
         ]
         for index in displayed_index
     ]
@@ -492,7 +614,229 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
         "artifact": {
             "manifestPath": manifest_label,
             "state": str(manifest.get("state", "unknown")),
-            "method": "macro-tangent signed material-interface graph",
+            "method": (
+                "repeated-boundary bridging over saturated signed interfaces"
+                if bridging
+                else "enclosed-hole recovery over macro-tangent signed interfaces"
+                if growth
+                else "macro-tangent signed material-interface graph"
+            ),
+        },
+        "source": {
+            "path": str(source.get("path", "")),
+            "metadataPath": str(source.get("metadataPath", "")),
+            "name": Path(str(source.get("path", "source volume"))).name,
+            "voxelSizeMicrons": float(source.get("voxelSizeMicrons", 0.0)),
+        },
+        "grid": {
+            "shapeCellsXYZ": [int(round(value)) for value in extent],
+            "cellSizeXYZ": [1.0, 1.0, 1.0],
+            "originXYZ": _round_list(origin),
+            "extentXYZ": _round_list(extent),
+            "coordinateUnit": str(geometry.get("coordinateUnit", "source-voxel")),
+        },
+        "stats": {
+            "triangleCount": 0,
+            "nodeCount": int(len(position_world)),
+            "displayedNodeCount": int(len(displayed_index)),
+            "physicallyGuidedNodeCount": int(
+                np.count_nonzero(orientation_source == 1)
+            ),
+            "physicalAnchorNodeCount": int(
+                np.count_nonzero(physical_seed_anchor)
+            ),
+            "physicallyAnchoredNodeCount": int(
+                np.count_nonzero(physical_sheet_label >= 0)
+            ),
+            "physicallyAnchoredComponentCount": int(
+                counts.get(
+                    "physicallyAnchoredComponentCount",
+                    sum(component["physicallyAnchored"] for component in components),
+                )
+            ),
+            "componentCount": component_count,
+            "displayedComponentCount": displayed_component_count,
+            "largestComponentTriangleCount": 0,
+            "largestComponentNodeCount": int(component_size[0]) if len(component_size) else 0,
+            "baselineTriangleCount": 0,
+            "experimentalTriangleCount": 0,
+            "acceptedCompletionCount": 0,
+            "attemptedCompletionCount": 0,
+            "regionCountBefore": int(
+                counts.get(
+                    "preCollisionComponentCount",
+                    counts.get(
+                        "initialComponentCount",
+                        counts.get(
+                            "componentCountBefore",
+                            counts.get("componentCount", component_count),
+                        ),
+                    ),
+                )
+            ),
+            "regionCountAfter": int(counts.get("componentCount", component_count)),
+            "medianNormalResidualDegrees": round(
+                _percentile(raw_macro_error, 50), 4
+            ),
+            "p90NormalResidualDegrees": round(
+                _percentile(raw_macro_error, 90), 4
+            ),
+            "retainedEdgeCount": int(len(edge_first)),
+            "columnConflictRejectedEdgeCount": int(
+                counts.get("columnConflictRejectedEdgeCount", 0)
+            ),
+            "eligibleNodeFraction": float(
+                counts.get(
+                    "activeNodeFraction", counts.get("eligibleNodeFraction", 0.0)
+                )
+            ),
+            "seedNodeCount": int(counts.get("seedNodeCount", len(position_world))),
+            "grownNodeCount": int(np.count_nonzero(growth_round > 0)),
+            "bridgeCandidateNodeCount": int(
+                counts.get("bridgeCandidateNodeCount", 0)
+            ),
+            "componentMergeCount": int(counts.get("componentMergeCount", 0)),
+        },
+        "components": components,
+        "vertices": [],
+        "triangles": [],
+        "interfaceNodes": interface_nodes,
+    }
+
+
+def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
+    manifest_path = root / f"{PHYSICAL_MID_SURFACE_STEM}.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"physical mid-surface catalog is unavailable at {root}")
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("schema") != "pareidolia.physical-mid-surface-catalog"
+        or manifest.get("state") != "complete"
+    ):
+        raise ValueError(f"unsupported physical mid-surface catalog in {manifest_path}")
+    data_path = root / str(manifest["data"]["path"])
+    if not data_path.is_file() or sha256_file(data_path) != manifest["data"]["sha256"]:
+        raise ValueError("physical mid-surface data is unavailable or changed")
+    with np.load(data_path, allow_pickle=False) as stored:
+        position_world = _required(stored, "midpointXYZ").astype(np.float64, copy=False)
+        component = _required(stored, "componentId").astype(np.int64, copy=False)
+        node_kind = _required(stored, "nodeKind").astype(np.uint8, copy=False)
+        physical_label = _required(stored, "physicalSheetLabel").astype(
+            np.int32, copy=False
+        )
+        lower_evidence = _required(stored, "lowerLocalEvidenceScore").astype(
+            np.float64, copy=False
+        )
+        upper_evidence = _required(stored, "upperLocalEvidenceScore").astype(
+            np.float64, copy=False
+        )
+        pair_cost = _required(stored, "pairCost").astype(np.float64, copy=False)
+        opposing_error = _required(stored, "opposingNormalDegrees").astype(
+            np.float64, copy=False
+        )
+        thickness = _required(stored, "thicknessVoxels").astype(
+            np.float64, copy=False
+        )
+        edge_first = _required(stored, "edgeFirstNode").astype(np.int64, copy=False)
+    if position_world.ndim != 2 or position_world.shape[1] != 3:
+        raise ValueError("physical mid-surface positions must have shape (node, 3)")
+    if any(
+        len(value) != len(position_world)
+        for value in (
+            component,
+            node_kind,
+            physical_label,
+            lower_evidence,
+            upper_evidence,
+            pair_cost,
+            opposing_error,
+            thickness,
+        )
+    ):
+        raise ValueError("physical mid-surface node arrays have inconsistent lengths")
+    geometry = manifest.get("geometry", {})
+    owned_bounds = geometry.get("ownedWorldBounds", {})
+    origin = np.asarray(owned_bounds.get("startXYZ", ()), dtype=np.float64)
+    stop = np.asarray(owned_bounds.get("stopXYZExclusive", ()), dtype=np.float64)
+    if origin.shape != (3,) or stop.shape != (3,) or np.any(stop <= origin):
+        raise ValueError("physical mid-surface catalog has invalid owned bounds")
+    extent = stop - origin
+    position_local = position_world - origin[None, :]
+    component_count = int(np.max(component)) + 1 if len(component) else 0
+    component_size = np.bincount(component, minlength=component_count)
+    maximum_display_components = 256
+    displayed_component_count = min(component_count, maximum_display_components)
+    displayed = component < displayed_component_count
+    displayed_index = np.flatnonzero(displayed)
+    evidence = np.minimum(lower_evidence, upper_evidence)
+    components: list[dict[str, Any]] = []
+    for component_id in range(displayed_component_count):
+        member = component == component_id
+        point = position_local[member]
+        labels = np.unique(physical_label[member])
+        if len(labels) != 1:
+            raise ValueError(
+                f"physical mid-surface component {component_id} crosses sheet identities"
+            )
+        direct_count = int(np.count_nonzero(node_kind[member] == 0))
+        dense_count = int(np.count_nonzero(node_kind[member] == 1))
+        components.append(
+            {
+                "rank": component_id + 1,
+                "stableId": str(component_id),
+                "triangleCount": 0,
+                "nodeCount": int(np.count_nonzero(member)),
+                "surfaceAreaVoxelsSquared": 0.0,
+                "boundsMinimumXYZ": _round_list(np.min(point, axis=0)),
+                "boundsMaximumXYZ": _round_list(np.max(point, axis=0)),
+                "normalResidualDegrees": {
+                    "median": round(_percentile(opposing_error[member], 50), 4),
+                    "p90": round(_percentile(opposing_error[member], 90), 4),
+                    "maximum": round(_percentile(opposing_error[member], 100), 4),
+                },
+                "experimentalTriangleCount": 0,
+                "experimentalCompletionRows": [],
+                "meanEvidence": round(float(np.mean(evidence[member])), 6),
+                "meanMacroConfidence": 0.0,
+                "grownNodeCount": 0,
+                "bridgeNodeCount": 0,
+                "physicallyGuidedNodeCount": int(np.count_nonzero(member)),
+                "physicallyGuidedNodeFraction": 1.0,
+                "physicalAnchorNodeCount": direct_count,
+                "denseBoundaryPairNodeCount": dense_count,
+                "physicallyAnchored": True,
+                "physicalSheetLabel": int(labels[0]),
+                "physicalBoundarySide": None,
+                "medianThicknessVoxels": round(_percentile(thickness[member], 50), 4),
+                "medianPairCost": round(_percentile(pair_cost[member], 50), 4),
+                "splitByStratumGuard": False,
+            }
+        )
+    interface_nodes = [
+        [
+            round(float(position_local[index, 0]), 3),
+            round(float(position_local[index, 1]), 3),
+            round(float(position_local[index, 2]), 3),
+            int(component[index]) + 1,
+            3 if int(node_kind[index]) == 1 else 0,
+        ]
+        for index in displayed_index
+    ]
+    counts = manifest.get("counts", {})
+    source = manifest.get("source", {})
+    try:
+        manifest_label = str(manifest_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        manifest_label = str(manifest_path)
+    return {
+        "schema": "pareidolia.block-interface-volume",
+        "version": 1,
+        "representation": "physical-mid-surface-graph",
+        "variant": root.name,
+        "artifact": {
+            "manifestPath": manifest_label,
+            "state": "complete",
+            "method": "paired air-papyrus-air physical mid-surfaces",
         },
         "source": {
             "path": str(source.get("path", "")),
@@ -519,19 +863,21 @@ def _load_material_surface_graph_payload(root: Path) -> dict[str, Any]:
             "experimentalTriangleCount": 0,
             "acceptedCompletionCount": 0,
             "attemptedCompletionCount": 0,
-            "regionCountBefore": int(counts.get("preCollisionComponentCount", 0)),
-            "regionCountAfter": int(counts.get("componentCount", component_count)),
-            "medianNormalResidualDegrees": round(
-                _percentile(raw_macro_error, 50), 4
-            ),
-            "p90NormalResidualDegrees": round(
-                _percentile(raw_macro_error, 90), 4
-            ),
+            "regionCountBefore": component_count,
+            "regionCountAfter": component_count,
+            "medianNormalResidualDegrees": round(_percentile(opposing_error, 50), 4),
+            "p90NormalResidualDegrees": round(_percentile(opposing_error, 90), 4),
             "retainedEdgeCount": int(len(edge_first)),
-            "columnConflictRejectedEdgeCount": int(
-                counts.get("columnConflictRejectedEdgeCount", 0)
-            ),
-            "eligibleNodeFraction": float(counts.get("eligibleNodeFraction", 0.0)),
+            "eligibleNodeFraction": float(counts.get("usedBoundaryFaceNodeFraction", 0.0)),
+            "seedNodeCount": int(counts.get("directProfileNodeCount", 0)),
+            "physicalAnchorNodeCount": int(counts.get("directProfileNodeCount", 0)),
+            "denseBoundaryPairNodeCount": int(counts.get("denseBoundaryPairNodeCount", 0)),
+            "physicallyAnchoredNodeCount": int(len(position_world)),
+            "physicallyAnchoredComponentCount": component_count,
+            "physicallyGuidedNodeCount": int(len(position_world)),
+            "grownNodeCount": 0,
+            "bridgeCandidateNodeCount": 0,
+            "componentMergeCount": 0,
         },
         "components": components,
         "vertices": [],
@@ -785,6 +1131,49 @@ def _load_dense_surface_payload(root: Path) -> dict[str, Any]:
 @lru_cache(maxsize=4)
 def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     root = Path(root_value)
+    mid_surface_path = root / f"{PHYSICAL_MID_SURFACE_STEM}.json"
+    if mid_surface_path.is_file():
+        return _load_physical_mid_surface_payload(root)
+    fixed_point_path = _material_surface_fixed_point_path(root)
+    if fixed_point_path.is_file():
+        fixed_point = json.loads(fixed_point_path.read_text())
+        if fixed_point.get("schema") != "pareidolia.material-interface-fixed-point":
+            raise ValueError(f"unsupported material fixed point in {fixed_point_path}")
+        if fixed_point.get("state") != "complete":
+            raise ValueError(f"material fixed point is incomplete: {fixed_point_path}")
+        final = fixed_point.get("finalSurface", {})
+        final_path = Path(str(final.get("manifestPath", ""))).resolve()
+        if not final_path.is_file() or sha256_file(final_path) != final.get(
+            "manifestSha256"
+        ):
+            raise ValueError("material fixed-point final surface is unavailable or changed")
+        payload = dict(_load_block_sheet_payload(str(final_path.parent)))
+        try:
+            manifest_label = str(fixed_point_path.relative_to(PROJECT_ROOT))
+        except ValueError:
+            manifest_label = str(fixed_point_path)
+        payload["variant"] = root.name
+        payload["artifact"] = {
+            "manifestPath": manifest_label,
+            "state": "complete",
+            "method": "converged enclosed-hole and repeated-boundary fixed point",
+            "finalManifestPath": str(final_path),
+        }
+        payload["fixedPoint"] = {
+            "converged": bool(
+                fixed_point.get("convergence", {}).get("converged", False)
+            ),
+            "completedCycles": int(
+                fixed_point.get("convergence", {}).get("completedCycles", 0)
+            ),
+        }
+        return payload
+    bridge_manifest, bridge_data = _material_surface_bridging_paths(root)
+    if bridge_manifest.is_file() or bridge_data.is_file():
+        return _load_material_surface_graph_payload(root, bridging=True)
+    growth_manifest, growth_data = _material_surface_growth_paths(root)
+    if growth_manifest.is_file() or growth_data.is_file():
+        return _load_material_surface_graph_payload(root, growth=True)
     graph_manifest, graph_data = _material_surface_graph_paths(root)
     if graph_manifest.is_file() or graph_data.is_file():
         return _load_material_surface_graph_payload(root)

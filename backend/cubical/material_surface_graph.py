@@ -12,8 +12,16 @@ import numpy as np
 
 from .contracts import VolumeSource, VoxelBounds, atomic_json, canonical_json_hash, sha256_file
 from .export import rgb_png
-from .macro_orientation import MACRO_ORIENTATION_SCHEMA, MACRO_ORIENTATION_STEM
+from .macro_orientation import (
+    MACRO_ORIENTATION_SCHEMA,
+    MACRO_ORIENTATION_STEM,
+    sample_orientation_field,
+)
 from .material_interface import MATERIAL_INTERFACE_SCHEMA, MATERIAL_INTERFACE_STEM
+from .one_sided_interface import (
+    ONE_SIDED_INTERFACE_SCHEMA,
+    ONE_SIDED_INTERFACE_STEM,
+)
 
 
 MATERIAL_SURFACE_GRAPH_SCHEMA = "pareidolia.material-interface-surface-graph"
@@ -36,6 +44,9 @@ class MaterialSurfaceGraphSettings:
     # within-face localization jitter, but below the 80-micron minimum ply
     # thickness used by the physical detector.
     maximum_column_depth_range_sampling_steps: float = 2.25
+    maximum_physical_seed_position_residual_sampling_steps: float = 0.75
+    maximum_physical_seed_signed_normal_degrees: float = 15.0
+    minimum_physical_anchor_samples_for_priority: int = 4
     minimum_component_samples_for_preview: int = 8
     maximum_preview_components: int = 128
 
@@ -59,6 +70,12 @@ class MaterialSurfaceGraphSettings:
             raise ValueError("surface graph tangent-column width must be positive")
         if self.maximum_column_depth_range_sampling_steps <= 0.0:
             raise ValueError("surface graph column depth range must be positive")
+        if self.maximum_physical_seed_position_residual_sampling_steps <= 0.0:
+            raise ValueError("physical seed position cap must be positive")
+        if not 0.0 < self.maximum_physical_seed_signed_normal_degrees < 90.0:
+            raise ValueError("physical seed normal cap must lie in (0, 90)")
+        if self.minimum_physical_anchor_samples_for_priority < 1:
+            raise ValueError("physical component priority requires anchors")
         if self.minimum_component_samples_for_preview < 1:
             raise ValueError("preview component size must be positive")
         if self.maximum_preview_components < 1:
@@ -148,7 +165,7 @@ def _plane_basis(normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return first, second
 
 
-def _tangent_columns(
+def _tangent_column_records(
     position: np.ndarray,
     sample_bin: np.ndarray,
     bin_center: np.ndarray,
@@ -169,8 +186,28 @@ def _tangent_columns(
             np.rint(second_coordinate / width_sampling_steps).astype(np.int64),
         )
     )
+    return column_record, depth.astype(np.float32)
+
+
+def _tangent_columns(
+    position: np.ndarray,
+    sample_bin: np.ndarray,
+    bin_center: np.ndarray,
+    bin_normal: np.ndarray,
+    *,
+    stride: int,
+    width_sampling_steps: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    column_record, depth = _tangent_column_records(
+        position,
+        sample_bin,
+        bin_center,
+        bin_normal,
+        stride=stride,
+        width_sampling_steps=width_sampling_steps,
+    )
     _, column = np.unique(column_record, axis=0, return_inverse=True)
-    return column.astype(np.int32), depth.astype(np.float32)
+    return column.astype(np.int32), depth
 
 
 def _find(parent: np.ndarray, value: int) -> int:
@@ -193,6 +230,7 @@ def _collision_safe_components(
     normal_depth: np.ndarray,
     *,
     maximum_depth_range: float,
+    immutable_seed_label: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
     """Maximum-score unions subject to one depth interval per tangent column."""
 
@@ -218,6 +256,14 @@ def _collision_safe_components(
     rejected_conflicts = 0
     membership_unions = 0
     retained_cycle_edges = 0
+    physical_seed_conflicts = 0
+    seed_label = (
+        np.asarray(immutable_seed_label, dtype=np.int64)
+        if immutable_seed_label is not None
+        else np.full(node_count, -1, dtype=np.int64)
+    )
+    if len(seed_label) != node_count:
+        raise ValueError("immutable physical seed labels are not node aligned")
     for component_id in range(pre_count):
         nodes = nodes_by_component[
             node_offset[component_id] : node_offset[component_id + 1]
@@ -235,6 +281,7 @@ def _collision_safe_components(
             }
             for node in nodes
         ]
+        label_state = seed_label[nodes].copy()
         edge_ids = edges_by_component[
             edge_offset[component_id] : edge_offset[component_id + 1]
         ]
@@ -253,6 +300,15 @@ def _collision_safe_components(
             second_state = column_state[second_root]
             if first_state is None or second_state is None:
                 raise RuntimeError("collision-safe component state is unavailable")
+            first_label = int(label_state[first_root])
+            second_label = int(label_state[second_root])
+            if (
+                first_label >= 0
+                and second_label >= 0
+                and first_label != second_label
+            ):
+                physical_seed_conflicts += 1
+                continue
             if len(first_state) < len(second_state):
                 first_root, second_root = second_root, first_root
                 first_state, second_state = second_state, first_state
@@ -282,6 +338,8 @@ def _collision_safe_components(
                         max(existing[1], interval[1]),
                     )
             column_state[second_root] = None
+            label_state[first_root] = max(first_label, second_label)
+            label_state[second_root] = -1
             retained[edge_id] = 1
             membership_unions += 1
         root_to_label: dict[int, int] = {}
@@ -305,6 +363,7 @@ def _collision_safe_components(
         "membershipUnionCount": membership_unions,
         "retainedCycleEdgeCount": retained_cycle_edges,
         "columnConflictRejectedEdgeCount": rejected_conflicts,
+        "physicalSeedConflictRejectedEdgeCount": physical_seed_conflicts,
     }
 
 
@@ -408,11 +467,146 @@ def write_material_surface_cross_sections(
     return output
 
 
+def _match_physical_seed_labels(
+    interface_arrays: Mapping[str, np.ndarray],
+    interfaces: Mapping[str, Any],
+    seed_path: Path,
+    seed_manifest: Mapping[str, Any],
+    *,
+    settings: MaterialSurfaceGraphSettings,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Map immutable paired-slab face identities onto dense interfaces."""
+
+    seed_arrays = _load_npz(seed_path, seed_manifest)
+    interface_key = np.asarray(
+        interface_arrays["processingKeyXYZ"], dtype=np.int64
+    )
+    interface_position = np.asarray(
+        interface_arrays["positionXYZ"], dtype=np.float64
+    )
+    interface_normal = np.asarray(
+        interface_arrays["signedNormalXYZ"], dtype=np.float64
+    )
+    seed_key = np.asarray(seed_arrays["processingKeyXYZ"], dtype=np.int64)
+    seed_position = np.asarray(seed_arrays["positionXYZ"], dtype=np.float64)
+    seed_normal = np.asarray(seed_arrays["signedNormalXYZ"], dtype=np.float64)
+    seed_label = np.asarray(seed_arrays["seedSurfaceLabel"], dtype=np.int64)
+    seed_side = np.asarray(seed_arrays["seedBoundarySide"], dtype=np.uint8)
+    seed_conflict = np.asarray(seed_arrays["seedConflict"], dtype=bool)
+    shape = np.asarray(
+        interfaces["geometry"]["processingShapeSamplingXYZ"], dtype=np.int64
+    )
+    grid = np.full(tuple(shape[::-1]), -1, dtype=np.int32)
+    if np.any(grid[interface_key[:, 2], interface_key[:, 1], interface_key[:, 0]] >= 0):
+        raise ValueError("material interfaces contain duplicate processing keys")
+    grid[
+        interface_key[:, 2], interface_key[:, 1], interface_key[:, 0]
+    ] = np.arange(len(interface_key), dtype=np.int32)
+    inside = np.all((seed_key >= 0) & (seed_key < shape[None, :]), axis=1)
+    mapped = np.full(len(seed_key), -1, dtype=np.int32)
+    mapped[inside] = grid[
+        seed_key[inside, 2], seed_key[inside, 1], seed_key[inside, 0]
+    ]
+    exists = mapped >= 0
+    stride = int(interfaces["identity"]["settings"]["sampling_stride_voxels"])
+    position_residual = np.full(len(seed_key), np.inf, dtype=np.float64)
+    normal_residual = np.full(len(seed_key), np.inf, dtype=np.float64)
+    position_residual[exists] = np.linalg.norm(
+        seed_position[exists] - interface_position[mapped[exists]], axis=1
+    ) / stride
+    normal_residual[exists] = np.degrees(
+        np.arccos(
+            np.clip(
+                np.einsum(
+                    "ij,ij->i",
+                    seed_normal[exists],
+                    interface_normal[mapped[exists]],
+                ),
+                -1.0,
+                1.0,
+            )
+        )
+    )
+    accepted = (
+        exists
+        & (seed_label >= 0)
+        & (seed_side <= 1)
+        & ~seed_conflict
+        & (
+            position_residual
+            <= settings.maximum_physical_seed_position_residual_sampling_steps
+        )
+        & (
+            normal_residual
+            <= settings.maximum_physical_seed_signed_normal_degrees
+        )
+    )
+    label_by_interface = np.full(len(interface_key), -1, dtype=np.int32)
+    side_by_interface = np.full(len(interface_key), 255, dtype=np.uint8)
+    anchor_by_interface = np.zeros(len(interface_key), dtype=np.uint8)
+    for seed_index in np.flatnonzero(accepted):
+        interface_index = int(mapped[seed_index])
+        label = int(seed_label[seed_index])
+        side = int(seed_side[seed_index])
+        existing_label = int(label_by_interface[interface_index])
+        existing_side = int(side_by_interface[interface_index])
+        if existing_label >= 0 and (
+            existing_label != label or existing_side != side
+        ):
+            label_by_interface[interface_index] = -1
+            side_by_interface[interface_index] = 255
+            anchor_by_interface[interface_index] = 2
+            continue
+        if anchor_by_interface[interface_index] == 2:
+            continue
+        label_by_interface[interface_index] = label
+        side_by_interface[interface_index] = side
+        anchor_by_interface[interface_index] = 1
+    ambiguous = anchor_by_interface == 2
+    label_by_interface[ambiguous] = -1
+    side_by_interface[ambiguous] = 255
+    summary = {
+        "seedInterfaceSampleCount": int(len(seed_key)),
+        "seedLabeledSampleCount": int(np.count_nonzero(seed_label >= 0)),
+        "mappedSeedSampleCount": int(np.count_nonzero(exists)),
+        "acceptedSeedSampleCount": int(np.count_nonzero(accepted)),
+        "uniquePhysicalAnchorInterfaceCount": int(
+            np.count_nonzero(anchor_by_interface == 1)
+        ),
+        "ambiguousPhysicalAnchorInterfaceCount": int(
+            np.count_nonzero(ambiguous)
+        ),
+        "physicalSheetIdentityCount": int(
+            len(np.unique(label_by_interface[label_by_interface >= 0]))
+        ),
+        "physicalBoundaryFaceIdentityCount": int(
+            len(
+                np.unique(
+                    2 * label_by_interface[label_by_interface >= 0]
+                    + side_by_interface[label_by_interface >= 0]
+                )
+            )
+        ),
+        "acceptedCanonicalLowerAnchorCount": int(
+            np.count_nonzero((anchor_by_interface == 1) & (side_by_interface == 0))
+        ),
+        "acceptedCanonicalUpperAnchorCount": int(
+            np.count_nonzero((anchor_by_interface == 1) & (side_by_interface == 1))
+        ),
+        "positionResidualSamplingSteps": _percentiles(
+            position_residual[accepted]
+        ),
+        "signedNormalResidualDegrees": _percentiles(normal_residual[accepted]),
+    }
+    return label_by_interface, side_by_interface, anchor_by_interface, summary
+
+
 def run_material_surface_graph(
     interface_root: str | Path,
     macro_root: str | Path,
     output_path: str | Path,
     *,
+    physical_seed_root: str | Path | None = None,
     settings: MaterialSurfaceGraphSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -429,6 +623,27 @@ def run_material_surface_graph(
     interface_arrays = _load_npz(interface_path, interfaces)
     macro_arrays = _load_npz(macro_path, macro)
     resolved = settings or MaterialSurfaceGraphSettings()
+    physical_seed_path: Path | None = None
+    physical_seed_manifest: dict[str, Any] | None = None
+    if physical_seed_root is not None:
+        physical_seed_path = _resolve(
+            physical_seed_root, ONE_SIDED_INTERFACE_STEM
+        )
+        physical_seed_manifest = json.loads(physical_seed_path.read_text())
+        if (
+            physical_seed_manifest.get("schema") != ONE_SIDED_INTERFACE_SCHEMA
+            or physical_seed_manifest.get("state") != "complete"
+        ):
+            raise ValueError(
+                "surface graph physical seeds require a complete one-sided interface bank"
+            )
+        if (
+            physical_seed_manifest.get("source") != interfaces.get("source")
+            or physical_seed_manifest.get("geometry") != interfaces.get("geometry")
+        ):
+            raise ValueError(
+                "physical seeds and material interfaces must share source-aligned geometry"
+            )
     identity: dict[str, Any] = {
         "schema": MATERIAL_SURFACE_GRAPH_SCHEMA,
         "version": MATERIAL_SURFACE_GRAPH_VERSION,
@@ -442,6 +657,16 @@ def run_material_surface_graph(
             "manifestSha256": sha256_file(macro_path),
             "dataSha256": macro["data"]["sha256"],
         },
+        "physicalSeeds": (
+            {
+                "manifestPath": str(physical_seed_path),
+                "manifestSha256": sha256_file(physical_seed_path),
+                "dataSha256": physical_seed_manifest["data"]["sha256"],
+            }
+            if physical_seed_path is not None
+            and physical_seed_manifest is not None
+            else None
+        ),
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
@@ -466,18 +691,50 @@ def run_material_surface_graph(
     raw_normal = np.asarray(interface_arrays["signedNormalXYZ"], dtype=np.float64)
     key = np.asarray(interface_arrays["processingKeyXYZ"], dtype=np.int64)
     evidence = np.asarray(interface_arrays["localEvidenceScore"], dtype=np.float64)
-    sample_bin = np.asarray(macro_arrays["sampleMacroBinIndex"], dtype=np.int64)
+    orientation = sample_orientation_field(macro_arrays)
+    sample_bin = orientation["sampleBinIndex"]
+    sample_group = orientation["sampleGroupIndex"]
     if len(sample_bin) != len(position):
         raise ValueError("macro sample index is not aligned with interface samples")
-    macro_normal = np.asarray(macro_arrays["normalXYZ"], dtype=np.float64)[sample_bin]
-    macro_confidence = np.asarray(
-        macro_arrays["orientationConfidence"], dtype=np.float64
-    )[sample_bin]
-    trusted = np.asarray(macro_arrays["trusted"], dtype=bool)[sample_bin]
+    macro_normal = orientation["sampleNormalXYZ"]
+    macro_confidence = orientation["sampleOrientationConfidence"]
+    trusted = orientation["sampleTrusted"]
+    orientation_source = orientation["sampleOrientationSource"]
+    orientation_center = orientation["sampleGroupCenterXYZ"]
     raw_macro_cosine = np.abs(np.einsum("ij,ij->i", raw_normal, macro_normal))
     raw_macro_angle = np.degrees(
         np.arccos(np.clip(raw_macro_cosine, 0.0, 1.0))
     )
+    physical_seed_label = np.full(len(position), -1, dtype=np.int32)
+    physical_seed_side = np.full(len(position), 255, dtype=np.uint8)
+    physical_seed_anchor = np.zeros(len(position), dtype=np.uint8)
+    physical_seed_summary: dict[str, Any] = {
+        "seedInterfaceSampleCount": 0,
+        "seedLabeledSampleCount": 0,
+        "mappedSeedSampleCount": 0,
+        "acceptedSeedSampleCount": 0,
+        "uniquePhysicalAnchorInterfaceCount": 0,
+        "ambiguousPhysicalAnchorInterfaceCount": 0,
+        "physicalSheetIdentityCount": 0,
+        "physicalBoundaryFaceIdentityCount": 0,
+        "acceptedCanonicalLowerAnchorCount": 0,
+        "acceptedCanonicalUpperAnchorCount": 0,
+        "positionResidualSamplingSteps": _percentiles(np.empty(0)),
+        "signedNormalResidualDegrees": _percentiles(np.empty(0)),
+    }
+    if physical_seed_path is not None and physical_seed_manifest is not None:
+        (
+            physical_seed_label,
+            physical_seed_side,
+            physical_seed_anchor,
+            physical_seed_summary,
+        ) = _match_physical_seed_labels(
+            interface_arrays,
+            interfaces,
+            physical_seed_path,
+            physical_seed_manifest,
+            settings=resolved,
+        )
     eligible = (
         trusted
         & (evidence >= resolved.minimum_local_evidence)
@@ -485,6 +742,14 @@ def run_material_surface_graph(
         & (raw_macro_angle <= resolved.maximum_raw_to_macro_normal_degrees)
     )
     interface_index = np.flatnonzero(eligible)
+    local_physical_seed_label = physical_seed_label[interface_index]
+    local_physical_seed_side = physical_seed_side[interface_index]
+    local_physical_face_identity = np.where(
+        local_physical_seed_label >= 0,
+        2 * local_physical_seed_label + local_physical_seed_side.astype(np.int32),
+        -1,
+    ).astype(np.int32)
+    local_physical_seed_anchor = physical_seed_anchor[interface_index]
     local_by_interface = np.full(len(position), -1, dtype=np.int32)
     local_by_interface[interface_index] = np.arange(len(interface_index), dtype=np.int32)
     local_key = key[interface_index]
@@ -633,14 +898,11 @@ def run_material_surface_graph(
     pre_component, pre_component_size, label_iterations = _component_labels(
         len(interface_index), first_edge, second_edge
     )
-    local_sample_bin = sample_bin[interface_index]
-    bin_center = np.asarray(macro_arrays["centerXYZ"], dtype=np.float64)[
-        local_sample_bin
-    ]
+    local_sample_group = sample_group[interface_index]
     tangent_column, normal_depth = _tangent_columns(
         local_position,
-        local_sample_bin,
-        bin_center,
+        local_sample_group,
+        orientation_center[interface_index],
         local_macro_normal,
         stride=stride,
         width_sampling_steps=resolved.tangent_column_width_sampling_steps,
@@ -656,8 +918,53 @@ def run_material_surface_graph(
             maximum_depth_range=(
                 resolved.maximum_column_depth_range_sampling_steps
             ),
+            immutable_seed_label=local_physical_face_identity,
         )
     )
+    component_count = len(component_size)
+    component_anchor_count = np.bincount(
+        component,
+        weights=(local_physical_seed_anchor == 1).astype(np.int32),
+        minlength=component_count,
+    ).astype(np.int32)
+    component_physical_label = np.full(component_count, -1, dtype=np.int32)
+    component_physical_side = np.full(component_count, 255, dtype=np.uint8)
+    for component_id in range(component_count):
+        identities = np.unique(
+            local_physical_face_identity[
+                (component == component_id) & (local_physical_face_identity >= 0)
+            ]
+        )
+        if len(identities) > 1:
+            raise RuntimeError(
+                "physical seed constraint left multiple boundary-face identities in one component"
+            )
+        if len(identities) == 1:
+            identity_value = int(identities[0])
+            component_physical_label[component_id] = identity_value // 2
+            component_physical_side[component_id] = identity_value % 2
+    priority = (
+        component_anchor_count
+        >= resolved.minimum_physical_anchor_samples_for_priority
+    )
+    component_order = np.lexsort(
+        (
+            np.arange(component_count, dtype=np.int32),
+            -component_size,
+            ~priority,
+        )
+    )
+    rank_by_component = np.empty(component_count, dtype=np.int32)
+    rank_by_component[component_order] = np.arange(
+        component_count, dtype=np.int32
+    )
+    component = rank_by_component[component]
+    component_size = component_size[component_order]
+    component_anchor_count = component_anchor_count[component_order]
+    component_physical_label = component_physical_label[component_order]
+    component_physical_side = component_physical_side[component_order]
+    node_physical_label = component_physical_label[component]
+    node_physical_side = component_physical_side[component]
     retained_edge_mask = retained_edge > 0
     first_edge = first_edge[retained_edge_mask]
     second_edge = second_edge[retained_edge_mask]
@@ -670,6 +977,13 @@ def run_material_surface_graph(
         "signedNormalXYZ": local_raw_normal.astype(np.float32),
         "macroNormalXYZ": local_macro_normal.astype(np.float32),
         "macroOrientationConfidence": local_macro_confidence.astype(np.float32),
+        "orientationSource": orientation_source[interface_index].astype(np.uint8),
+        "physicalSeedAnchor": local_physical_seed_anchor.astype(np.uint8),
+        "physicalSheetLabel": node_physical_label.astype(np.int32),
+        "physicalBoundarySide": node_physical_side.astype(np.uint8),
+        "componentPhysicalSheetLabel": component_physical_label,
+        "componentPhysicalBoundarySide": component_physical_side,
+        "componentPhysicalAnchorCount": component_anchor_count,
         "rawToMacroNormalDegrees": raw_macro_angle[interface_index].astype(np.float32),
         "localEvidenceScore": evidence[interface_index].astype(np.float32),
         "preCollisionComponentId": pre_component.astype(np.int32),
@@ -714,6 +1028,27 @@ def run_material_surface_graph(
             "interfaceSampleCount": int(len(position)),
             "eligibleNodeCount": int(len(interface_index)),
             "eligibleNodeFraction": round(len(interface_index) / max(len(position), 1), 6),
+            "eligiblePhysicallyGuidedNodeCount": int(
+                np.count_nonzero(orientation_source[interface_index] == 1)
+            ),
+            "physicallyRejectedInterfaceCount": int(
+                np.count_nonzero(orientation_source == 2)
+            ),
+            "eligiblePhysicalAnchorNodeCount": int(
+                np.count_nonzero(local_physical_seed_anchor == 1)
+            ),
+            "physicallyAnchoredComponentCount": int(
+                np.count_nonzero(component_physical_label >= 0)
+            ),
+            "priorityPhysicalComponentCount": int(
+                np.count_nonzero(
+                    component_anchor_count
+                    >= resolved.minimum_physical_anchor_samples_for_priority
+                )
+            ),
+            "nodesInPhysicallyAnchoredComponents": int(
+                np.sum(component_size[component_physical_label >= 0])
+            ),
             "retainedEdgeCount": int(len(first_edge)),
             "preCollisionComponentCount": int(len(pre_component_size)),
             "componentCount": int(len(component_size)),
@@ -733,6 +1068,7 @@ def run_material_surface_graph(
             "preCollisionRetainedEdgeCount": int(len(retained_edge)),
             "postCollisionRetainedEdgeCount": int(len(first_edge)),
         },
+        "physicalSeedAccounting": physical_seed_summary,
         "distributions": {
             "componentSize": _percentiles(component_size),
             "rawToMacroNormalDegrees": _percentiles(raw_macro_angle[interface_index]),
@@ -751,6 +1087,16 @@ def run_material_surface_graph(
             "node": "one signed air-to-material interface sample",
             "edge": "adjacent processing samples on the same signed face",
             "growthDirection": "local macro tangent plane only",
+            "orientationSelection": (
+                "nearest repeated physical air-papyrus-air mode when available; "
+                "otherwise the generic unsigned interface tensor"
+            ),
+            "physicalIdentityConstraint": (
+                "maximum-score unions may never combine different exact "
+                "air-papyrus-air sheets or opposite boundary sides of one sheet"
+                if physical_seed_manifest is not None
+                else "not supplied"
+            ),
             "crossLayerGuard": "absolute normal height plus signed-normal agreement",
             "transitiveLayerGuard": (
                 "maximum-score unions with one bounded normal-depth interval "

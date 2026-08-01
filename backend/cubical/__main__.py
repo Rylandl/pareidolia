@@ -74,6 +74,26 @@ from .material_surface_graph import (
     MaterialSurfaceGraphSettings,
     run_material_surface_graph,
 )
+from .material_surface_growth import (
+    MaterialSurfaceGrowthSettings,
+    run_material_surface_growth,
+)
+from .material_surface_bridging import (
+    MaterialSurfaceBridgingSettings,
+    run_material_surface_bridging,
+)
+from .material_surface_fixed_point import (
+    MaterialSurfaceFixedPointSettings,
+    run_material_surface_fixed_point,
+)
+from .material_surface_frontier import (
+    MaterialSurfaceFrontierSettings,
+    run_material_surface_frontier_census,
+)
+from .physical_mid_surface import (
+    PhysicalMidSurfaceSettings,
+    run_physical_mid_surface_catalog,
+)
 from .mode_bank import run_mode_bank
 from .multiseam import run_multiseam_audit
 from .needle_field import (
@@ -785,6 +805,7 @@ def _macro_orientation(args: argparse.Namespace) -> None:
     summary = run_macro_orientation_field(
         args.interfaces,
         args.output,
+        isolated_slab_root=args.isolated_slabs,
         settings=MacroOrientationSettings(**settings_values),
         force=args.force,
     )
@@ -801,7 +822,104 @@ def _material_surface_graph(args: argparse.Namespace) -> None:
         args.interfaces,
         args.macro_orientation,
         args.output,
+        physical_seed_root=args.physical_seeds,
         settings=MaterialSurfaceGraphSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_surface_growth(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_material_surface_growth(
+        args.interfaces,
+        args.macro_orientation,
+        args.surface_graph,
+        args.output,
+        settings=MaterialSurfaceGrowthSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_surface_bridging(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_material_surface_bridging(
+        args.interfaces,
+        args.macro_orientation,
+        args.interior_growth,
+        args.output,
+        settings=MaterialSurfaceBridgingSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_surface_fixed_point(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    growth_values: dict[str, object] = {}
+    bridging_values: dict[str, object] = {}
+    for path, target in (
+        (args.settings_json, settings_values),
+        (args.growth_settings_json, growth_values),
+        (args.bridging_settings_json, bridging_values),
+    ):
+        if path is None:
+            continue
+        values = json.loads(Path(path).read_text())
+        if not isinstance(values, dict):
+            raise ValueError("settings JSON must contain one object")
+        target.update(values)
+    summary = run_material_surface_fixed_point(
+        args.interfaces,
+        args.macro_orientation,
+        args.seed_surface,
+        args.output,
+        settings=MaterialSurfaceFixedPointSettings(**settings_values),
+        growth_settings=MaterialSurfaceGrowthSettings(**growth_values),
+        bridging_settings=MaterialSurfaceBridgingSettings(**bridging_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _material_surface_frontier_census(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_material_surface_frontier_census(
+        args.interfaces,
+        args.macro_orientation,
+        args.surface,
+        args.output,
+        settings=MaterialSurfaceFrontierSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_mid_surface(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_mid_surface_catalog(
+        args.paired_bank,
+        args.paired_growth,
+        args.material_surface,
+        args.output,
+        settings=PhysicalMidSurfaceSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2929,6 +3047,14 @@ def main() -> None:
         ),
     )
     macro_orientation.add_argument("--interfaces", type=Path, required=True)
+    macro_orientation.add_argument(
+        "--isolated-slabs",
+        type=Path,
+        help=(
+            "optional clear air-papyrus-air profiles used as multimodal "
+            "physical orientation guidance"
+        ),
+    )
     macro_orientation.add_argument("--output", type=Path, required=True)
     macro_orientation.add_argument(
         "--settings-json",
@@ -2950,6 +3076,14 @@ def main() -> None:
     material_surface_graph.add_argument(
         "--macro-orientation", type=Path, required=True
     )
+    material_surface_graph.add_argument(
+        "--physical-seeds",
+        type=Path,
+        help=(
+            "optional one-sided interface bank whose exact paired-profile "
+            "sheet identities are immutable graph union constraints"
+        ),
+    )
     material_surface_graph.add_argument("--output", type=Path, required=True)
     material_surface_graph.add_argument(
         "--settings-json",
@@ -2958,6 +3092,151 @@ def main() -> None:
     )
     material_surface_graph.add_argument("--force", action="store_true")
     material_surface_graph.set_defaults(handler=_material_surface_graph)
+    material_surface_growth = subparsers.add_parser(
+        "grow-material-surface-interiors",
+        description=(
+            "Recover unused signed interfaces only where one existing surface "
+            "component encloses the candidate in its local tangent plane."
+        ),
+    )
+    material_surface_growth.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    material_surface_growth.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    material_surface_growth.add_argument(
+        "--surface-graph",
+        "--seed-surface",
+        dest="surface_graph",
+        type=Path,
+        required=True,
+        help="root graph or any derived signed-surface artifact",
+    )
+    material_surface_growth.add_argument("--output", type=Path, required=True)
+    material_surface_growth.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MaterialSurfaceGrowthSettings keyword object",
+    )
+    material_surface_growth.add_argument("--force", action="store_true")
+    material_surface_growth.set_defaults(handler=_material_surface_growth)
+    material_surface_bridging = subparsers.add_parser(
+        "bridge-material-surface-boundaries",
+        description=(
+            "Merge fragments only when a spatial run of unused signed faces "
+            "has repeated, opposing support from exactly two components."
+        ),
+    )
+    material_surface_bridging.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    material_surface_bridging.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    material_surface_bridging.add_argument(
+        "--interior-growth", type=Path, required=True
+    )
+    material_surface_bridging.add_argument(
+        "--output", type=Path, required=True
+    )
+    material_surface_bridging.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MaterialSurfaceBridgingSettings keyword object",
+    )
+    material_surface_bridging.add_argument("--force", action="store_true")
+    material_surface_bridging.set_defaults(handler=_material_surface_bridging)
+    material_surface_fixed_point = subparsers.add_parser(
+        "iterate-material-surfaces",
+        description=(
+            "Alternate enclosed-hole recovery and repeated-boundary bridging "
+            "until a complete cycle changes neither nodes nor components."
+        ),
+    )
+    material_surface_fixed_point.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    material_surface_fixed_point.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    material_surface_fixed_point.add_argument(
+        "--seed-surface", type=Path, required=True
+    )
+    material_surface_fixed_point.add_argument(
+        "--output", type=Path, required=True
+    )
+    material_surface_fixed_point.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MaterialSurfaceFixedPointSettings keyword object",
+    )
+    material_surface_fixed_point.add_argument(
+        "--growth-settings-json",
+        type=Path,
+        help="optional MaterialSurfaceGrowthSettings keyword object",
+    )
+    material_surface_fixed_point.add_argument(
+        "--bridging-settings-json",
+        type=Path,
+        help="optional MaterialSurfaceBridgingSettings keyword object",
+    )
+    material_surface_fixed_point.add_argument("--force", action="store_true")
+    material_surface_fixed_point.set_defaults(
+        handler=_material_surface_fixed_point
+    )
+    material_surface_frontier = subparsers.add_parser(
+        "census-material-surface-frontiers",
+        description=(
+            "Find extended open-frontier bands corroborated by a physically "
+            "plausible opposite air-to-material face, without mutating surfaces."
+        ),
+    )
+    material_surface_frontier.add_argument(
+        "--interfaces", type=Path, required=True
+    )
+    material_surface_frontier.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    material_surface_frontier.add_argument(
+        "--surface", type=Path, required=True
+    )
+    material_surface_frontier.add_argument(
+        "--output", type=Path, required=True
+    )
+    material_surface_frontier.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional MaterialSurfaceFrontierSettings keyword object",
+    )
+    material_surface_frontier.add_argument("--force", action="store_true")
+    material_surface_frontier.set_defaults(
+        handler=_material_surface_frontier_census
+    )
+    physical_mid_surface = subparsers.add_parser(
+        "build-physical-mid-surfaces",
+        description=(
+            "Pair the two immutable signed faces of each air-papyrus-air "
+            "hypothesis into an explicit physical mid-surface catalog."
+        ),
+    )
+    physical_mid_surface.add_argument(
+        "--paired-bank", type=Path, required=True
+    )
+    physical_mid_surface.add_argument(
+        "--paired-growth", type=Path, required=True
+    )
+    physical_mid_surface.add_argument(
+        "--material-surface", type=Path, required=True
+    )
+    physical_mid_surface.add_argument("--output", type=Path, required=True)
+    physical_mid_surface.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PhysicalMidSurfaceSettings keyword object",
+    )
+    physical_mid_surface.add_argument("--force", action="store_true")
+    physical_mid_surface.set_defaults(handler=_physical_mid_surface)
     isolated_slab_acus_audit = subparsers.add_parser(
         "audit-isolated-slabs-with-acus",
         description=(

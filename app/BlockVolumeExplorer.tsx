@@ -41,20 +41,36 @@ type SurfaceComponent = {
   experimentalCompletionRows: number[];
   meanEvidence?: number;
   meanMacroConfidence?: number;
+  grownNodeCount?: number;
+  bridgeNodeCount?: number;
+  physicallyGuidedNodeCount?: number;
+  physicallyGuidedNodeFraction?: number;
+  physicalAnchorNodeCount?: number;
+  physicallyAnchored?: boolean;
+  physicalSheetLabel?: number | null;
+  physicalBoundarySide?: number | null;
+  denseBoundaryPairNodeCount?: number;
+  medianThicknessVoxels?: number;
+  medianPairCost?: number;
   splitByStratumGuard?: boolean;
 };
 
-type InterfaceNode = [number, number, number, number];
+type InterfaceNode = [number, number, number, number, number];
 
 type BlockSurfaceResult = {
   schema: string;
   version: number;
-  representation?: "material-interface-graph";
+  representation?: "material-interface-graph" | "physical-mid-surface-graph";
   variant: string;
   artifact: {
     manifestPath: string;
     state: string;
     method: string;
+    finalManifestPath?: string;
+  };
+  fixedPoint?: {
+    converged: boolean;
+    completedCycles: number;
   };
   source: {
     path: string;
@@ -88,6 +104,15 @@ type BlockSurfaceResult = {
     retainedEdgeCount?: number;
     columnConflictRejectedEdgeCount?: number;
     eligibleNodeFraction?: number;
+    seedNodeCount?: number;
+    grownNodeCount?: number;
+    bridgeCandidateNodeCount?: number;
+    componentMergeCount?: number;
+    physicallyGuidedNodeCount?: number;
+    physicalAnchorNodeCount?: number;
+    physicallyAnchoredNodeCount?: number;
+    physicallyAnchoredComponentCount?: number;
+    denseBoundaryPairNodeCount?: number;
   };
   components: SurfaceComponent[];
   vertices: Point3[];
@@ -135,6 +160,7 @@ type ProjectedInterfaceNode = {
   y: number;
   depth: number;
   component: number;
+  kind: number;
 };
 
 const DEFAULT_ORBIT: Orbit = { yaw: -0.72, pitch: 0.48, zoom: 1.35 };
@@ -470,10 +496,12 @@ export function BlockVolumeExplorer() {
   );
 
   const isInterfaceGraph = result?.representation === "material-interface-graph";
+  const isMidSurfaceGraph = result?.representation === "physical-mid-surface-graph";
+  const isPointGraph = isInterfaceGraph || isMidSurfaceGraph;
 
   const visiblePrimitiveCount = useMemo(() => {
     if (!result || !showSheets) return 0;
-    if (result.representation === "material-interface-graph") {
+    if (result.representation) {
       return (result.interfaceNodes ?? []).reduce((count, node) => {
         const component = result.components[node[3] - 1];
         return count +
@@ -544,7 +572,7 @@ export function BlockVolumeExplorer() {
     const cutoff = axis === -1 ? Infinity : extent[axis] * clipFraction;
     const projected: ProjectedTriangle[] = [];
     const projectedInterfaceNodes: ProjectedInterfaceNode[] = [];
-    if (showSheets && result.representation === "material-interface-graph") {
+    if (showSheets && result.representation) {
       const groups = Array.from(
         { length: result.components.length + 1 },
         () => [] as ProjectedInterfaceNode[],
@@ -567,6 +595,7 @@ export function BlockVolumeExplorer() {
           y: projectedPoint.y,
           depth: projectedPoint.depth,
           component: node[3],
+          kind: node[4],
         };
         groups[node[3]].push(entry);
         projectedInterfaceNodes.push(entry);
@@ -594,6 +623,18 @@ export function BlockVolumeExplorer() {
         for (const entry of groups[rank]) {
           context.fillRect(entry.x - half, entry.y - half, size, size);
         }
+      }
+      context.fillStyle = "rgba(255, 126, 91, 0.96)";
+      for (const entry of projectedInterfaceNodes) {
+        if (entry.kind !== 2) continue;
+        const size = pointSize * 2.1;
+        context.fillRect(entry.x - size * 0.5, entry.y - size * 0.5, size, size);
+      }
+      context.fillStyle = "rgba(235, 255, 246, 0.98)";
+      for (const entry of projectedInterfaceNodes) {
+        if (entry.kind !== 3) continue;
+        const size = pointSize * 1.65;
+        context.fillRect(entry.x - size * 0.5, entry.y - size * 0.5, size, size);
       }
     } else if (showSheets) {
       for (const triangle of result.triangles) {
@@ -858,7 +899,7 @@ export function BlockVolumeExplorer() {
     if (!drag || drag.moved) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const point = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-    if (result?.representation === "material-interface-graph") {
+    if (result?.representation) {
       let hitComponent: number | null = null;
       let bestDistanceSquared = 36;
       for (const entry of hitInterfaceNodesRef.current) {
@@ -898,14 +939,20 @@ export function BlockVolumeExplorer() {
         </nav>
         <div>
           <p className="eyebrow">
-            {isInterfaceGraph ? "Dense CT faces · macro-tangent graph" : "Acus · current cubical reconstruction"}
+            {isMidSurfaceGraph
+              ? "Air–papyrus–air profiles · paired physical centers"
+              : isInterfaceGraph
+              ? "Physical slab modes · dense signed CT faces"
+              : "Acus · current cubical reconstruction"}
           </p>
-          <h1>{isInterfaceGraph ? "Material interfaces in CT" : "Surface components in CT"}</h1>
+          <h1>{isMidSurfaceGraph ? "Papyrus mid-surfaces in CT" : isInterfaceGraph ? "Material interfaces in CT" : "Surface components in CT"}</h1>
         </div>
         <p className="block-volume-summary">
           {result
-            ? isInterfaceGraph
-              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} strong face samples · ${result.stats.componentCount.toLocaleString()} components · ${(result.stats.retainedEdgeCount ?? 0).toLocaleString()} tangent edges · ${(result.stats.columnConflictRejectedEdgeCount ?? 0).toLocaleString()} stratum conflicts rejected`
+            ? isMidSurfaceGraph
+              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} physical center samples · ${(result.stats.physicalAnchorNodeCount ?? 0).toLocaleString()} direct profiles + ${(result.stats.denseBoundaryPairNodeCount ?? 0).toLocaleString()} dense paired-face confirmations · ${result.stats.componentCount.toLocaleString()} fragments`
+              : isInterfaceGraph
+              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} assigned face samples · ${(result.stats.physicalAnchorNodeCount ?? 0).toLocaleString()} exact paired-profile anchors · ${(result.stats.physicallyAnchoredComponentCount ?? 0).toLocaleString()} anchored components · ${result.stats.componentCount.toLocaleString()} total components${result.fixedPoint ? ` · fixed point in ${result.fixedPoint.completedCycles} cycles` : ` after ${(result.stats.componentMergeCount ?? 0).toLocaleString()} repeated-evidence merges`}`
               : `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.triangleCount.toLocaleString()} triangles · ${result.stats.componentCount.toLocaleString()} components · ${result.stats.baselineTriangleCount.toLocaleString()} pre-join + ${result.stats.experimentalTriangleCount.toLocaleString()} experimental · ${result.stats.regionCountBefore} → ${result.stats.regionCountAfter} regions`
             : message}
         </p>
@@ -937,7 +984,7 @@ export function BlockVolumeExplorer() {
           />
         </label>
         <label className="block-volume-range-control">
-          <span>{isInterfaceGraph ? "Interface opacity" : "Surface opacity"}</span>
+          <span>{isPointGraph ? "Sample opacity" : "Surface opacity"}</span>
           <strong>{Math.round(sheetOpacity * 100)}%</strong>
           <input
             type="range"
@@ -957,10 +1004,10 @@ export function BlockVolumeExplorer() {
             {COMPONENT_SIZE_OPTIONS.map((value) => (
               <option value={value} key={value}>
                 {value === 1
-                  ? isInterfaceGraph
+                  ? isPointGraph
                     ? "All loaded components"
                     : "All components"
-                  : `${value}+ ${isInterfaceGraph ? "samples" : "triangles"}`}
+                  : `${value}+ ${isPointGraph ? "samples" : "triangles"}`}
               </option>
             ))}
           </select>
@@ -998,9 +1045,9 @@ export function BlockVolumeExplorer() {
             Volume
           </button>
           <button type="button" aria-pressed={showSheets} onClick={() => setShowSheets((value) => !value)}>
-            {isInterfaceGraph ? "Interfaces" : "Surfaces"}
+            {isMidSurfaceGraph ? "Mid-surfaces" : isInterfaceGraph ? "Interfaces" : "Surfaces"}
           </button>
-          {!isInterfaceGraph ? (
+          {!isPointGraph ? (
             <>
               <button type="button" aria-pressed={showEdges} onClick={() => setShowEdges((value) => !value)}>
                 Edges
@@ -1028,7 +1075,9 @@ export function BlockVolumeExplorer() {
             className="block-sheet-overlay"
             tabIndex={0}
             role="img"
-            aria-label={isInterfaceGraph
+            aria-label={isMidSurfaceGraph
+              ? "Orbitable CT volume containing paired physical papyrus mid-surface fragments. Drag to orbit, pinch or scroll to zoom, and click a fragment to inspect it."
+              : isInterfaceGraph
               ? "Orbitable CT volume containing macro-tangent material-interface components. Drag to orbit, pinch or scroll to zoom, and click an interface component to inspect it."
               : "Orbitable CT volume containing the current cubical surface mesh. Experimental joins are coral. Drag to orbit, pinch or scroll to zoom, and click a surface to inspect its component."}
             onPointerDown={handlePointerDown}
@@ -1044,14 +1093,15 @@ export function BlockVolumeExplorer() {
 
           <div className="block-volume-legend" aria-hidden="true">
             <span><i data-kind="volume" />CT material</span>
-            <span><i data-kind="sheet" />{isInterfaceGraph ? "signed face component" : "pre-join component"}</span>
-            {!isInterfaceGraph ? <span><i data-kind="experimental" />experimental completion</span> : null}
-            <span>drag orbit · pinch zoom · click {isInterfaceGraph ? "interface" : "surface"}</span>
+            <span><i data-kind="sheet" />{isMidSurfaceGraph ? "physical mid-surface fragment" : isInterfaceGraph ? "signed face component" : "pre-join component"}</span>
+            {isPointGraph ? <span><i data-kind="anchor" />{isMidSurfaceGraph ? "dense two-face confirmation" : "exact paired-profile anchor"}</span> : null}
+            {isInterfaceGraph ? <span><i data-kind="experimental" />repeated-evidence bridge</span> : !isMidSurfaceGraph ? <span><i data-kind="experimental" />experimental completion</span> : null}
+            <span>drag orbit · pinch zoom · click {isPointGraph ? "fragment" : "surface"}</span>
           </div>
 
           <div className="block-volume-count">
             {state === "ready"
-              ? `${visiblePrimitiveCount.toLocaleString()} / ${isInterfaceGraph ? (result?.stats.displayedNodeCount ?? 0).toLocaleString() : result?.stats.triangleCount.toLocaleString()} ${isInterfaceGraph ? "loaded face samples" : "triangles"} visible`
+              ? `${visiblePrimitiveCount.toLocaleString()} / ${isPointGraph ? (result?.stats.displayedNodeCount ?? 0).toLocaleString() : result?.stats.triangleCount.toLocaleString()} ${isMidSurfaceGraph ? "loaded center samples" : isInterfaceGraph ? "loaded face samples" : "triangles"} visible`
               : message}
           </div>
 
@@ -1073,12 +1123,12 @@ export function BlockVolumeExplorer() {
           {selected ? (
             <div className="block-volume-selection">
               <div>
-                <span>Selected {isInterfaceGraph ? "interface" : "surface"} component</span>
+                <span>Selected {isMidSurfaceGraph ? "mid-surface fragment" : isInterfaceGraph ? "interface" : "surface"} component</span>
                 <strong>
-                  #{selected.rank} · stable {selected.stableId} · {isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
+                  #{selected.rank} · stable {selected.stableId} · {isMidSurfaceGraph ? `${selected.nodeCount.toLocaleString()} center samples` : isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
                 </strong>
                 <small>
-                  {isInterfaceGraph ? "span" : `${selected.nodeCount.toLocaleString()} mesh nodes · ${Math.round(selected.surfaceAreaVoxelsSquared).toLocaleString()} vox² · span`} {selected.boundsMaximumXYZ
+                  {isPointGraph ? "span" : `${selected.nodeCount.toLocaleString()} mesh nodes · ${Math.round(selected.surfaceAreaVoxelsSquared).toLocaleString()} vox² · span`} {selected.boundsMaximumXYZ
                     .map((value, index) => Math.round(value - selected.boundsMinimumXYZ[index]))
                     .join(" × ")} vox
                 </small>
@@ -1088,12 +1138,26 @@ export function BlockVolumeExplorer() {
                   </small>
                 ) : null}
                 <small>
-                  {isInterfaceGraph ? "raw-to-macro normal residual" : "triangle normal residual"} median/p90/max {selected.normalResidualDegrees.median.toFixed(1)}°/{selected.normalResidualDegrees.p90.toFixed(1)}°/{selected.normalResidualDegrees.maximum.toFixed(1)}°
+                  {isMidSurfaceGraph ? "paired-face normal disagreement" : isInterfaceGraph ? "raw-to-macro normal residual" : "triangle normal residual"} median/p90/max {selected.normalResidualDegrees.median.toFixed(1)}°/{selected.normalResidualDegrees.p90.toFixed(1)}°/{selected.normalResidualDegrees.maximum.toFixed(1)}°
                 </small>
-                {isInterfaceGraph ? (
-                  <small>
-                    mean face evidence {(selected.meanEvidence ?? 0).toFixed(2)} · macro orientation confidence {(selected.meanMacroConfidence ?? 0).toFixed(2)}
-                  </small>
+                {isMidSurfaceGraph ? (
+                  <>
+                    <small>
+                      {(selected.physicalAnchorNodeCount ?? 0).toLocaleString()} direct physical profiles · {(selected.denseBoundaryPairNodeCount ?? 0).toLocaleString()} dense paired-face confirmations · median thickness {(selected.medianThicknessVoxels ?? 0).toFixed(1)} vox
+                    </small>
+                    <small>
+                      physical sheet hypothesis {selected.physicalSheetLabel} · mean profile evidence {(selected.meanEvidence ?? 0).toFixed(2)}
+                    </small>
+                  </>
+                ) : isInterfaceGraph ? (
+                  <>
+                    <small>
+                      mean face evidence {(selected.meanEvidence ?? 0).toFixed(2)} · physical guidance {Math.round(100 * (selected.physicallyGuidedNodeFraction ?? 0))}% · {(selected.grownNodeCount ?? 0).toLocaleString()} enclosed holes · {(selected.bridgeNodeCount ?? 0).toLocaleString()} bridge faces
+                    </small>
+                    <small>
+                      {(selected.physicalAnchorNodeCount ?? 0).toLocaleString()} exact paired-profile anchors{selected.physicallyAnchored ? ` · physical sheet hypothesis ${selected.physicalSheetLabel}${selected.physicalBoundarySide === 0 ? " · canonical lower face" : selected.physicalBoundarySide === 1 ? " · canonical upper face" : ""}` : " · unanchored hypothesis"}
+                    </small>
+                  </>
                 ) : null}
               </div>
               <button

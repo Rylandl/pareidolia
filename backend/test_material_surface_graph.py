@@ -10,6 +10,8 @@ import numpy as np
 from backend.cubical.contracts import sha256_file
 from backend.cubical.macro_orientation import (
     MACRO_ORIENTATION_SCHEMA,
+    MacroOrientationSettings,
+    _physical_orientation_modes,
     run_macro_orientation_field,
 )
 from backend.cubical.material_interface import MATERIAL_INTERFACE_SCHEMA
@@ -21,6 +23,39 @@ from backend.cubical.material_surface_graph import (
 
 
 class MaterialSurfaceGraphTests(unittest.TestCase):
+    def test_physical_orientation_modes_preserve_a_local_hairpin(self) -> None:
+        tilt = np.deg2rad(2.0)
+        normal = np.asarray(
+            (
+                (0.0, 0.0, 1.0),
+                (np.sin(tilt), 0.0, np.cos(tilt)),
+                (0.0, 0.0, -1.0),
+                (-np.sin(tilt), 0.0, np.cos(tilt)),
+                (1.0, 0.0, 0.0),
+                (np.cos(tilt), 0.0, np.sin(tilt)),
+                (-1.0, 0.0, 0.0),
+                (np.cos(tilt), 0.0, -np.sin(tilt)),
+            ),
+            dtype=np.float64,
+        )
+        modes = _physical_orientation_modes(
+            np.zeros(len(normal), dtype=np.int32),
+            np.column_stack(
+                (np.arange(len(normal)), np.zeros((len(normal), 2)))
+            ),
+            normal,
+            np.full(len(normal), 0.95, dtype=np.float64),
+            bin_count=1,
+            settings=MacroOrientationSettings(
+                minimum_physical_mode_samples=4,
+                physical_mode_radius_degrees=15.0,
+            ),
+        )
+        self.assertEqual(len(modes), 2)
+        axes = np.asarray([mode["normalXYZ"] for mode in modes])
+        self.assertGreater(float(np.max(np.abs(axes @ (0.0, 0.0, 1.0)))), 0.99)
+        self.assertGreater(float(np.max(np.abs(axes @ (1.0, 0.0, 0.0)))), 0.99)
+
     def test_tangent_column_conflict_breaks_a_transitive_layer_loop(self) -> None:
         component, size, retained, summary = _collision_safe_components(
             np.zeros(5, dtype=np.int32),
@@ -35,6 +70,23 @@ class MaterialSurfaceGraphTests(unittest.TestCase):
         self.assertEqual(len(np.unique(component)), 2)
         self.assertEqual(retained.tolist(), [1, 1, 0, 1])
         self.assertEqual(summary["columnConflictRejectedEdgeCount"], 1)
+
+    def test_opposite_physical_boundary_sides_split_a_geometric_component(self) -> None:
+        component, size, retained, summary = _collision_safe_components(
+            np.zeros(5, dtype=np.int32),
+            np.asarray((0, 1, 2, 3), dtype=np.int32),
+            np.asarray((1, 2, 3, 4), dtype=np.int32),
+            np.asarray((1.0, 0.9, 0.8, 0.7), dtype=np.float32),
+            np.arange(5, dtype=np.int32),
+            np.zeros(5, dtype=np.float32),
+            maximum_depth_range=2.25,
+            # Encoded identities 20 and 21 are the two sides of sheet 10.
+            immutable_seed_label=np.asarray((20, -1, -1, -1, 21)),
+        )
+        self.assertEqual(size.tolist(), [4, 1])
+        self.assertEqual(len(np.unique(component)), 2)
+        self.assertEqual(retained.tolist(), [1, 1, 1, 0])
+        self.assertEqual(summary["physicalSeedConflictRejectedEdgeCount"], 1)
 
     def test_macro_tensor_then_tangent_graph_keeps_parallel_faces_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

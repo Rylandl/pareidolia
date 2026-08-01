@@ -1698,12 +1698,38 @@ python -m backend.cubical detect-material-interfaces \
 
 python -m backend.cubical solve-macro-sheet-orientation \
   --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
-  --output work/multiseam-2x2-b00c03c/macro-orientation-field-v1
+  --isolated-slabs work/multiseam-2x2-b00c03c/isolated-slabs-core-12x12x10-v1 \
+  --output work/multiseam-2x2-b00c03c/macro-orientation-physical-v1
 
 python -m backend.cubical build-material-surface-graph \
   --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
-  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-field-v1 \
-  --output work/multiseam-2x2-b00c03c/material-surface-graph-v1
+  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-physical-v1 \
+  --physical-seeds work/multiseam-2x2-b00c03c/one-sided-interface-bank-v1 \
+  --output work/multiseam-2x2-b00c03c/material-surface-graph-physical-face-seeded-v1
+
+python -m backend.cubical grow-material-surface-interiors \
+  --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
+  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-physical-v1 \
+  --surface-graph work/multiseam-2x2-b00c03c/material-surface-graph-physical-face-seeded-v1 \
+  --output work/multiseam-2x2-b00c03c/material-surface-growth-physical-face-seeded-v1
+
+python -m backend.cubical bridge-material-surface-boundaries \
+  --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
+  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-physical-v1 \
+  --interior-growth work/multiseam-2x2-b00c03c/material-surface-growth-physical-face-seeded-v1 \
+  --output work/multiseam-2x2-b00c03c/material-surface-bridging-physical-face-seeded-v1
+
+python -m backend.cubical iterate-material-surfaces \
+  --interfaces work/multiseam-2x2-b00c03c/material-interface-field-v1 \
+  --macro-orientation work/multiseam-2x2-b00c03c/macro-orientation-physical-v1 \
+  --seed-surface work/multiseam-2x2-b00c03c/material-surface-graph-physical-face-seeded-v1 \
+  --output work/multiseam-2x2-b00c03c/material-surface-fixed-point-physical-face-seeded-v1
+
+python -m backend.cubical build-physical-mid-surfaces \
+  --paired-bank work/multiseam-2x2-b00c03c/paired-surface-bank-v1 \
+  --paired-growth work/multiseam-2x2-b00c03c/paired-surface-growth-v1 \
+  --material-surface work/multiseam-2x2-b00c03c/material-surface-fixed-point-physical-face-seeded-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-mid-surface-catalog-v1
 ```
 
 Default scale selection is physical rather than dataset-specific: CT sampling
@@ -1714,6 +1740,53 @@ membership is formed by maximum-score unions subject to one bounded depth
 interval per local tangent column, preventing a valid sequence of local shear
 edges from returning on a parallel layer.
 
-`/block-volume` loads this guarded interface graph by default. It sends the
-leading 256 components to the browser as interface samples while reporting
-statistics over the complete graph.
+Interior growth then considers the complete immutable face field, but admits a
+weak face only when one component encloses it in the local tangent plane. The
+angular support test is an approximate convex-hull test: no support gap may
+exceed 180 degrees. Components cannot merge during this stage, and every added
+sample must preserve the same tangent-column depth interval. This fills holes
+without turning one-sided support into outward tendrils.
+
+Boundary bridging operates on the still-unused faces. One candidate must have
+multiple anchors in exactly two components, those anchors must oppose one
+another in the tangent plane, and at least three adjacent candidates must form
+an extended bundle. Component unions are processed by descending bundle score
+and rejected if the union or its bridge faces would violate any local stratum
+depth interval. A single edge can never merge components.
+
+Clear air-papyrus-air profiles now guide the macro field without forcing one
+average normal through a hairpin. Repeated profile normals are clustered into
+up to four unsigned modes per macro bin. Every dense interface selects the
+nearest mode; interfaces more than 50 degrees from every physical mode are
+deferred. Without a physical-profile input, this reduces exactly to the legacy
+single-tensor field, which preserves the known-unrolled control result.
+
+The physical seed constraint is a signed-face identity, not merely a sheet
+identity. Its key is `(paired sheet label, canonical boundary side)`. This is
+important because the lower and upper air-to-material boundaries of one
+papyrus sheet are separated by the sheet thickness and must never become graph
+neighbors. They meet only later through an explicit physical correspondence.
+On the current block this stricter invariant rejects 38,059 otherwise plausible
+unions and removes all components containing anchors from both sides of one
+sheet, while retaining the same 264,405 eligible face samples.
+
+The side-aware fixed point converges in three cycles. It retains 265,994 face
+samples (72.6801% of the immutable interface field), 721,985 edges, and 13,735
+signed-face components. Its final audit reports zero cross-component edges,
+zero tangent-column depth violations, zero invalid physical identities, and
+zero components crossing a physical boundary-face identity.
+
+`build-physical-mid-surfaces` is the first explicit collapse to papyrus rather
+than a CT boundary. It combines 95,041 directly selected air-papyrus-air
+midpoints with 14,993 mutual lower/upper correspondences recovered from the
+dense face graph. Dense correspondences must agree with a nearby measured
+profile thickness, point toward one another, have opposing signed normals, and
+remain within a bounded tangent residual. Their median thickness residual from
+the local physical profile is -0.116 voxel. Profile continuity, dense boundary
+continuity, and geometry-checked attachments form 110,034 center samples in 911
+fragments; 229 fragments contain at least 128 samples and the largest contains
+2,337.
+
+`/block-volume` loads this physical mid-surface catalog by default. It sends the
+leading 256 fragments to the browser; direct physical profile centers are
+colored by fragment and dense two-boundary confirmations are marked brightly.
