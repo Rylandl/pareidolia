@@ -37,7 +37,7 @@ class PhysicalRibbonFlattenedAuditSettings:
     depth_fractions: tuple[float, ...] = (-0.35, 0.0, 0.35)
     structure_window_radius_pixels: int = 4
     minimum_orientation_coherence: float = 0.15
-    minimum_boundary_edge_measurements: int = 12
+    minimum_boundary_edge_measurements: int = 6
     maximum_median_excess_floor_degrees: float = 5.0
     maximum_control_spread_fraction: float = 0.25
 

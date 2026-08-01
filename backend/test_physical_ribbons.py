@@ -29,9 +29,16 @@ from backend.cubical.physical_ribbon_flattened_audit import (
     boundary_texture_compatibility,
     flattened_texture_structure,
 )
+from backend.cubical.physical_ribbon_depth_fields import (
+    _coherent_supported_fraction,
+    _grid_edges,
+    _profile_fields,
+    solve_collective_depth_labels,
+)
 from backend.cubical.physical_ribbon_patch_states import (
     _lineage_audit,
     _selection_conflicts,
+    optimize_collective_patch_coverage,
 )
 from backend.cubical.physical_ribbon_texture_gate import (
     texture_patch_decisions,
@@ -489,6 +496,30 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
             (0, 1),
         )
 
+    def test_whole_patch_coverage_avoids_duplicate_candidate_cluster(self) -> None:
+        selected, stats = optimize_collective_patch_coverage(
+            np.asarray((0.4, 0.3, 0.0), dtype=np.float32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float32),
+            np.asarray((0,), dtype=np.int32),
+            np.asarray((2,), dtype=np.int32),
+            np.asarray(
+                (
+                    (1, 0),
+                    (1, 0),
+                    (0, 1),
+                ),
+                dtype=bool,
+            ),
+            np.ones(2, dtype=np.float32),
+            maximum_sweeps=4,
+            initial_selection=np.asarray((1, 0, 0), dtype=bool),
+        )
+        np.testing.assert_array_equal(selected, (0, 1, 1))
+        self.assertEqual(stats["coveredPixelFraction"], 1.0)
+        self.assertFalse(stats["singleCellGrowth"])
+
     def test_flattened_texture_audit_recovers_coherent_axial_pattern(self) -> None:
         image = np.tile(np.arange(32, dtype=np.float32), (32, 1))
         _, statistics = flattened_texture_structure(
@@ -885,6 +916,89 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
         )
         self.assertEqual(states[0][1], (1 << 2) | (1 << 3))
         self.assertTrue(stats["baselineStatePreserved"])
+
+
+class PhysicalRibbonDepthFieldTests(unittest.TestCase):
+    def test_collective_line_solve_crosses_a_unary_barrier(self) -> None:
+        coordinates = np.column_stack(
+            (np.arange(7, dtype=np.int32), np.zeros(7, dtype=np.int32))
+        )
+        shifts = np.asarray((0.0, 1.0), dtype=np.float32)
+        # The all-one state is locally stable to every single-pixel change:
+        # each +1 unary improvement would create at least one pairwise cut.
+        # A complete row solve can make the globally superior all-zero move.
+        unary = np.column_stack(
+            (np.ones(7, dtype=np.float32), np.zeros(7, dtype=np.float32))
+        )
+        labels, stats = solve_collective_depth_labels(
+            unary,
+            coordinates,
+            shifts,
+            smoothness_weight=2.0,
+            truncation_thicknesses=1.0,
+            maximum_sweeps=4,
+        )
+        np.testing.assert_array_equal(labels, np.zeros(7, dtype=np.int16))
+        self.assertFalse(stats["singlePixelGrowth"])
+
+    def test_truncated_smoothness_preserves_coherent_delamination(self) -> None:
+        coordinates = np.asarray(
+            [(u_value, v_value) for v_value in range(3) for u_value in range(8)],
+            dtype=np.int32,
+        )
+        shifts = np.asarray((-1.0, 0.0, 1.0), dtype=np.float32)
+        unary = np.zeros((len(coordinates), len(shifts)), dtype=np.float32)
+        unary[coordinates[:, 0] < 4, 0] = 2.0
+        unary[coordinates[:, 0] >= 4, 2] = 2.0
+        labels, _ = solve_collective_depth_labels(
+            unary,
+            coordinates,
+            shifts,
+            smoothness_weight=0.4,
+            truncation_thicknesses=0.5,
+            maximum_sweeps=6,
+        )
+        np.testing.assert_array_equal(labels[coordinates[:, 0] < 4], 0)
+        np.testing.assert_array_equal(labels[coordinates[:, 0] >= 4], 2)
+
+    def test_patch_grid_edges_are_face_local(self) -> None:
+        coordinates = np.asarray(
+            ((0, 0), (1, 0), (1, 1), (3, 0)), dtype=np.int32
+        )
+        first, second = _grid_edges(coordinates)
+        self.assertEqual(
+            {tuple(sorted(value)) for value in zip(first.tolist(), second.tolist())},
+            {(0, 1), (1, 2)},
+        )
+
+    def test_disconnected_patch_is_not_mistaken_for_incoherent_ct(self) -> None:
+        first = np.asarray((0, 2), dtype=np.int32)
+        second = np.asarray((1, 3), dtype=np.int32)
+        self.assertEqual(
+            _coherent_supported_fraction(
+                np.ones(4, dtype=bool), first, second
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            _coherent_supported_fraction(
+                np.asarray((1, 0, 1, 1), dtype=bool), first, second
+            ),
+            0.75,
+        )
+
+    def test_profile_field_rewards_air_material_air_context(self) -> None:
+        depth = np.asarray((-0.8, -0.35, 0.0, 0.35, 0.8), dtype=np.float32)
+        context = np.asarray((2.0, 8.0, 10.0, 8.0, 2.0), dtype=np.float32)
+        profiles = np.asarray(
+            (((2.0, 8.0, 10.0, 8.0, 2.0), (8.0, 3.0, 2.0, 3.0, 8.0)),),
+            dtype=np.float32,
+        )
+        physical, correlation = _profile_fields(profiles, context, depth, 8.0)
+        self.assertGreater(float(physical[0, 0]), 0.5)
+        self.assertGreater(float(correlation[0, 0]), 0.99)
+        self.assertLess(float(physical[0, 1]), 0.0)
+        self.assertLess(float(correlation[0, 1]), -0.9)
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):

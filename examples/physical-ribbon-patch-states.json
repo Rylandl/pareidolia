@@ -1,0 +1,20 @@
+{
+  "minimum_added_ribbon_count": 2,
+  "minimum_objective_gain": 0.0,
+  "minimum_context_profile_correlation": 0.5,
+  "minimum_competing_layer_margin": 0.1,
+  "minimum_patch_coverage": 0.2,
+  "minimum_retained_boundary_fraction": 0.05,
+  "minimum_boundary_anchor_count": 1,
+  "minimum_added_two_core_fraction": 0.5,
+  "minimum_added_tangent_ratio": 0.01,
+  "minimum_surface_realization_fraction": 0.8,
+  "minimum_triangle_area_retention": 0.98,
+  "minimum_density_only_retained_boundary_fraction": 0.6,
+  "minimum_density_only_boundary_anchor_count": 3,
+  "candidate_coverage_weight": 0.08,
+  "continuity_weight_multiplier": 1.0,
+  "surface_alignment_weight_multiplier": 1.0,
+  "maximum_local_optimization_sweeps": 8,
+  "maximum_preview_components": 64
+}

@@ -119,6 +119,10 @@ from .physical_ribbon_flattened_audit import (
     PhysicalRibbonFlattenedAuditSettings,
     run_physical_ribbon_flattened_audit,
 )
+from .physical_ribbon_depth_fields import (
+    PhysicalRibbonDepthFieldSettings,
+    run_physical_ribbon_depth_fields,
+)
 from .physical_ribbon_texture_gate import run_physical_ribbon_texture_gate
 from .physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
@@ -905,6 +909,21 @@ def _physical_ribbon_flattened_audit(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _physical_ribbon_depth_fields(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_depth_fields(
+        args.holes,
+        args.output,
+        settings=PhysicalRibbonDepthFieldSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _physical_ribbon_patch_states(args: argparse.Namespace) -> None:
     settings_values: dict[str, object] = {}
     if args.settings_json is not None:
@@ -914,6 +933,7 @@ def _physical_ribbon_patch_states(args: argparse.Namespace) -> None:
     summary = run_physical_ribbon_patch_states(
         args.holes,
         args.output,
+        depth_field_root=args.depth_field,
         settings=PhysicalRibbonPatchStateSettings(**settings_values),
         force=args.force,
     )
@@ -2840,6 +2860,14 @@ def main() -> None:
         "--holes", type=Path, required=True
     )
     physical_ribbon_patch_states.add_argument(
+        "--depth-field",
+        type=Path,
+        help=(
+            "Optional dense native-CT ordered-label field measured on the "
+            "same holes; enables saturated whole-patch coverage optimization."
+        ),
+    )
+    physical_ribbon_patch_states.add_argument(
         "--output", type=Path, required=True
     )
     physical_ribbon_patch_states.add_argument("--settings-json", type=Path)
@@ -2922,6 +2950,25 @@ def main() -> None:
     physical_ribbon_patch_holes.add_argument("--force", action="store_true")
     physical_ribbon_patch_holes.set_defaults(
         handler=_physical_ribbon_patch_holes
+    )
+    physical_ribbon_depth_fields = subparsers.add_parser(
+        "analyze-physical-ribbon-depth-fields",
+        description=(
+            "Sample dense native-CT normal-depth likelihoods across each "
+            "complete residual hole, solve one coherent ordered-label field, "
+            "and separate missing ribbon hypotheses from assignment failures."
+        ),
+    )
+    physical_ribbon_depth_fields.add_argument(
+        "--holes", type=Path, required=True
+    )
+    physical_ribbon_depth_fields.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_depth_fields.add_argument("--settings-json", type=Path)
+    physical_ribbon_depth_fields.add_argument("--force", action="store_true")
+    physical_ribbon_depth_fields.set_defaults(
+        handler=_physical_ribbon_depth_fields
     )
     physical_ribbon_patch_corridors = subparsers.add_parser(
         "analyze-physical-ribbon-patch-corridors",

@@ -1,0 +1,18 @@
+{
+  "minimum_shift_thicknesses": -1.5,
+  "maximum_shift_thicknesses": 1.5,
+  "shift_step_thicknesses": 0.125,
+  "profile_correlation_weight": 0.35,
+  "spatial_smoothness_weight": 0.18,
+  "smoothness_truncation_thicknesses": 0.75,
+  "boundary_anchor_weight": 0.18,
+  "boundary_anchor_decay_raster_steps": 2.0,
+  "minimum_context_contrast_fraction": 0.5,
+  "minimum_profile_correlation": 0.35,
+  "competing_label_separation_thicknesses": 0.5,
+  "candidate_shift_tolerance_thicknesses": 0.3,
+  "minimum_coherent_support_fraction": 0.7,
+  "minimum_candidate_coverage_fraction": 0.75,
+  "maximum_solver_sweeps": 12,
+  "maximum_preview_holes": 24
+}

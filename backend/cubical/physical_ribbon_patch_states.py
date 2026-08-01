@@ -13,6 +13,7 @@ import numpy as np
 from .contracts import atomic_json, canonical_json_hash, sha256_file
 from .physical_ribbon_bridging import _load_inputs, _load_npz, _write_npz
 from .physical_ribbon_collective import (
+    _conflict_neighbors,
     _objective,
     _shared_endpoint_conflicts,
     _triangle_region_counts,
@@ -47,19 +48,22 @@ class PhysicalRibbonPatchStateSettings:
     committed only when exact reconstruction makes that component denser.
     """
 
-    minimum_added_ribbon_count: int = 3
-    minimum_objective_gain: float = 0.25
-    minimum_context_profile_correlation: float = 0.85
-    minimum_competing_layer_margin: float = 0.20
-    minimum_patch_coverage: float = 0.25
-    minimum_retained_boundary_fraction: float = 0.15
+    minimum_added_ribbon_count: int = 2
+    minimum_objective_gain: float = 0.0
+    minimum_context_profile_correlation: float = 0.50
+    minimum_competing_layer_margin: float = 0.10
+    minimum_patch_coverage: float = 0.20
+    minimum_retained_boundary_fraction: float = 0.05
     minimum_boundary_anchor_count: int = 1
-    minimum_added_two_core_fraction: float = 0.60
-    minimum_added_tangent_ratio: float = 0.02
+    minimum_added_two_core_fraction: float = 0.50
+    minimum_added_tangent_ratio: float = 0.01
     minimum_surface_realization_fraction: float = 0.80
-    minimum_triangle_area_retention: float = 0.995
+    minimum_triangle_area_retention: float = 0.98
     minimum_density_only_retained_boundary_fraction: float = 0.60
     minimum_density_only_boundary_anchor_count: int = 3
+    candidate_coverage_weight: float = 0.08
+    continuity_weight_multiplier: float = 1.0
+    surface_alignment_weight_multiplier: float = 1.0
     maximum_local_optimization_sweeps: int = 8
     maximum_preview_components: int = 64
 
@@ -75,6 +79,13 @@ class PhysicalRibbonPatchStateSettings:
             raise ValueError("patch-state integer settings must be positive")
         if not math.isfinite(self.minimum_objective_gain):
             raise ValueError("patch-state objective gate must be finite")
+        for value in (
+            self.candidate_coverage_weight,
+            self.continuity_weight_multiplier,
+            self.surface_alignment_weight_multiplier,
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError("patch-state objective weights must be nonnegative")
         for value in (
             self.minimum_context_profile_correlation,
             self.minimum_patch_coverage,
@@ -118,6 +129,267 @@ def _reference(path: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
         "manifestPath": str(path),
         "manifestSha256": sha256_file(path),
         "dataSha256": manifest["data"]["sha256"],
+    }
+
+
+def _resolve_depth_field_manifest(
+    root: str | Path,
+) -> tuple[Path, dict[str, Any]]:
+    value = Path(root).resolve()
+    candidates = (value,) if value.is_file() else tuple(sorted(value.glob("*.json")))
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            manifest.get("schema") == "pareidolia.physical-ribbon-depth-field"
+            and manifest.get("state") == "complete"
+        ):
+            matches.append((path, manifest))
+    if len(matches) != 1:
+        raise ValueError("depth-field root must identify exactly one complete artifact")
+    return matches[0]
+
+
+def _validate_depth_field(
+    holes_path: Path,
+    holes_manifest: Mapping[str, Any],
+    holes: Mapping[str, np.ndarray],
+    depth_path: Path,
+    depth_manifest: Mapping[str, Any],
+    depth: Mapping[str, np.ndarray],
+) -> None:
+    reference = depth_manifest.get("identity", {}).get("holes", {})
+    if (
+        reference.get("manifestPath") != str(holes_path)
+        or reference.get("manifestSha256") != sha256_file(holes_path)
+        or reference.get("dataSha256") != holes_manifest["data"]["sha256"]
+    ):
+        raise ValueError("depth field was not measured on the requested holes")
+    if not np.array_equal(depth["holePatchOffset"], holes["patchOffset"]):
+        raise ValueError("depth field and hole patch rasters differ")
+    if not np.array_equal(depth["holeLoopIndex"], holes["scoredLoopIndex"]):
+        raise ValueError("depth field and scored hole order differ")
+    if not np.array_equal(depth["candidateDepthOffset"], holes["patchCandidateOffset"]):
+        raise ValueError("depth field and ribbon candidate order differ")
+
+
+def _coverage_objective(
+    selected: np.ndarray,
+    node_score: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    edge_weight: np.ndarray,
+    coverage: np.ndarray,
+    pixel_weight: np.ndarray,
+) -> float:
+    value = _objective(selected, node_score, edge_first, edge_second, edge_weight)
+    if coverage.size and np.any(selected):
+        covered = np.any(coverage[selected], axis=0)
+        value += float(np.sum(pixel_weight[covered]))
+    return value
+
+
+def optimize_collective_patch_coverage(
+    node_score: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    edge_weight: np.ndarray,
+    conflict_first: np.ndarray,
+    conflict_second: np.ndarray,
+    coverage: np.ndarray,
+    pixel_weight: np.ndarray,
+    *,
+    maximum_sweeps: int,
+    initial_selection: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Optimize one complete patch with a saturated dense-coverage term.
+
+    Candidate density is a property of the entire missing surface, not a unary
+    reward on one ribbon.  Coverage therefore pays once per CT-supported patch
+    pixel even when many competing ribbons land there.  Deterministic global
+    starts construct complete matchings before exact add/remove/swap ascent,
+    allowing a coherent surface to cross the first-node barrier.
+    """
+
+    node_score = np.asarray(node_score, dtype=np.float64)
+    edge_first = np.asarray(edge_first, dtype=np.int32)
+    edge_second = np.asarray(edge_second, dtype=np.int32)
+    edge_weight = np.asarray(edge_weight, dtype=np.float64)
+    coverage = np.asarray(coverage, dtype=bool)
+    pixel_weight = np.asarray(pixel_weight, dtype=np.float64)
+    initial = np.asarray(initial_selection, dtype=bool)
+    node_count = len(node_score)
+    if coverage.shape != (node_count, len(pixel_weight)):
+        raise ValueError("patch coverage matrix has the wrong shape")
+    conflicts = _conflict_neighbors(
+        node_count,
+        np.asarray(conflict_first, dtype=np.int32),
+        np.asarray(conflict_second, dtype=np.int32),
+    )
+    incident = np.zeros(node_count, dtype=np.float64)
+    np.add.at(incident, edge_first, edge_weight)
+    np.add.at(incident, edge_second, edge_weight)
+    coverage_potential = coverage.astype(np.float64) @ pixel_weight
+    starts = [initial.copy()]
+    rankings = (
+        node_score + 0.5 * incident + coverage_potential,
+        node_score + incident + 0.5 * coverage_potential,
+        coverage_potential + 0.25 * (node_score + incident),
+        node_score + 0.25 * incident + 2.0 * coverage_potential,
+    )
+    for rank_score in rankings:
+        selected = np.zeros(node_count, dtype=bool)
+        order = np.lexsort((np.arange(node_count), -rank_score))
+        for node_value in order:
+            node = int(node_value)
+            if rank_score[node] <= 0.0:
+                continue
+            if len(conflicts[node]) and np.any(selected[conflicts[node]]):
+                continue
+            selected[node] = True
+        # Restore every incumbent that the proposed complete matching does not
+        # physically exclude.  This is a repair operator, never a free pruning
+        # pass over unrelated prior surface.
+        for node_value in np.flatnonzero(initial & ~selected):
+            node = int(node_value)
+            if len(conflicts[node]) and np.any(selected[conflicts[node]]):
+                continue
+            selected[node] = True
+        starts.append(selected)
+    unique: list[np.ndarray] = []
+    seen: set[bytes] = set()
+    for selected in starts:
+        key = selected.tobytes()
+        if key not in seen:
+            seen.add(key)
+            unique.append(selected)
+
+    best = initial.copy()
+    best_value = _coverage_objective(
+        best,
+        node_score,
+        edge_first,
+        edge_second,
+        edge_weight,
+        coverage,
+        pixel_weight,
+    )
+    run_records: list[dict[str, Any]] = []
+    for start_index, selected_value in enumerate(unique):
+        selected = selected_value.copy()
+        initial_value = _coverage_objective(
+            selected,
+            node_score,
+            edge_first,
+            edge_second,
+            edge_weight,
+            coverage,
+            pixel_weight,
+        )
+        current = initial_value
+        sweeps = 0
+        for sweep in range(maximum_sweeps):
+            changed = False
+            # Exact one-variable removals preserve pair and saturated coverage
+            # accounting; simultaneous marginal pruning would double-count.
+            while np.any(selected):
+                active = np.flatnonzero(selected)
+                best_remove_gain = 1.0e-9
+                best_remove = -1
+                for node_value in active:
+                    trial = selected.copy()
+                    trial[int(node_value)] = False
+                    value = _coverage_objective(
+                        trial,
+                        node_score,
+                        edge_first,
+                        edge_second,
+                        edge_weight,
+                        coverage,
+                        pixel_weight,
+                    )
+                    gain = value - current
+                    if gain > best_remove_gain:
+                        best_remove_gain = gain
+                        best_remove = int(node_value)
+                if best_remove < 0:
+                    break
+                selected[best_remove] = False
+                current += best_remove_gain
+                changed = True
+            best_gain = 1.0e-9
+            best_trial: np.ndarray | None = None
+            for node_value in np.flatnonzero(~selected):
+                node = int(node_value)
+                trial = selected.copy()
+                if len(conflicts[node]):
+                    trial[conflicts[node]] = False
+                trial[node] = True
+                value = _coverage_objective(
+                    trial,
+                    node_score,
+                    edge_first,
+                    edge_second,
+                    edge_weight,
+                    coverage,
+                    pixel_weight,
+                )
+                gain = value - current
+                if gain > best_gain:
+                    best_gain = gain
+                    best_trial = trial
+            if best_trial is not None:
+                selected = best_trial
+                current += best_gain
+                changed = True
+            sweeps = sweep + 1
+            if not changed:
+                break
+        current = _coverage_objective(
+            selected,
+            node_score,
+            edge_first,
+            edge_second,
+            edge_weight,
+            coverage,
+            pixel_weight,
+        )
+        run_records.append(
+            {
+                "start": start_index,
+                "initialObjective": round(initial_value, 6),
+                "finalObjective": round(current, 6),
+                "sweeps": sweeps,
+                "coveredPixelFraction": round(
+                    float(np.mean(np.any(coverage[selected], axis=0)))
+                    if coverage.shape[1]
+                    else 0.0,
+                    6,
+                ),
+            }
+        )
+        if (current, int(np.count_nonzero(selected))) > (
+            best_value,
+            int(np.count_nonzero(best)),
+        ):
+            best = selected.copy()
+            best_value = current
+    return best, {
+        "algorithm": "multi-start whole-patch matching with saturated dense CT coverage",
+        "singleCellGrowth": False,
+        "startCount": len(unique),
+        "pixelCount": int(coverage.shape[1]),
+        "coveredPixelFraction": round(
+            float(np.mean(np.any(coverage[best], axis=0)))
+            if coverage.shape[1]
+            else 0.0,
+            6,
+        ),
+        "objective": round(best_value, 6),
+        "runs": run_records,
     }
 
 
@@ -327,6 +599,83 @@ def _group_candidates(
     return nodes, values, row_nearest
 
 
+def _component_candidate_coverage(
+    hole_rows: np.ndarray,
+    options: np.ndarray,
+    local: Mapping[int, int],
+    row_nearest: Mapping[int, Mapping[int, int]],
+    holes: Mapping[str, np.ndarray],
+    depth_field: Mapping[str, np.ndarray],
+    *,
+    pixel_weight: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    patch_offset = np.asarray(holes["patchOffset"], dtype=np.int64)
+    patch_xyz = np.asarray(holes["patchXYZ"], dtype=np.float32)
+    scored_loop = np.asarray(holes["scoredLoopIndex"], dtype=np.int32)
+    candidate_offset = np.asarray(holes["patchCandidateOffset"], dtype=np.int64)
+    candidate_node = np.asarray(
+        holes["patchCandidateFrontierIndex"], dtype=np.int32
+    )
+    depth_compatible = np.asarray(
+        depth_field["candidateDepthCompatible"], dtype=np.uint8
+    ) > 0
+    ct_supported = np.asarray(depth_field["pixelCtSupported"], dtype=np.uint8) > 0
+    total_pixels = int(
+        sum(
+            int(patch_offset[int(row) + 1] - patch_offset[int(row)])
+            for row in hole_rows
+        )
+    )
+    coverage = np.zeros((len(options), total_pixels), dtype=bool)
+    weights = np.zeros(total_pixels, dtype=np.float64)
+    pixel_cursor = 0
+    compatible_candidate_count = 0
+    for row_value in hole_rows:
+        row = int(row_value)
+        start, stop = int(patch_offset[row]), int(patch_offset[row + 1])
+        local_patch = patch_xyz[start:stop]
+        count = len(local_patch)
+        local_supported = ct_supported[start:stop]
+        weights[pixel_cursor : pixel_cursor + count] = (
+            pixel_weight * local_supported.astype(np.float64)
+        )
+        candidate_start, candidate_stop = (
+            int(candidate_offset[row]),
+            int(candidate_offset[row + 1]),
+        )
+        compatible_by_node: dict[int, bool] = {}
+        for node, compatible in zip(
+            candidate_node[candidate_start:candidate_stop],
+            depth_compatible[candidate_start:candidate_stop],
+        ):
+            node_value = int(node)
+            compatible_by_node[node_value] = compatible_by_node.get(
+                node_value, False
+            ) or bool(compatible)
+        loop = int(scored_loop[row])
+        radius = float(holes["loopMeanBoundaryEdgeVoxels"][loop])
+        for node, nearest in row_nearest[row].items():
+            option = local.get(int(node))
+            if option is None or not compatible_by_node.get(int(node), False):
+                continue
+            compatible_candidate_count += 1
+            distance = np.linalg.norm(
+                local_patch - local_patch[int(nearest)][None, :], axis=1
+            )
+            coverage[
+                option, pixel_cursor : pixel_cursor + count
+            ] |= (distance <= radius) & local_supported
+        pixel_cursor += count
+    coverable = np.any(coverage, axis=0) if total_pixels else np.empty(0, dtype=bool)
+    return coverage, weights, {
+        "ctSupportedPixelCount": int(np.count_nonzero(weights)),
+        "depthCompatibleCandidateCount": int(compatible_candidate_count),
+        "coverablePixelFraction": round(
+            float(np.mean(coverable)) if len(coverable) else 0.0, 6
+        ),
+    }
+
+
 def _proposal_hole_metrics(
     hole_rows: np.ndarray,
     row_nearest: Mapping[int, Mapping[int, int]],
@@ -427,6 +776,7 @@ def solve_component_patch_states(
     continuity_weight: float,
     surface_alignment_weight: float,
     settings: PhysicalRibbonPatchStateSettings,
+    depth_field: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], dict[str, Any]]:
     frontier = np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
     selected = np.asarray(configuration["selected"], dtype=np.uint8) > 0
@@ -518,12 +868,22 @@ def solve_component_patch_states(
             weight = topology_weight[begin:end]
             fixed_support[option_index] = float(np.sum(weight[fixed_selected[neighbor]]))
         node_score = unary[options].astype(np.float64)
-        node_score += continuity_weight * fixed_support
+        node_score += (
+            continuity_weight
+            * settings.continuity_weight_multiplier
+            * fixed_support
+        )
         for option_index, node_value in enumerate(options):
-            node_score[option_index] += surface_alignment_weight * alignment_by_node.get(
-                int(node_value), 0.0
+            node_score[option_index] += (
+                surface_alignment_weight
+                * settings.surface_alignment_weight_multiplier
+                * alignment_by_node.get(int(node_value), 0.0)
             )
-        local_edge_weight = continuity_weight * local_edge_score
+        local_edge_weight = (
+            continuity_weight
+            * settings.continuity_weight_multiplier
+            * local_edge_score
+        )
         shared_first, shared_second = _shared_endpoint_conflicts(
             source[options], target[options]
         )
@@ -553,16 +913,56 @@ def solve_component_patch_states(
             local_second,
             local_edge_weight,
         )
-        optimized, _ = optimize_collective_patch(
-            node_score,
-            local_first,
-            local_second,
-            local_edge_weight,
-            conflict_first,
-            conflict_second,
-            maximum_sweeps=settings.maximum_local_optimization_sweeps,
-            initial_selection=baseline_local,
-        )
+        coverage_stats: dict[str, Any] = {
+            "ctSupportedPixelCount": 0,
+            "depthCompatibleCandidateCount": 0,
+            "coverablePixelFraction": 0.0,
+        }
+        coverage_solver: dict[str, Any] | None = None
+        coverage: np.ndarray | None = None
+        pixel_weight: np.ndarray | None = None
+        if depth_field is not None and settings.candidate_coverage_weight > 0.0:
+            coverage, pixel_weight, coverage_stats = _component_candidate_coverage(
+                hole_rows,
+                options,
+                local,
+                row_nearest,
+                holes,
+                depth_field,
+                pixel_weight=settings.candidate_coverage_weight,
+            )
+            optimized, coverage_solver = optimize_collective_patch_coverage(
+                node_score,
+                local_first,
+                local_second,
+                local_edge_weight,
+                conflict_first,
+                conflict_second,
+                coverage,
+                pixel_weight,
+                maximum_sweeps=settings.maximum_local_optimization_sweeps,
+                initial_selection=baseline_local,
+            )
+            baseline_objective = _coverage_objective(
+                baseline_local,
+                node_score,
+                local_first,
+                local_second,
+                local_edge_weight,
+                coverage,
+                pixel_weight,
+            )
+        else:
+            optimized, _ = optimize_collective_patch(
+                node_score,
+                local_first,
+                local_second,
+                local_edge_weight,
+                conflict_first,
+                conflict_second,
+                maximum_sweeps=settings.maximum_local_optimization_sweeps,
+                initial_selection=baseline_local,
+            )
 
         # The optimizer may discover that an unrelated weak incumbent has a
         # negative marginal.  This operator is an alternating surface repair,
@@ -578,13 +978,24 @@ def solve_component_patch_states(
         proposed = baseline_local.copy()
         proposed[required_removed] = False
         proposed[chosen_added_local] = True
-        proposal_objective = _objective(
-            proposed,
-            node_score,
-            local_first,
-            local_second,
-            local_edge_weight,
-        )
+        if coverage is None or pixel_weight is None:
+            proposal_objective = _objective(
+                proposed,
+                node_score,
+                local_first,
+                local_second,
+                local_edge_weight,
+            )
+        else:
+            proposal_objective = _coverage_objective(
+                proposed,
+                node_score,
+                local_first,
+                local_second,
+                local_edge_weight,
+                coverage,
+                pixel_weight,
+            )
         added = options[proposed & ~baseline_local]
         removed = options[baseline_local & ~proposed]
         trial_selected = selected.copy()
@@ -639,6 +1050,8 @@ def solve_component_patch_states(
                 "twoCoreFraction": two_core,
                 "tangentRatio": tangent_ratio,
                 "holeMetrics": hole_metrics,
+                "coverageStats": coverage_stats,
+                "coverageSolver": coverage_solver,
                 "qualified": bool(qualified),
             }
         )
@@ -695,6 +1108,9 @@ def solve_component_patch_states(
         "singleCellGrowth": False,
         "decisionUnit": "all CT-supported closed-hole frontiers on one surface component",
         "fixedHalo": "every selected ribbon not in an alternating interface or crossing conflict",
+        "denseCoverageObjective": bool(
+            depth_field is not None and settings.candidate_coverage_weight > 0.0
+        ),
     }
     return arrays, proposals, statistics
 
@@ -745,6 +1161,30 @@ def _proposal_arrays(
         "patchCandidateCount": np.asarray(
             [proposal["candidateCount"] for proposal in proposals], dtype=np.int32
         ),
+        "patchCtSupportedPixelCount": np.asarray(
+            [proposal["coverageStats"]["ctSupportedPixelCount"] for proposal in proposals],
+            dtype=np.int32,
+        ),
+        "patchDepthCompatibleCandidateCount": np.asarray(
+            [
+                proposal["coverageStats"]["depthCompatibleCandidateCount"]
+                for proposal in proposals
+            ],
+            dtype=np.int32,
+        ),
+        "patchCoverablePixelFraction": np.asarray(
+            [proposal["coverageStats"]["coverablePixelFraction"] for proposal in proposals],
+            dtype=np.float32,
+        ),
+        "patchSelectedCoverageFraction": np.asarray(
+            [
+                0.0
+                if proposal["coverageSolver"] is None
+                else proposal["coverageSolver"]["coveredPixelFraction"]
+                for proposal in proposals
+            ],
+            dtype=np.float32,
+        ),
         "patchAddedOffset": np.asarray(added_offset, dtype=np.int64),
         "patchAddedFrontierIndex": np.asarray(added_values, dtype=np.int32),
         "patchRemovedOffset": np.asarray(removed_offset, dtype=np.int64),
@@ -780,6 +1220,7 @@ def run_physical_ribbon_patch_states(
     holes_root: str | Path,
     output_root: str | Path,
     *,
+    depth_field_root: str | Path | None = None,
     settings: PhysicalRibbonPatchStateSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -787,6 +1228,23 @@ def run_physical_ribbon_patch_states(
     holes_path, holes_manifest = _resolve_holes_manifest(holes_root)
     holes_data_path = holes_path.parent / str(holes_manifest["data"]["path"])
     holes = _load_npz(holes_data_path, holes_manifest["data"]["sha256"])
+    depth_path: Path | None = None
+    depth_manifest: dict[str, Any] | None = None
+    depth_field: dict[str, np.ndarray] | None = None
+    if depth_field_root is not None:
+        depth_path, depth_manifest = _resolve_depth_field_manifest(depth_field_root)
+        depth_data_path = depth_path.parent / str(depth_manifest["data"]["path"])
+        depth_field = _load_npz(
+            depth_data_path, depth_manifest["data"]["sha256"]
+        )
+        _validate_depth_field(
+            holes_path,
+            holes_manifest,
+            holes,
+            depth_path,
+            depth_manifest,
+            depth_field,
+        )
     configuration_reference = holes_manifest["identity"]["configuration"]
     (
         configuration_path,
@@ -827,6 +1285,8 @@ def run_physical_ribbon_patch_states(
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
+    if depth_path is not None and depth_manifest is not None:
+        identity["depthField"] = _reference(depth_path, depth_manifest)
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -854,6 +1314,7 @@ def run_physical_ribbon_patch_states(
         continuity_weight=continuity_weight,
         surface_alignment_weight=surface_alignment_weight,
         settings=resolved,
+        depth_field=depth_field,
     )
     solved = time.monotonic()
     surface_settings = PhysicalRibbonPatchHoleSettings()
@@ -1139,8 +1600,10 @@ def run_physical_ribbon_patch_states(
                 "surface component"
             ),
             "optimization": (
-                "collective alternating interface matching inside a fixed "
-                "selected halo"
+                "collective alternating interface matching with saturated "
+                "whole-patch dense CT coverage inside a fixed selected halo"
+                if depth_field is not None
+                else "collective alternating interface matching inside a fixed selected halo"
             ),
             "physicalEvidence": (
                 "whole-patch native-CT air-material-air profile and "

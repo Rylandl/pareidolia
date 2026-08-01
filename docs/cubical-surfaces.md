@@ -792,6 +792,99 @@ class is saturated under both exact geometry and actual-CT fiber continuity;
 the attractive geometry-only second wave is retained as a counterexample, not
 silently promoted to the canonical configuration.
 
+### Dense normal-depth fields and coverage-aware matching
+
+The 17-hole fixed point above was a fixed point of the *matching objective*,
+not of the CT.  `analyze-physical-ribbon-depth-fields` now samples every pixel
+of every complete missing-patch raster at 25 normal shifts and seven
+air-material-air profile depths.  It solves the whole ordered-label raster with
+multi-start alternating exact row and column Viterbi passes.  No pixel, cell,
+or occupied voxel is ever an expansion decision.  The boundary is a soft
+zero-shift condition, and spatial depth-jump costs are truncated so a coherent
+delamination step can survive instead of being smoothed onto a neighboring
+layer.
+
+The artifact then audits the ribbon bank *against* this independently solved CT
+field.  It records raw normal profiles, physical contrast, context-profile
+correlation, independent and collective depth labels, far-layer margins,
+candidate depth compatibility, and both direct and mesh-radius candidate
+coverage.  Its PNG shows, for each complete hole, the actual CT on the solved
+surface, collective depth shift, physical score, and CT-versus-bank coverage.
+The field is reusable and immutable; it does not select a ribbon.
+
+On the first residual census, 619 of 620 patch pixels are CT-supported.  Every
+hole has one coherent supported field.  Median shifts are zero for 15 holes;
+the other two drift only 0.125 and 0.25 local thicknesses.  Depth-compatible
+ribbon candidates cover 93--100 percent of every patch within one existing
+mesh edge, although they land directly on only 27.5 and 44.7 percent of the
+two largest component-0 holes.  All 17 failures are therefore classified as
+assignment/topology-limited, rather than as absent CT structure or a missing
+ribbon bank.
+
+`optimize-physical-ribbon-patch-states --depth-field ...` uses that result as a
+whole-patch objective.  Each CT-supported raster pixel is a saturated coverage
+factor: the objective pays once when any depth-compatible candidate covers it,
+so five competing ribbons at one location cannot outvote a candidate that
+fills an uncovered part of the sheet.  Deterministic global starts construct
+complete interface matchings before exact add/remove/swap ascent.  The mutable
+unit remains every hole on one surface component, all other selected ribbons
+remain a fixed halo, and interface reuse plus exact profile crossings remain
+hard constraints.
+
+Proposal prefilters are deliberately permissive because exact surface and
+flattened-texture stages are the decision gates.  Two-ribbon complete repairs
+are allowed, the proposal-stage profile floor is 0.50 correlation with a 0.10
+competing-layer margin, and a hole-closing state may retain 98 percent of prior
+triangle area.  This recovered a valid two-ribbon repair on a small component
+that the old minimum-size and 99.5-percent-area prefilters never screened.  The
+flattened audit now accepts six boundary measurements as the smallest
+reportable median; the recovered small repair has nine and improves on its
+same-surface control at two depths.
+
+Two texture-gated waves reduce the canonical residual from 17 to 10 macro
+holes.  The first broad exact screen retains components 16 and 222 and rejects
+the known component-7 shear jump.  The dense-coverage wave then retains three
+different complete matchings on components 4, 7, and 12.  They close five more
+macro holes; all three pass flattened actual-CT texture at at least one fixed
+ply depth.  Across both waves, strict triangles rise from 29,346 to 29,368,
+interior holes fall from 108 to 104, triangle regions remain 734, and all 4,303
+component lineages remain unchanged with zero interface reuse or profile
+crossing.  An independent materialized restart reproduces exactly 10 macro
+holes.  A third coverage solve returns only component states already rejected
+by exact geometry, so this objective is at a measured fixed point.  The next
+search layer should retain several diverse complete matchings per component
+for exact screening; it should not resume local frontier growth or weaken the
+final gates.
+
+The reproducible dense-field sequence is:
+
+```bash
+python -m backend.cubical analyze-physical-ribbon-depth-fields \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-depth-field-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-depth-fields-iteration2-v1 \
+  --settings-json examples/physical-ribbon-depth-fields.json
+
+python -m backend.cubical optimize-physical-ribbon-patch-states \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-depth-field-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-depth-fields-iteration2-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-depth-coverage-v1 \
+  --settings-json examples/physical-ribbon-patch-states.json
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-depth-coverage-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-depth-coverage-v1 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+
+python -m backend.cubical gate-physical-ribbon-patch-texture \
+  --patch-state work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-depth-coverage-v1 \
+  --texture-audit work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-depth-coverage-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-depth-coverage-v1
+
+python -m backend.cubical materialize-physical-ribbon-replay-configuration \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-depth-coverage-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-depth-coverage-v1
+```
+
 The final two iterative commands are:
 
 ```bash
