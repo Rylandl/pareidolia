@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +33,10 @@ from backend.cubical.physical_ribbon_flattened_audit import (
     boundary_texture_compatibility,
     flattened_texture_structure,
 )
+from backend.cubical.physical_ribbon_open_bays import (
+    PhysicalRibbonOpenBaySettings,
+    _loop_open_bay_candidates,
+)
 from backend.cubical.physical_ribbon_depth_fields import (
     _coherent_supported_fraction,
     _grid_edges,
@@ -42,6 +47,9 @@ from backend.cubical.physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
     decompose_weak_boundary_cycles,
     _improve_physical_triangulation,
+    _mesh_edge_length_audit,
+    _other_component_triangle_intersections,
+    _surface_field_integrability,
     _triangle_quadrature_samples,
     triangulate_weak_boundary_field,
 )
@@ -1397,7 +1405,91 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
         self.assertTrue(np.all(points[:, :2] >= 0.0))
         self.assertTrue(np.all(np.sum(points[:, :2], axis=1) <= 2.0))
 
-    def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(self) -> None:
+    def test_depth_samples_must_form_an_integrable_surface(self) -> None:
+        coordinate = np.asarray(
+            ((0, 0), (1, 0), (0, 1), (1, 1)), dtype=np.int32
+        )
+        planar = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 1.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        normal = np.asarray(((0.0, 0.0, 1.0),) * 4, dtype=np.float32)
+        coherent = _surface_field_integrability(
+            coordinate,
+            planar,
+            normal,
+            high_residual_degrees=45.0,
+        )
+        stepped = planar.copy()
+        stepped[[1, 3], 2] = 2.0
+        incoherent = _surface_field_integrability(
+            coordinate,
+            stepped,
+            normal,
+            high_residual_degrees=45.0,
+        )
+        self.assertAlmostEqual(
+            float(coherent["p90TriangleNormalResidualDegrees"]), 0.0
+        )
+        self.assertAlmostEqual(float(coherent["surfaceCoherenceScore"]), 1.0)
+        self.assertGreater(
+            float(incoherent["p90TriangleNormalResidualDegrees"]), 45.0
+        )
+        self.assertEqual(float(incoherent["surfaceCoherenceScore"]), 0.0)
+
+    def test_collision_audit_includes_disconnected_same_component_regions(
+        self,
+    ) -> None:
+        xyz = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (2.0, 0.0, 0.0),
+                (0.0, 2.0, 0.0),
+                (0.5, 0.5, -1.0),
+                (0.5, 0.5, 1.0),
+                (1.5, 0.5, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        baseline = {
+            "triangleFrontierIndex": np.asarray(((0, 1, 2),), dtype=np.int32),
+            "component": np.asarray((7, 7, 7), dtype=np.int32),
+            "midpointXYZ": xyz[:3],
+        }
+        result = _other_component_triangle_intersections(
+            baseline,
+            {"midpointXYZ": xyz},
+            np.asarray(((3, 4, 5),), dtype=np.int32),
+            7,
+            tolerance=0.01,
+        )
+        self.assertEqual(result["otherComponentTriangleCount"], 0)
+        self.assertEqual(result["sameComponentTriangleCount"], 1)
+        self.assertEqual(result["intersectingTrianglePairCount"], 1)
+
+    def test_open_mouth_is_separate_from_supported_edge_limit(self) -> None:
+        result = _mesh_edge_length_audit(
+            np.asarray(((0, 1, 2),), dtype=np.int32),
+            np.asarray(
+                ((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (5.0, 0.1, 0.0)),
+                dtype=np.float32,
+            ),
+            np.asarray((0, 0, 1), dtype=np.uint8),
+            np.asarray((5, 6, 0), dtype=np.int32),
+            {(5, 6)},
+        )
+        self.assertAlmostEqual(result["maximumOpenFrontierEdgeVoxels"], 10.0)
+        self.assertLess(result["maximumCtSupportedTriangleEdgeVoxels"], 6.0)
+        self.assertEqual(result["maximumTriangleEdgeVoxels"], 10.0)
+
+    def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(
+        self,
+    ) -> None:
         chart = np.asarray(
             ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
             dtype=np.float32,
@@ -1537,6 +1629,63 @@ class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
                 high_triangle_normal_residual_degrees=80.0,
                 maximum_triangle_normal_residual_degrees=70.0,
             )
+
+
+class PhysicalRibbonOpenBayTests(unittest.TestCase):
+    def test_concave_outer_frontier_yields_complete_compact_bay(self) -> None:
+        chart = np.asarray(
+            (
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 4.0),
+                (3.0, 4.0),
+                (3.0, 1.0),
+                (1.0, 1.0),
+                (1.0, 4.0),
+                (0.0, 4.0),
+            ),
+            dtype=np.float32,
+        )
+        candidates = _loop_open_bay_candidates(
+            np.arange(len(chart), dtype=np.int32),
+            chart,
+            np.column_stack((chart, np.zeros(len(chart), dtype=np.float32))),
+            np.ones(len(chart), dtype=np.float32),
+            outer_loop_index=2,
+            component_id=7,
+            triangle_region=11,
+            owned_bounds=None,
+            settings=PhysicalRibbonOpenBaySettings(),
+            rejection_count=Counter(),
+        )
+        notch = [
+            record
+            for record in candidates
+            if {record["mouthFirst"], record["mouthSecond"]} == {3, 6}
+        ]
+        self.assertEqual(len(notch), 1)
+        self.assertAlmostEqual(float(notch[0]["areaChartVoxelsSquared"]), 6.0)
+        self.assertAlmostEqual(float(notch[0]["perimeterReductionVoxels"]), 6.0)
+        self.assertEqual(int(notch[0]["arcEdgeCount"]), 3)
+
+    def test_convex_outer_frontier_does_not_invite_outward_tendril(self) -> None:
+        chart = np.asarray(
+            ((0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)),
+            dtype=np.float32,
+        )
+        candidates = _loop_open_bay_candidates(
+            np.arange(len(chart), dtype=np.int32),
+            chart,
+            np.column_stack((chart, np.zeros(len(chart), dtype=np.float32))),
+            np.ones(len(chart), dtype=np.float32),
+            outer_loop_index=0,
+            component_id=0,
+            triangle_region=0,
+            owned_bounds=None,
+            settings=PhysicalRibbonOpenBaySettings(),
+            rejection_count=Counter(),
+        )
+        self.assertEqual(candidates, [])
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):

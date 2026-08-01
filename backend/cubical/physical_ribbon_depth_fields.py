@@ -19,6 +19,7 @@ from .physical_ribbon_patch_holes import (
     _sample_normal_profiles,
 )
 from .physical_ribbon_surface_holes import PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA
+from .physical_ribbon_open_bays import PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA
 
 
 PHYSICAL_RIBBON_DEPTH_FIELD_SCHEMA = "pareidolia.physical-ribbon-depth-field"
@@ -40,13 +41,15 @@ def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
             in {
                 PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
                 PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA,
+                PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA,
             }
             and manifest.get("state") == "complete"
         ):
             matches.append((path, manifest))
     if len(matches) != 1:
         raise ValueError(
-            "holes root must identify exactly one complete patch or surface-hole artifact"
+            "holes root must identify exactly one complete patch, surface-hole, "
+            "or open-bay artifact"
         )
     return matches[0]
 

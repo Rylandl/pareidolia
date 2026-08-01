@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import time
@@ -26,6 +27,7 @@ from .physical_ribbon_patch_states import (
     _surface_view,
 )
 from .physical_ribbon_surface_holes import PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA
+from .physical_ribbon_open_bays import PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA
 
 
 PHYSICAL_RIBBON_DENSE_COMPLETION_SCHEMA = (
@@ -49,13 +51,15 @@ def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
             in {
                 PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
                 PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA,
+                PHYSICAL_RIBBON_OPEN_BAYS_SCHEMA,
             }
             and manifest.get("state") == "complete"
         ):
             matches.append((path, manifest))
     if len(matches) != 1:
         raise ValueError(
-            "holes root must identify one complete patch or surface-hole artifact"
+            "holes root must identify one complete patch, surface-hole, or "
+            "open-bay artifact"
         )
     return matches[0]
 
@@ -400,6 +404,46 @@ def _minimum_triangle_angle(
     return min(math.acos(np.clip(value, -1.0, 1.0)) for value in cosine)
 
 
+def _triangle_edges(triangle: tuple[int, int, int]) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        tuple(sorted((int(triangle[index]), int(triangle[(index + 1) % 3]))))
+        for index in range(3)
+    )
+
+
+def _edge_triangle_sets(
+    triangles: list[tuple[int, int, int]],
+) -> dict[tuple[int, int], set[int]]:
+    result: dict[tuple[int, int], set[int]] = defaultdict(set)
+    for triangle_index, triangle in enumerate(triangles):
+        for edge in _triangle_edges(triangle):
+            result[edge].add(triangle_index)
+    return result
+
+
+def _replace_triangle_pair(
+    triangles: list[tuple[int, int, int]],
+    edge_triangle: dict[tuple[int, int], set[int]],
+    first_index: int,
+    second_index: int,
+    replacement: tuple[tuple[int, int, int], tuple[int, int, int]],
+) -> set[tuple[int, int]]:
+    affected: set[tuple[int, int]] = set()
+    for triangle_index in (first_index, second_index):
+        for edge in _triangle_edges(triangles[triangle_index]):
+            affected.add(edge)
+            incident = edge_triangle[edge]
+            incident.remove(triangle_index)
+            if not incident:
+                del edge_triangle[edge]
+    triangles[first_index], triangles[second_index] = replacement
+    for triangle_index in (first_index, second_index):
+        for edge in _triangle_edges(triangles[triangle_index]):
+            affected.add(edge)
+            edge_triangle.setdefault(edge, set()).add(triangle_index)
+    return affected
+
+
 def _improve_chart_triangulation(
     triangles: list[tuple[int, int, int]],
     chart_uv: np.ndarray,
@@ -409,74 +453,81 @@ def _improve_chart_triangulation(
 ) -> tuple[list[tuple[int, int, int]], int]:
     """Lawson flips improve element quality without changing the boundary."""
 
-    for iteration in range(maximum_iterations):
-        edge_triangle: dict[tuple[int, int], list[int]] = defaultdict(list)
-        for triangle_index, triangle in enumerate(triangles):
-            for edge_index, first in enumerate(triangle):
-                second = triangle[(edge_index + 1) % 3]
-                edge_triangle[(min(first, second), max(first, second))].append(
-                    triangle_index
-                )
-        changed = False
-        for edge, incident in sorted(edge_triangle.items()):
-            if len(incident) != 2 or edge in constrained_edges:
-                continue
-            first, second = edge
-            left_index, right_index = incident
-            left_other = next(
-                value
-                for value in triangles[left_index]
-                if value not in {first, second}
-            )
-            right_other = next(
-                value
-                for value in triangles[right_index]
-                if value not in {first, second}
-            )
-            replacement_edge = (min(left_other, right_other), max(left_other, right_other))
-            if replacement_edge in edge_triangle:
-                continue
+    edge_triangle = _edge_triangle_sets(triangles)
+    pending = {
+        edge
+        for edge, incident in edge_triangle.items()
+        if len(incident) == 2 and edge not in constrained_edges
+    }
+    queue = list(pending)
+    heapq.heapify(queue)
+    flip_count = 0
+    while queue:
+        edge = heapq.heappop(queue)
+        pending.discard(edge)
+        incident = edge_triangle.get(edge, set())
+        if len(incident) != 2 or edge in constrained_edges:
+            continue
+        first, second = edge
+        left_index, right_index = sorted(incident)
+        left_other = next(
+            value
+            for value in triangles[left_index]
+            if value not in {first, second}
+        )
+        right_other = next(
+            value
+            for value in triangles[right_index]
+            if value not in {first, second}
+        )
+        replacement_edge = (
+            min(left_other, right_other),
+            max(left_other, right_other),
+        )
+        if replacement_edge in edge_triangle:
+            continue
+        if (
+            _cross_2d(chart_uv[first], chart_uv[second], chart_uv[left_other])
+            * _cross_2d(chart_uv[first], chart_uv[second], chart_uv[right_other])
+            >= -1.0e-10
+            or _cross_2d(chart_uv[left_other], chart_uv[right_other], chart_uv[first])
+            * _cross_2d(chart_uv[left_other], chart_uv[right_other], chart_uv[second])
+            >= -1.0e-10
+        ):
+            continue
+        replacement = (
+            _orient_chart_triangle((left_other, right_other, first), chart_uv),
+            _orient_chart_triangle((right_other, left_other, second), chart_uv),
+        )
+        old_quality = min(
+            _minimum_triangle_angle(triangles[left_index], chart_uv),
+            _minimum_triangle_angle(triangles[right_index], chart_uv),
+        )
+        new_quality = min(
+            _minimum_triangle_angle(replacement[0], chart_uv),
+            _minimum_triangle_angle(replacement[1], chart_uv),
+        )
+        if new_quality <= old_quality + 1.0e-9:
+            continue
+        flip_count += 1
+        if flip_count > maximum_iterations:
+            raise ValueError("constrained chart edge flips did not converge")
+        affected = _replace_triangle_pair(
+            triangles,
+            edge_triangle,
+            left_index,
+            right_index,
+            replacement,
+        )
+        for candidate in affected:
             if (
-                _cross_2d(
-                    chart_uv[first], chart_uv[second], chart_uv[left_other]
-                )
-                * _cross_2d(
-                    chart_uv[first], chart_uv[second], chart_uv[right_other]
-                )
-                >= -1.0e-10
-                or _cross_2d(
-                    chart_uv[left_other], chart_uv[right_other], chart_uv[first]
-                )
-                * _cross_2d(
-                    chart_uv[left_other], chart_uv[right_other], chart_uv[second]
-                )
-                >= -1.0e-10
+                candidate not in pending
+                and candidate not in constrained_edges
+                and len(edge_triangle.get(candidate, ())) == 2
             ):
-                continue
-            replacement = (
-                _orient_chart_triangle(
-                    (left_other, right_other, first), chart_uv
-                ),
-                _orient_chart_triangle(
-                    (right_other, left_other, second), chart_uv
-                ),
-            )
-            old_quality = min(
-                _minimum_triangle_angle(triangles[left_index], chart_uv),
-                _minimum_triangle_angle(triangles[right_index], chart_uv),
-            )
-            new_quality = min(
-                _minimum_triangle_angle(replacement[0], chart_uv),
-                _minimum_triangle_angle(replacement[1], chart_uv),
-            )
-            if new_quality <= old_quality + 1.0e-9:
-                continue
-            triangles[left_index], triangles[right_index] = replacement
-            changed = True
-            break
-        if not changed:
-            return triangles, iteration
-    raise ValueError("constrained chart edge flips did not converge")
+                heapq.heappush(queue, candidate)
+                pending.add(candidate)
+    return triangles, flip_count
 
 
 def _improve_physical_triangulation(
@@ -512,74 +563,90 @@ def _improve_physical_triangulation(
             penalty += area * (residual / 45.0) ** 4
         return penalty
 
-    for iteration in range(maximum_iterations):
-        edge_triangle: dict[tuple[int, int], list[int]] = defaultdict(list)
-        for triangle_index, triangle in enumerate(values):
-            for edge_index, first in enumerate(triangle):
-                second = triangle[(edge_index + 1) % 3]
-                edge_triangle[(min(first, second), max(first, second))].append(
-                    triangle_index
-                )
-        constrained = {
-            edge for edge, incident in edge_triangle.items() if len(incident) == 1
-        }
-        changed = False
-        for edge, incident in sorted(edge_triangle.items()):
-            if len(incident) != 2 or edge in constrained:
-                continue
-            first, second = edge
-            left_index, right_index = incident
-            left_other = next(
-                value
-                for value in values[left_index]
-                if value not in {first, second}
-            )
-            right_other = next(
-                value
-                for value in values[right_index]
-                if value not in {first, second}
-            )
-            replacement_edge = (
-                min(left_other, right_other),
-                max(left_other, right_other),
-            )
-            if replacement_edge in edge_triangle:
-                continue
+    edge_triangle = _edge_triangle_sets(values)
+    constrained = {
+        edge for edge, incident in edge_triangle.items() if len(incident) == 1
+    }
+    pending = {
+        edge
+        for edge, incident in edge_triangle.items()
+        if len(incident) == 2 and edge not in constrained
+    }
+    queue = list(pending)
+    heapq.heapify(queue)
+    flip_count = 0
+    while queue:
+        edge = heapq.heappop(queue)
+        pending.discard(edge)
+        incident = edge_triangle.get(edge, set())
+        if len(incident) != 2 or edge in constrained:
+            continue
+        first, second = edge
+        left_index, right_index = sorted(incident)
+        left_other = next(
+            value
+            for value in values[left_index]
+            if value not in {first, second}
+        )
+        right_other = next(
+            value
+            for value in values[right_index]
+            if value not in {first, second}
+        )
+        replacement_edge = (
+            min(left_other, right_other),
+            max(left_other, right_other),
+        )
+        if replacement_edge in edge_triangle:
+            continue
+        if (
+            _cross_2d(uv[first], uv[second], uv[left_other])
+            * _cross_2d(uv[first], uv[second], uv[right_other])
+            >= -1.0e-10
+            or _cross_2d(uv[left_other], uv[right_other], uv[first])
+            * _cross_2d(uv[left_other], uv[right_other], uv[second])
+            >= -1.0e-10
+        ):
+            continue
+        replacement = (
+            _orient_chart_triangle((left_other, right_other, first), uv),
+            _orient_chart_triangle((right_other, left_other, second), uv),
+        )
+        old_pair = (values[left_index], values[right_index])
+        old_quality = min(
+            _minimum_triangle_angle(old_pair[0], uv),
+            _minimum_triangle_angle(old_pair[1], uv),
+        )
+        new_quality = min(
+            _minimum_triangle_angle(replacement[0], uv),
+            _minimum_triangle_angle(replacement[1], uv),
+        )
+        # Never trade the normal fit for a nearly collapsed chart element.
+        if new_quality < math.radians(2.0) or new_quality < 0.35 * old_quality:
+            continue
+        old_penalty = pair_penalty(old_pair)
+        new_penalty = pair_penalty(replacement)
+        if new_penalty >= old_penalty - 1.0e-9:
+            continue
+        flip_count += 1
+        if flip_count > maximum_iterations:
+            raise ValueError("physical completion edge flips did not converge")
+        affected = _replace_triangle_pair(
+            values,
+            edge_triangle,
+            left_index,
+            right_index,
+            replacement,
+        )
+        for candidate in affected:
             if (
-                _cross_2d(uv[first], uv[second], uv[left_other])
-                * _cross_2d(uv[first], uv[second], uv[right_other])
-                >= -1.0e-10
-                or _cross_2d(uv[left_other], uv[right_other], uv[first])
-                * _cross_2d(uv[left_other], uv[right_other], uv[second])
-                >= -1.0e-10
+                candidate not in pending
+                and candidate not in constrained
+                and len(edge_triangle.get(candidate, ())) == 2
             ):
-                continue
-            replacement = (
-                _orient_chart_triangle((left_other, right_other, first), uv),
-                _orient_chart_triangle((right_other, left_other, second), uv),
-            )
-            old_pair = (values[left_index], values[right_index])
-            old_quality = min(
-                _minimum_triangle_angle(old_pair[0], uv),
-                _minimum_triangle_angle(old_pair[1], uv),
-            )
-            new_quality = min(
-                _minimum_triangle_angle(replacement[0], uv),
-                _minimum_triangle_angle(replacement[1], uv),
-            )
-            # Never trade the normal fit for a nearly collapsed chart element.
-            if new_quality < math.radians(2.0) or new_quality < 0.35 * old_quality:
-                continue
-            old_penalty = pair_penalty(old_pair)
-            new_penalty = pair_penalty(replacement)
-            if new_penalty >= old_penalty - 1.0e-9:
-                continue
-            values[left_index], values[right_index] = replacement
-            changed = True
-            break
-        if not changed:
-            return np.asarray(values, dtype=np.int32), iteration
-    raise ValueError("physical completion edge flips did not converge")
+                heapq.heappush(queue, candidate)
+                pending.add(candidate)
+    return np.asarray(values, dtype=np.int32), flip_count
 
 
 def triangulate_weak_boundary_field(
@@ -755,6 +822,52 @@ def _edge_incidence(triangles: np.ndarray) -> Counter[tuple[int, int]]:
     return result
 
 
+def _mesh_edge_length_audit(
+    triangles: np.ndarray,
+    point_xyz: np.ndarray,
+    point_kind: np.ndarray,
+    point_source_index: np.ndarray,
+    new_frontier_edges: AbstractSet[tuple[int, int]],
+) -> dict[str, float]:
+    """Separate an open replacement mouth from CT-supported mesh edges."""
+
+    values = np.asarray(triangles, dtype=np.int32)
+    xyz = np.asarray(point_xyz, dtype=np.float64)
+    kind = np.asarray(point_kind, dtype=np.uint8)
+    source = np.asarray(point_source_index, dtype=np.int32)
+    normalized_frontier = {
+        tuple(sorted((int(edge[0]), int(edge[1]))))
+        for edge in new_frontier_edges
+    }
+    unique_edges = {
+        tuple(sorted((int(triangle[index]), int(triangle[(index + 1) % 3]))))
+        for triangle in values
+        for index in range(3)
+    }
+    all_length: list[float] = []
+    frontier_length: list[float] = []
+    supported_length: list[float] = []
+    for first, second in unique_edges:
+        length = float(np.linalg.norm(xyz[second] - xyz[first]))
+        all_length.append(length)
+        global_edge = (
+            tuple(sorted((int(source[first]), int(source[second]))))
+            if kind[first] == 0 and kind[second] == 0
+            else None
+        )
+        if global_edge in normalized_frontier:
+            frontier_length.append(length)
+        else:
+            supported_length.append(length)
+    return {
+        "maximumTriangleEdgeVoxels": max(all_length, default=0.0),
+        "maximumCtSupportedTriangleEdgeVoxels": max(
+            supported_length, default=0.0
+        ),
+        "maximumOpenFrontierEdgeVoxels": max(frontier_length, default=0.0),
+    }
+
+
 def _triangle_region_labels(triangles: np.ndarray) -> np.ndarray:
     triangles = np.asarray(triangles, dtype=np.int32)
     parent = np.arange(len(triangles), dtype=np.int32)
@@ -900,6 +1013,151 @@ def _mesh_vertex_normals(
     return result.astype(np.float32)
 
 
+def _surface_field_integrability(
+    coordinates: np.ndarray,
+    point_xyz: np.ndarray,
+    reference_normal_xyz: np.ndarray,
+    *,
+    high_residual_degrees: float,
+) -> dict[str, float | int]:
+    """Measure whether independently supported depth samples form a surface.
+
+    The collective depth solver assigns one displacement to each raster point.
+    Pointwise CT support does not guarantee that neighboring assignments can be
+    joined into a sheet.  Complete 2x2 raster cells provide a candidate-free,
+    triangulation-independent integrability test before the expensive exact
+    constrained mesh solve.
+    """
+
+    coordinate = np.asarray(coordinates, dtype=np.int32)
+    xyz = np.asarray(point_xyz, dtype=np.float64)
+    reference = np.asarray(reference_normal_xyz, dtype=np.float64)
+    if not len(coordinate):
+        return {
+            "gridCellCount": 0,
+            "gridTriangleCount": 0,
+            "medianTriangleNormalResidualDegrees": 90.0,
+            "p90TriangleNormalResidualDegrees": 90.0,
+            "highNormalResidualAreaFraction": 1.0,
+            "maximumGridEdgeVoxels": 0.0,
+            "p90GridEdgeNormalDepartureDegrees": 90.0,
+            "surfaceCoherenceScore": 0.0,
+        }
+    lookup = {
+        (int(value[0]), int(value[1])): index
+        for index, value in enumerate(coordinate)
+    }
+    cells: list[tuple[int, int, int, int]] = []
+    edges: set[tuple[int, int]] = set()
+    for first, value in enumerate(coordinate):
+        u, v = int(value[0]), int(value[1])
+        for neighbor_coordinate in ((u + 1, v), (u, v + 1)):
+            neighbor = lookup.get(neighbor_coordinate)
+            if neighbor is not None:
+                edges.add(tuple(sorted((first, neighbor))))
+        second = lookup.get((u + 1, v))
+        third = lookup.get((u, v + 1))
+        fourth = lookup.get((u + 1, v + 1))
+        if second is not None and third is not None and fourth is not None:
+            cells.append((first, second, third, fourth))
+
+    triangle_area: list[float] = []
+    triangle_residual: list[float] = []
+    for first, second, third, fourth in cells:
+        alternatives = (
+            ((first, second, fourth), (first, fourth, third)),
+            ((first, second, third), (second, fourth, third)),
+        )
+        evaluated: list[tuple[tuple[float, float], list[tuple[float, float]]]] = []
+        for alternative in alternatives:
+            values: list[tuple[float, float]] = []
+            for triangle in alternative:
+                _, area, residual, _ = _triangle_geometry(
+                    triangle, xyz, reference
+                )
+                values.append((float(area), float(residual)))
+            objective = (
+                max(value[1] for value in values),
+                sum(value[0] * value[1] for value in values)
+                / max(sum(value[0] for value in values), 1.0e-12),
+            )
+            evaluated.append((objective, values))
+        _, selected = min(evaluated, key=lambda value: value[0])
+        triangle_area.extend(value[0] for value in selected)
+        triangle_residual.extend(value[1] for value in selected)
+
+    edge_length: list[float] = []
+    edge_departure: list[float] = []
+    for first, second in edges:
+        tangent = xyz[second] - xyz[first]
+        length = float(np.linalg.norm(tangent))
+        if length <= 1.0e-12:
+            continue
+        first_normal = reference[first]
+        second_normal = reference[second]
+        if float(np.dot(first_normal, second_normal)) < 0.0:
+            second_normal = -second_normal
+        normal = first_normal + second_normal
+        normal_length = float(np.linalg.norm(normal))
+        if normal_length <= 1.0e-12:
+            normal = first_normal
+            normal_length = float(np.linalg.norm(normal))
+        if normal_length <= 1.0e-12:
+            edge_length.append(length)
+            edge_departure.append(90.0)
+            continue
+        departure = math.degrees(
+            math.asin(
+                float(
+                    np.clip(
+                        abs(float(np.dot(tangent / length, normal / normal_length))),
+                        0.0,
+                        1.0,
+                    )
+                )
+            )
+        )
+        edge_length.append(length)
+        edge_departure.append(departure)
+
+    area = np.asarray(triangle_area, dtype=np.float64)
+    residual = np.asarray(triangle_residual, dtype=np.float64)
+    total_area = float(np.sum(area))
+    high_fraction = (
+        float(np.sum(area[residual > high_residual_degrees]) / total_area)
+        if total_area > 1.0e-12
+        else 1.0
+    )
+    p90_residual = (
+        float(np.percentile(residual, 90)) if len(residual) else 90.0
+    )
+    coherence = (
+        max(0.0, math.cos(math.radians(min(p90_residual, 90.0))))
+        * max(0.0, 1.0 - high_fraction)
+        if math.isfinite(p90_residual)
+        else 0.0
+    )
+    return {
+        "gridCellCount": int(len(cells)),
+        "gridTriangleCount": int(len(residual)),
+        "medianTriangleNormalResidualDegrees": round(
+            float(np.median(residual)) if len(residual) else 90.0, 6
+        ),
+        "p90TriangleNormalResidualDegrees": round(p90_residual, 6),
+        "highNormalResidualAreaFraction": round(high_fraction, 6),
+        "maximumGridEdgeVoxels": round(
+            max(edge_length, default=0.0), 6
+        ),
+        "p90GridEdgeNormalDepartureDegrees": round(
+            float(np.percentile(edge_departure, 90))
+            if edge_departure
+            else 90.0,
+            6,
+        ),
+        "surfaceCoherenceScore": round(coherence, 6),
+    }
+
+
 def _normal_frame(normal_xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     normal = np.asarray(normal_xyz, dtype=np.float64)
     tangent_u = np.empty_like(normal)
@@ -1008,6 +1266,73 @@ def _other_component_clearance(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _TriangleSpatialIndex:
+    """A conservative uniform-grid index over immutable surface triangles."""
+
+    triangle: np.ndarray
+    point: np.ndarray
+    low: np.ndarray
+    high: np.ndarray
+    cell_size: float
+    bucket: Mapping[tuple[int, int, int], tuple[int, ...]]
+
+
+def _triangle_spatial_index(
+    surface: Mapping[str, np.ndarray],
+    *,
+    tolerance: float,
+    cell_size: float,
+) -> _TriangleSpatialIndex:
+    triangle = np.asarray(surface["triangleFrontierIndex"], dtype=np.int32)
+    xyz = np.asarray(surface["midpointXYZ"], dtype=np.float32)
+    point = xyz[triangle]
+    low = np.min(point, axis=1) - tolerance
+    high = np.max(point, axis=1) + tolerance
+    scale = max(float(cell_size), 2.0 * float(tolerance), 1.0e-3)
+    first_cell = np.floor(low / scale).astype(np.int32)
+    last_cell = np.floor(high / scale).astype(np.int32)
+    mutable_bucket: dict[tuple[int, int, int], list[int]] = defaultdict(list)
+    for triangle_index, (first, last) in enumerate(zip(first_cell, last_cell)):
+        for first_axis in range(int(first[0]), int(last[0]) + 1):
+            for second_axis in range(int(first[1]), int(last[1]) + 1):
+                for third_axis in range(int(first[2]), int(last[2]) + 1):
+                    mutable_bucket[(first_axis, second_axis, third_axis)].append(
+                        triangle_index
+                    )
+    return _TriangleSpatialIndex(
+        triangle=triangle,
+        point=point,
+        low=low,
+        high=high,
+        cell_size=scale,
+        bucket={key: tuple(value) for key, value in mutable_bucket.items()},
+    )
+
+
+def _spatial_triangle_candidates(
+    index: _TriangleSpatialIndex,
+    low: np.ndarray,
+    high: np.ndarray,
+) -> np.ndarray:
+    first_cell = np.floor(np.asarray(low) / index.cell_size).astype(np.int32)
+    last_cell = np.floor(np.asarray(high) / index.cell_size).astype(np.int32)
+    possible: set[int] = set()
+    for first_axis in range(int(first_cell[0]), int(last_cell[0]) + 1):
+        for second_axis in range(int(first_cell[1]), int(last_cell[1]) + 1):
+            for third_axis in range(int(first_cell[2]), int(last_cell[2]) + 1):
+                possible.update(
+                    index.bucket.get((first_axis, second_axis, third_axis), ())
+                )
+    if not possible:
+        return np.empty(0, dtype=np.int32)
+    candidate = np.fromiter(sorted(possible), dtype=np.int32)
+    overlaps = np.all(index.high[candidate] >= low, axis=1) & np.all(
+        index.low[candidate] <= high, axis=1
+    )
+    return candidate[overlaps]
+
+
 def _other_component_triangle_intersections(
     baseline_surface: Mapping[str, np.ndarray],
     augmented_surface: Mapping[str, np.ndarray],
@@ -1015,46 +1340,64 @@ def _other_component_triangle_intersections(
     component_id: int,
     *,
     tolerance: float,
+    spatial_index: _TriangleSpatialIndex | None = None,
 ) -> dict[str, int]:
-    """Audit literal crossings against every other already-selected surface."""
+    """Audit crossings against every nonincident selected surface triangle."""
 
     from ..slab_association_integrity import _triangle_intersection
 
-    baseline_triangle = np.asarray(
-        baseline_surface["triangleFrontierIndex"], dtype=np.int32
+    index = spatial_index or _triangle_spatial_index(
+        baseline_surface,
+        tolerance=tolerance,
+        cell_size=4.0,
     )
+    baseline_triangle = index.triangle
     component = np.asarray(baseline_surface["component"], dtype=np.int32)
-    other = baseline_triangle[
-        ~np.all(component[baseline_triangle] == component_id, axis=1)
-    ]
-    if not len(other) or not len(patch_triangle):
+    other_component_mask = ~np.all(
+        component[baseline_triangle] == component_id, axis=1
+    )
+    if not len(baseline_triangle) or not len(patch_triangle):
         return {
-            "otherComponentTriangleCount": int(len(other)),
+            "otherComponentTriangleCount": int(
+                np.count_nonzero(other_component_mask)
+            ),
+            "sameComponentTriangleCount": int(
+                np.count_nonzero(~other_component_mask)
+            ),
             "broadPhaseTrianglePairCount": 0,
             "intersectingTrianglePairCount": 0,
         }
     xyz = np.asarray(augmented_surface["midpointXYZ"], dtype=np.float32)
-    other_point = xyz[other]
-    other_low = np.min(other_point, axis=1) - tolerance
-    other_high = np.max(other_point, axis=1) + tolerance
+    other_point = index.point
     broad_count = 0
     intersection_count = 0
     for triangle in np.asarray(patch_triangle, dtype=np.int32):
         point = xyz[triangle]
         low = np.min(point, axis=0) - tolerance
         high = np.max(point, axis=0) + tolerance
-        possible = np.flatnonzero(
-            np.all(other_high >= low, axis=1) & np.all(other_low <= high, axis=1)
-        )
+        possible = _spatial_triangle_candidates(index, low, high)
         broad_count += len(possible)
         for other_index in possible:
+            # Shared boundary edges and pinch vertices are the intended exact
+            # attachment, not a crossing.  Every nonincident triangle,
+            # including another region carrying the same component label, is
+            # still screened.  This prevents a bay from folding through the
+            # back of its own reconstructed sheet.
+            baseline_nodes = baseline_triangle[int(other_index)]
+            if np.any(triangle[:, None] == baseline_nodes[None, :]):
+                continue
             intersection, _ = _triangle_intersection(
                 point, other_point[int(other_index)], tolerance
             )
             if intersection is not None:
                 intersection_count += 1
     return {
-        "otherComponentTriangleCount": int(len(other)),
+        "otherComponentTriangleCount": int(
+            np.count_nonzero(other_component_mask)
+        ),
+        "sameComponentTriangleCount": int(
+            np.count_nonzero(~other_component_mask)
+        ),
         "broadPhaseTrianglePairCount": int(broad_count),
         "intersectingTrianglePairCount": int(intersection_count),
     }
@@ -1265,6 +1608,8 @@ def _evaluate_dense_completion_variant(
     field_xyz: np.ndarray,
     field_reference: np.ndarray,
     boundary_separation_voxels: float,
+    new_frontier_edges: AbstractSet[tuple[int, int]] = frozenset(),
+    collision_index: _TriangleSpatialIndex | None = None,
     settings: PhysicalRibbonDenseCompletionSettings,
 ) -> dict[str, Any]:
     """Construct and audit one complete mesh-density hypothesis."""
@@ -1291,6 +1636,10 @@ def _evaluate_dense_completion_variant(
     point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
     boundary_local = np.flatnonzero(point_kind == 0)
     field_local = np.flatnonzero(point_kind == 1)
+    normalized_new_frontier_edges = {
+        tuple(sorted((int(edge[0]), int(edge[1]))))
+        for edge in new_frontier_edges
+    }
     local_xyz = np.empty((len(point_kind), 3), dtype=np.float32)
     local_reference = np.empty((len(point_kind), 3), dtype=np.float32)
     local_xyz[boundary_local] = np.asarray(current["midpointXYZ"])[
@@ -1315,7 +1664,6 @@ def _evaluate_dense_completion_variant(
     oriented: list[tuple[int, int, int]] = []
     triangle_area: list[float] = []
     triangle_residual: list[float] = []
-    triangle_edge: list[float] = []
     for triangle in local_triangle:
         values, area, residual, maximum_edge = _triangle_geometry(
             tuple(int(value) for value in triangle),
@@ -1325,15 +1673,27 @@ def _evaluate_dense_completion_variant(
         oriented.append(values)
         triangle_area.append(area)
         triangle_residual.append(residual)
-        triangle_edge.append(maximum_edge)
     mesh = dict(mesh)
     mesh["trianglePointIndex"] = np.asarray(oriented, dtype=np.int32)
     minimum_area = min(triangle_area, default=0.0)
-    maximum_edge = max(triangle_edge, default=float("inf"))
+    edge_audit = _mesh_edge_length_audit(
+        np.asarray(oriented, dtype=np.int32),
+        local_xyz,
+        point_kind,
+        point_source,
+        normalized_new_frontier_edges,
+    )
+    maximum_edge = float(edge_audit["maximumTriangleEdgeVoxels"])
+    maximum_supported_edge = float(
+        edge_audit["maximumCtSupportedTriangleEdgeVoxels"]
+    )
+    maximum_frontier_edge = float(
+        edge_audit["maximumOpenFrontierEdgeVoxels"]
+    )
     maximum_residual = max(triangle_residual, default=float("inf"))
     if minimum_area < settings.minimum_triangle_area_voxels_squared:
         reasons.append("completion contains a physically degenerate triangle")
-    if maximum_edge > settings.maximum_triangle_edge_voxels:
+    if maximum_supported_edge > settings.maximum_triangle_edge_voxels:
         reasons.append("completion contains an overlong triangle edge")
     triangle_area_array = np.asarray(triangle_area, dtype=np.float64)
     triangle_residual_array = np.asarray(triangle_residual, dtype=np.float64)
@@ -1449,17 +1809,30 @@ def _evaluate_dense_completion_variant(
         )
         for index in range(len(boundary))
     }
+    if not normalized_new_frontier_edges.issubset(boundary_edges):
+        reasons.append("new frontier edge is not on the completion boundary")
+    attachment_edges = boundary_edges - normalized_new_frontier_edges
     boundary_before_once = all(
-        current_incidence[edge] == 1 for edge in boundary_edges
+        current_incidence[edge] == 1 for edge in attachment_edges
     )
     boundary_after_twice = all(
-        trial_incidence[edge] == 2 for edge in boundary_edges
+        trial_incidence[edge] == 2 for edge in attachment_edges
+    )
+    new_frontier_absent_before = all(
+        current_incidence[edge] == 0 for edge in normalized_new_frontier_edges
+    )
+    new_frontier_once_after = all(
+        trial_incidence[edge] == 1 for edge in normalized_new_frontier_edges
     )
     nonmanifold = sum(value > 2 for value in trial_incidence.values())
     if not boundary_before_once:
         reasons.append("target loop is no longer an exact open boundary")
     if not boundary_after_twice:
         reasons.append("completion does not attach to every target boundary edge once")
+    if not new_frontier_absent_before:
+        reasons.append("proposed open-bay mouth already exists on the surface")
+    if not new_frontier_once_after:
+        reasons.append("completion does not leave exactly one open face at its mouth")
     if nonmanifold:
         reasons.append("completion creates a non-manifold mesh edge")
 
@@ -1469,9 +1842,10 @@ def _evaluate_dense_completion_variant(
         patch_triangle,
         component_id,
         tolerance=settings.intersection_tolerance_voxels,
+        spatial_index=collision_index,
     )
     if int(intersections["intersectingTrianglePairCount"]):
-        reasons.append("completion intersects another selected surface")
+        reasons.append("completion intersects an existing selected surface")
     base_triangle = np.asarray(current["triangleFrontierIndex"], dtype=np.int32)
     base_component = np.asarray(current["component"], dtype=np.int32)
     same_component_triangle = base_triangle[
@@ -1485,11 +1859,21 @@ def _evaluate_dense_completion_variant(
     if chart_overlap:
         reasons.append("completion overlaps an existing triangle in its intrinsic chart")
     topology_exact = bool(
-        boundary_before_once and boundary_after_twice and not nonmanifold
+        boundary_before_once
+        and boundary_after_twice
+        and new_frontier_absent_before
+        and new_frontier_once_after
+        and not nonmanifold
     )
     geometry = {
         "minimumTriangleAreaVoxelsSquared": round(float(minimum_area), 6),
         "maximumTriangleEdgeVoxels": round(float(maximum_edge), 6),
+        "maximumCtSupportedTriangleEdgeVoxels": round(
+            float(maximum_supported_edge), 6
+        ),
+        "maximumOpenFrontierEdgeVoxels": round(
+            float(maximum_frontier_edge), 6
+        ),
         "medianTriangleNormalResidualDegrees": round(
             float(np.median(triangle_residual)), 6
         ),
@@ -1506,6 +1890,12 @@ def _evaluate_dense_completion_variant(
         "nonManifoldEdgeCount": int(nonmanifold),
         "everyBoundaryEdgeOpenBefore": bool(boundary_before_once),
         "everyBoundaryEdgeClosedAfter": bool(boundary_after_twice),
+        "attachmentBoundaryEdgeCount": int(len(attachment_edges)),
+        "newFrontierEdgeCount": int(len(normalized_new_frontier_edges)),
+        "everyNewFrontierEdgeAbsentBefore": bool(
+            new_frontier_absent_before
+        ),
+        "everyNewFrontierEdgeOpenAfter": bool(new_frontier_once_after),
         **clearance,
         **intersections,
     }
@@ -1541,26 +1931,18 @@ def build_physical_ribbon_dense_completion(
     current = _surface_view(holes)
     baseline_node_count = len(np.asarray(current["midpointXYZ"]))
     baseline_triangle_count = len(np.asarray(current["triangleFrontierIndex"]))
-    loops = {
-        key: np.asarray(holes[key])
-        for key in (
-            "loopOffset",
-            "loopVertexFrontierIndex",
-            "loopTriangleRegion",
-            "loopTopologyComponent",
-            "loopKind",
-            "loopAreaChartVoxelsSquared",
-            "loopPerimeterChartVoxels",
-            "loopDiameterChartVoxels",
-            "loopMedianThicknessVoxels",
-            "loopMeanBoundaryEdgeVoxels",
-            "loopMacroEligible",
-        )
-    }
-    loop_count_before = _loop_counts(loops)
-    _, initial_loop_stats = extract_surface_boundary_loops(
+    baseline_loops, initial_loop_stats = extract_surface_boundary_loops(
         current, settings=hole_settings
     )
+    loop_count_before = _loop_counts(baseline_loops)
+    boundary_edge_count_before = int(
+        len(np.asarray(baseline_loops["loopVertexFrontierIndex"]))
+    )
+    predicted_boundary_edge_count = boundary_edge_count_before
+    open_bay_mode = {
+        "bayMouthFirstFrontierIndex",
+        "bayMouthSecondFrontierIndex",
+    }.issubset(holes)
     current_incidence = _edge_incidence(current["triangleFrontierIndex"])
     current_region_count = _component_region_count(current)
     predicted_loop_count = dict(loop_count_before)
@@ -1570,6 +1952,15 @@ def build_physical_ribbon_dense_completion(
     shifts = np.asarray(depth_field["shiftThicknesses"], dtype=np.float32)
     labels = np.asarray(depth_field["pixelCollectiveLabel"], dtype=np.int16)
     field_supported = np.asarray(depth_field["pixelCtSupported"], dtype=np.uint8) > 0
+    field_coordinates = np.asarray(
+        depth_field["patchGridCoordinateUV"], dtype=np.int32
+    )
+    field_correlation = np.asarray(
+        depth_field["pixelCollectiveProfileCorrelation"], dtype=np.float32
+    )
+    field_margin = np.asarray(
+        depth_field["pixelCollectiveFarLayerMargin"], dtype=np.float32
+    )
 
     proposal_offset = [0]
     proposal_node: list[int] = []
@@ -1586,13 +1977,72 @@ def build_physical_ribbon_dense_completion(
     accepted_added_edge: list[tuple[int, int]] = []
     records: list[dict[str, Any]] = []
 
-    ranked_rows = sorted(
-        range(len(loop_index)),
-        key=lambda row: (
-            -float(holes["loopAreaChartVoxelsSquared"][loop_index[row]]),
+    field_integrability: list[dict[str, float | int]] = []
+    for row, loop_value in enumerate(loop_index):
+        loop = int(loop_value)
+        start, stop = int(patch_offset[row]), int(patch_offset[row + 1])
+        pixel_slice = slice(start, stop)
+        thickness = float(holes["loopMedianThicknessVoxels"][loop])
+        chosen_shift = shifts[labels[pixel_slice]]
+        point_xyz = np.asarray(
+            depth_field["patchXYZ"], dtype=np.float32
+        )[pixel_slice] + (
+            np.asarray(depth_field["patchNormalXYZ"], dtype=np.float32)[
+                pixel_slice
+            ]
+            * (chosen_shift * thickness)[:, None]
+        )
+        metrics = _surface_field_integrability(
+            field_coordinates[pixel_slice],
+            point_xyz,
+            np.asarray(depth_field["patchNormalXYZ"], dtype=np.float32)[
+                pixel_slice
+            ],
+            high_residual_degrees=(
+                settings.high_triangle_normal_residual_degrees
+            ),
+        )
+        metrics["ctSupportedFraction"] = round(
+            float(np.mean(field_supported[pixel_slice])) if stop > start else 0.0,
+            6,
+        )
+        metrics["medianProfileCorrelation"] = round(
+            float(np.median(field_correlation[pixel_slice]))
+            if stop > start
+            else -1.0,
+            6,
+        )
+        finite_margin = field_margin[pixel_slice][
+            np.isfinite(field_margin[pixel_slice])
+        ]
+        metrics["medianFarLayerMargin"] = round(
+            float(np.median(finite_margin)) if len(finite_margin) else -1.0e6,
+            6,
+        )
+        field_integrability.append(metrics)
+
+    def ranking_key(row: int) -> tuple[float | int, ...]:
+        if not open_bay_mode:
+            return (
+                -float(holes["loopAreaChartVoxelsSquared"][loop_index[row]]),
+                row,
+            )
+        return (
+            -int(
+                float(field_integrability[row]["ctSupportedFraction"])
+                >= settings.minimum_depth_field_supported_fraction
+            ),
+            -float(field_integrability[row]["surfaceCoherenceScore"]),
+            -float(field_integrability[row]["ctSupportedFraction"]),
+            -float(field_integrability[row]["medianProfileCorrelation"]),
+            -float(field_integrability[row]["medianFarLayerMargin"]),
+            -float(holes["bayGeometryObjective"][loop_index[row]]),
             row,
-        ),
-    )[: settings.maximum_completed_holes]
+        )
+
+    ranked_rows = sorted(range(len(loop_index)), key=ranking_key)[
+        : settings.maximum_completed_holes
+    ]
     for row in ranked_rows:
         loop = int(loop_index[row])
         start, stop = int(patch_offset[row]), int(patch_offset[row + 1])
@@ -1623,9 +2073,17 @@ def build_physical_ribbon_dense_completion(
         selected_hypothesis_index: int | None = None
         selected_separation: float | None = None
         last_variant: dict[str, Any] | None = None
-        for hypothesis_index, separation in enumerate(
-            settings.interior_boundary_separation_hypotheses_voxels
-        ):
+        collision_index = _triangle_spatial_index(
+            current,
+            tolerance=settings.intersection_tolerance_voxels,
+            cell_size=settings.maximum_triangle_edge_voxels,
+        )
+        separation_hypotheses = (
+            settings.interior_boundary_separation_hypotheses_voxels[:1]
+            if open_bay_mode
+            else settings.interior_boundary_separation_hypotheses_voxels
+        )
+        for hypothesis_index, separation in enumerate(separation_hypotheses):
             variant = _evaluate_dense_completion_variant(
                 current,
                 current_incidence,
@@ -1640,6 +2098,21 @@ def build_physical_ribbon_dense_completion(
                 field_xyz=field_xyz,
                 field_reference=field_reference,
                 boundary_separation_voxels=float(separation),
+                new_frontier_edges=(
+                    {
+                        tuple(
+                            sorted(
+                                (
+                                    int(holes["bayMouthFirstFrontierIndex"][loop]),
+                                    int(holes["bayMouthSecondFrontierIndex"][loop]),
+                                )
+                            )
+                        )
+                    }
+                    if open_bay_mode
+                    else frozenset()
+                ),
+                collision_index=collision_index,
                 settings=settings,
             )
             last_variant = variant
@@ -1670,7 +2143,7 @@ def build_physical_ribbon_dense_completion(
 
         target_was_macro = bool(
             np.asarray(holes["loopMacroEligible"], dtype=np.uint8)[loop]
-        )
+        ) and not open_bay_mode
         current_loop_count = dict(predicted_loop_count)
         if selected_variant is None:
             reasons = list(hypothesis_records[-1]["rejectionReasons"])
@@ -1687,6 +2160,7 @@ def build_physical_ribbon_dense_completion(
                     "depthFieldSupportedFraction": round(
                         depth_support_fraction, 6
                     ),
+                    "depthFieldIntegrability": field_integrability[row],
                     "mesh": (
                         last_variant.get("meshStatistics")
                         if last_variant is not None
@@ -1716,6 +2190,7 @@ def build_physical_ribbon_dense_completion(
                             "macroHoleCount"
                         ],
                         "targetWasMacroEligible": target_was_macro,
+                        "targetWasOpenBay": open_bay_mode,
                         "componentTriangleRegionCountBefore": (
                             current_region_count.get(component_id, 0)
                         ),
@@ -1755,13 +2230,21 @@ def build_physical_ribbon_dense_completion(
         geometry_record = selected_variant["geometry"]
 
         trial_loop_count = dict(current_loop_count)
-        trial_loop_count["interiorHoleCount"] -= 1
-        trial_loop_count["macroHoleCount"] -= int(target_was_macro)
+        trial_boundary_edge_count = predicted_boundary_edge_count
+        if open_bay_mode:
+            # K existing arc edges are replaced by one new mouth edge.  The
+            # boundary array has K+1 vertices because the mouth is implicit.
+            trial_boundary_edge_count -= len(boundary) - 2
+        else:
+            trial_loop_count["interiorHoleCount"] -= 1
+            trial_loop_count["macroHoleCount"] -= int(target_was_macro)
+            trial_boundary_edge_count -= len(boundary)
         trial_region = current_region_count
 
         current = trial
         current_incidence = trial_incidence
         predicted_loop_count = trial_loop_count
+        predicted_boundary_edge_count = trial_boundary_edge_count
         accepted_added_edge.extend(
             (int(value[0]), int(value[1])) for value in added_edge
         )
@@ -1802,6 +2285,7 @@ def build_physical_ribbon_dense_completion(
                 "selectedBoundarySeparationVoxels": selected_separation,
                 "hypotheses": hypothesis_records,
                 "depthFieldSupportedFraction": round(depth_support_fraction, 6),
+                "depthFieldIntegrability": field_integrability[row],
                 "mesh": mesh_stats,
                 "geometry": geometry_record,
                 "nativeCt": native_stats,
@@ -1815,6 +2299,12 @@ def build_physical_ribbon_dense_completion(
                     "macroHoleCountBefore": current_loop_count["macroHoleCount"],
                     "macroHoleCountAfter": trial_loop_count["macroHoleCount"],
                     "targetWasMacroEligible": target_was_macro,
+                    "targetWasOpenBay": open_bay_mode,
+                    "boundaryEdgeCountBefore": (
+                        predicted_boundary_edge_count
+                        + (len(boundary) - 2 if open_bay_mode else len(boundary))
+                    ),
+                    "boundaryEdgeCountAfter": trial_boundary_edge_count,
                     "componentTriangleRegionCountBefore": (
                         current_region_count.get(component_id, 0)
                     ),
@@ -1830,10 +2320,20 @@ def build_physical_ribbon_dense_completion(
         current, settings=hole_settings
     )
     final_loop_count = _loop_counts(final_loops)
+    final_boundary_edge_count = int(
+        len(np.asarray(final_loops["loopVertexFrontierIndex"]))
+    )
     if final_loop_count != predicted_loop_count:
         raise ValueError(
             "local completion incidence and final whole-surface topology differ: "
             f"predicted={predicted_loop_count}, actual={final_loop_count}"
+        )
+    if final_boundary_edge_count != predicted_boundary_edge_count:
+        raise ValueError(
+            "local completion boundary-edge accounting and final whole-surface "
+            "topology differ: "
+            f"predicted={predicted_boundary_edge_count}, "
+            f"actual={final_boundary_edge_count}"
         )
     if int(final_loop_stats["unresolvedBoundaryFanCount"]) > int(
         initial_loop_stats["unresolvedBoundaryFanCount"]
@@ -1926,6 +2426,11 @@ def build_physical_ribbon_dense_completion(
         "macroHoleCountAfter": final_loop_count["macroHoleCount"],
         "interiorHoleCountBefore": loop_count_before["interiorHoleCount"],
         "interiorHoleCountAfter": final_loop_count["interiorHoleCount"],
+        "boundaryEdgeCountBefore": boundary_edge_count_before,
+        "boundaryEdgeCountAfter": final_boundary_edge_count,
+        "boundaryEdgeReduction": (
+            boundary_edge_count_before - final_boundary_edge_count
+        ),
         "triangleRegionCountBefore": int(
             len(
                 np.unique(
@@ -1942,7 +2447,14 @@ def build_physical_ribbon_dense_completion(
                 )
             )
         ),
-        "adaptiveMeshHypotheses": True,
+        "adaptiveMeshHypotheses": not open_bay_mode,
+        "openBayFullResolutionOnly": open_bay_mode,
+        "openBayRanking": (
+            "depth-field readiness, surface integrability, CT support, "
+            "profile correlation, far-layer margin, then geometry"
+            if open_bay_mode
+            else None
+        ),
         "evaluatedMeshHypothesisCount": int(
             sum(len(record.get("hypotheses", ())) for record in records)
         ),
@@ -1957,9 +2469,12 @@ def build_physical_ribbon_dense_completion(
         ),
         "finalBoundaryAudit": final_loop_stats,
         "decisionUnit": (
-            "one complete weakly-simple closed boundary and its collective "
+            "one complete outer-boundary arc and replacement mouth"
+            if open_bay_mode
+            else "one complete weakly-simple closed boundary and its collective "
             "CT depth field"
         ),
+        "openBayMode": open_bay_mode,
         "singlePixelGrowth": False,
         "ribbonCandidatesRequiredForInterior": False,
         "fittedNormalTailIsDiagnostic": True,
@@ -2076,12 +2591,17 @@ def run_physical_ribbon_dense_completion(
         },
         "method": {
             "decisionUnit": (
-                "one complete closed boundary and collective dense CT "
+                "one complete outer-boundary arc and one replacement mouth"
+                if statistics["openBayMode"]
+                else "one complete closed boundary and collective dense CT "
                 "normal-depth field"
             ),
             "boundaryGeometry": (
-                "weakly-simple loops are decomposed at pinch vertices into "
-                "exact edge-preserving disk cycles"
+                "an open bay closes every inherited arc edge while leaving "
+                "its one new mouth edge open"
+                if statistics["openBayMode"]
+                else "weakly-simple loops are decomposed at pinch vertices "
+                "into exact edge-preserving disk cycles"
             ),
             "surfaceRepresentation": (
                 "constrained intrinsic triangles through dense CT field "
@@ -2089,10 +2609,22 @@ def run_physical_ribbon_dense_completion(
                 "evidence only"
             ),
             "adaptiveMeshDensity": (
-                "each full boundary is tested densest-first at declared "
+                "open bays retain the full depth-field resolution; a coarser "
+                "retry cannot hide a non-integrable or unsupported frontier "
+                "expansion"
+                if statistics["openBayMode"]
+                else "each full boundary is tested densest-first at declared "
                 "boundary-separation scales; the first complete mesh whose "
                 "entire realized area passes native CT and exact topology is "
                 "selected, rather than growing individual pixels or cells"
+            ),
+            "depthFieldIntegrability": (
+                "complete 2x2 raster cells test whether pointwise-supported "
+                "depth assignments form a realizable surface and rank open "
+                "bays before constrained meshing"
+                if statistics["openBayMode"]
+                else "reported as a diagnostic; closed-hole ordering and "
+                "adaptive reconstruction remain unchanged"
             ),
             "nativeCtAudit": (
                 "the realized triangles are re-sampled at retained dense "
@@ -2108,9 +2640,22 @@ def run_physical_ribbon_dense_completion(
                 "literally intersect another surface"
             ),
             "topologyAudit": (
-                "every prior boundary edge becomes exactly two-incident, no "
-                "edge exceeds two faces, the target macro/interior loop "
+                "every inherited arc edge becomes exactly two-incident, the "
+                "new mouth is exactly one-incident, total boundary length "
+                "falls, loop counts remain fixed, and no triangle region is "
+                "created"
+                if statistics["openBayMode"]
+                else "every prior boundary edge becomes exactly two-incident, "
+                "no edge exceeds two faces, the target macro/interior loop "
                 "disappears, and no triangle region is created"
+            ),
+            "openFrontierScale": (
+                "the declared maximum triangle edge applies to CT-supported "
+                "interior and attachment edges; the replacement mouth is an "
+                "open frontier, is reported separately, and remains covered "
+                "by uniform native-CT area quadrature"
+                if statistics["openBayMode"]
+                else "all completion edges use the declared maximum"
             ),
             "mutation": (
                 "accepted completions augment a versioned surface artifact; "

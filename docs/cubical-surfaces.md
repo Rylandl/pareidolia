@@ -1062,6 +1062,83 @@ treatment of tight bends and compressed proximity.  Fitted-normal tail and
 thickness-normalized clearance remain published diagnostics rather than being
 tuned into slice-specific truth labels.
 
+### Complete outer-frontier bay filling
+
+Closing interior loops does not address missing material along an outer sheet
+frontier.  That problem is now handled by
+`analyze-physical-ribbon-open-bays`, without returning to one-cell growth.  A
+candidate is one existing multi-edge concave boundary arc plus one replacement
+mouth.  The whole enclosed exterior chart area is the decision unit.  An arc
+is eligible only when it is simple, compact, shortens the frontier, stays away
+from owned block faces, lies on the unoccupied side of the current chart, and
+does not cross the existing outer boundary.  Candidate-bank ribbons and sheet
+identity labels are not consulted.
+
+Pointwise depth support is insufficient for this operation.  The first
+geometry-ranked experiment exposed a field whose pixels individually matched
+air-material-air profiles but whose joined triangles placed roughly three
+quarters of their area more than 45 degrees from the CT-derived normal field.
+The completion stage therefore evaluates every complete 2-by-2 depth-field
+cell before constrained meshing.  It ranks bays by depth-field readiness,
+surface integrability, direct CT support, profile correlation, competing-layer
+margin, and only then geometric gain.  Open bays use the full 0.20-voxel
+boundary-separation mesh only; a coarser retry is not allowed to hide
+inconsistent depth assignments.
+
+Acceptance is still exact.  Every inherited arc edge changes from one to two
+incident triangles, the replacement mouth remains one-incident, total
+boundary-edge count falls, and component, triangle-region, and loop counts are
+unchanged.  New triangles are checked against every spatially nearby baseline
+triangle, including disconnected regions carrying the same component label,
+which prevents an apparently valid bay from folding through the back of its
+own sheet.  The replacement mouth may be longer than the six-voxel interior
+mesh-edge limit: it is an open frontier rather than an unsupported interior
+bridge, is reported separately, and its adjacent triangle area is still
+sampled by uniform native-CT quadrature at no more than one-voxel spacing.
+
+The initial whole-surface census finds 734 outer loops, of which 53 touch an
+owned block face and are excluded.  Geometry produces 6,001 compact arc
+hypotheses on 362 loops and retains the leading 128 nonredundant bays for CT
+analysis.  The final exact pass accepts 55 bays on 53 components, adds 1,601
+dense vertices and 3,383 triangles, and reduces outer-frontier edges from
+12,462 to 12,281.  All 734 triangle regions, 734 outer loops, and nine interior
+loops remain unchanged, with no unresolved boundary fan.  Exact reconstruction
+takes 41.6 seconds; local edge queues replace repeated whole-mesh Lawson scans
+while preserving the same chart and physical objectives.  The closed-hole
+regressions remain exactly 1/1 macro and 90/92 meso; the latter now solves in
+9.1 seconds.
+
+All 55 accepted bays are independently measurable and compatible in the
+proposal-local flattened fiber audit.  There are zero incompatible and zero
+unmeasured expansions, so the result is not being rescued by a component
+average.  The visual check is
+`physical-ribbon-open-bay-completion-flat-audit-v1/physical-ribbon-flattened-audit.png`.
+
+The reproducible outer-frontier sequence is:
+
+```bash
+python -m backend.cubical analyze-physical-ribbon-open-bays \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-adaptive-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-open-bays-v1 \
+  --settings-json examples/physical-ribbon-open-bays.json
+
+python -m backend.cubical analyze-physical-ribbon-depth-fields \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-open-bays-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-depth-fields-v1 \
+  --settings-json examples/physical-ribbon-depth-fields.json
+
+python -m backend.cubical complete-physical-ribbon-dense-surfaces \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-open-bays-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-depth-fields-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-completion-v1 \
+  --settings-json examples/physical-ribbon-dense-completion.json
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-completion-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-open-bay-completion-flat-audit-v1 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+```
+
 The reusable residual sequence is:
 
 ```bash

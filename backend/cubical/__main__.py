@@ -127,6 +127,10 @@ from .physical_ribbon_surface_holes import (
     PhysicalRibbonSurfaceHoleSettings,
     run_physical_ribbon_surface_holes,
 )
+from .physical_ribbon_open_bays import (
+    PhysicalRibbonOpenBaySettings,
+    run_physical_ribbon_open_bays,
+)
 from .physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
     run_physical_ribbon_dense_completion,
@@ -945,6 +949,24 @@ def _physical_ribbon_surface_holes(args: argparse.Namespace) -> None:
         args.surface,
         args.output,
         settings=PhysicalRibbonSurfaceHoleSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_open_bays(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    for name in ("profile_depth_fractions", "competing_shift_thicknesses"):
+        if name in settings_values:
+            settings_values[name] = tuple(settings_values[name])
+    summary = run_physical_ribbon_open_bays(
+        args.surface,
+        args.output,
+        settings=PhysicalRibbonOpenBaySettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -3021,12 +3043,31 @@ def main() -> None:
     physical_ribbon_surface_holes.set_defaults(
         handler=_physical_ribbon_surface_holes
     )
+    physical_ribbon_open_bays = subparsers.add_parser(
+        "analyze-physical-ribbon-open-bays",
+        description=(
+            "Find compact concave bays on outer surface frontiers, rank "
+            "complete multi-edge arc replacements by area gain and boundary "
+            "shortening, and score each whole bay against native CT."
+        ),
+    )
+    physical_ribbon_open_bays.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_open_bays.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_open_bays.add_argument("--settings-json", type=Path)
+    physical_ribbon_open_bays.add_argument("--force", action="store_true")
+    physical_ribbon_open_bays.set_defaults(
+        handler=_physical_ribbon_open_bays
+    )
     physical_ribbon_depth_fields = subparsers.add_parser(
         "analyze-physical-ribbon-depth-fields",
         description=(
             "Sample dense native-CT normal-depth likelihoods across each "
-            "complete residual hole, solve one coherent ordered-label field, "
-            "and separate missing ribbon hypotheses from assignment failures."
+            "complete residual hole or outer-frontier bay, then solve one "
+            "coherent ordered-label field and classify its support."
         ),
     )
     physical_ribbon_depth_fields.add_argument(
@@ -3044,8 +3085,9 @@ def main() -> None:
         "complete-physical-ribbon-dense-surfaces",
         description=(
             "Promote each complete collective native-CT depth field to one "
-            "edge-exact constrained surface patch, retaining it only when "
-            "whole-loop manifold, chart, competing-layer, and CT audits pass."
+            "boundary-exact constrained surface patch, retaining it only "
+            "when whole-state manifold, chart, competing-layer, and CT "
+            "audits pass."
         ),
     )
     physical_ribbon_dense_completion.add_argument(

@@ -1,0 +1,20 @@
+{
+  "minimum_arc_edge_count": 3,
+  "maximum_arc_edge_count": 32,
+  "minimum_mouth_width_boundary_edges": 0.75,
+  "maximum_mouth_width_thicknesses": 4.0,
+  "minimum_perimeter_reduction_boundary_edges": 0.5,
+  "minimum_bay_area_chart_voxels_squared": 1.0,
+  "minimum_bay_compactness": 0.025,
+  "minimum_exterior_raster_fraction": 0.9,
+  "owned_boundary_exclusion_voxels": 2.0,
+  "geometry_raster_step_voxels": 0.75,
+  "maximum_geometry_raster_pixels": 2048,
+  "maximum_candidates_per_outer_loop": 4,
+  "maximum_arc_overlap_fraction": 0.6,
+  "context_graph_hops": 2,
+  "patch_pixel_step_voxels": 0.75,
+  "maximum_patch_pixels": 8192,
+  "maximum_scored_holes": 128,
+  "maximum_preview_holes": 24
+}
