@@ -62,6 +62,21 @@ from backend.cubical.physical_ribbon_corridor_frontier import (
 from backend.cubical.physical_ribbon_corridor_saturation import (
     _assess_saturation,
 )
+from backend.cubical.physical_ribbon_corridor_deficits import (
+    _largest_four_connected_fraction,
+    _nearest_distance_and_index,
+)
+from backend.cubical.physical_ribbon_corridor_faces import (
+    PhysicalRibbonCorridorFaceSettings,
+    _attached_candidate_closure,
+    _face_is_physical,
+    _minimum_face_path,
+    _retained_chart_nodes,
+)
+from backend.cubical.physical_ribbon_corridor_face_replay import (
+    _edge_manifold_audit,
+    _optimize_candidate_state,
+)
 from backend.cubical.physical_ribbon_replay_configuration import (
     _materialize_replay_arrays,
 )
@@ -527,6 +542,149 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_corridor_deficit_support_metrics_are_spatial(self) -> None:
+        distance, index = _nearest_distance_and_index(
+            np.asarray(((0.0, 0.0, 0.0), (4.0, 0.0, 0.0))),
+            np.asarray(((1.0, 0.0, 0.0), (5.0, 0.0, 0.0))),
+        )
+        np.testing.assert_allclose(distance, (1.0, 1.0))
+        np.testing.assert_array_equal(index, (0, 1))
+        self.assertAlmostEqual(
+            _largest_four_connected_fraction(
+                np.asarray(
+                    (
+                        (1, 1, 0, 0),
+                        (1, 0, 0, 1),
+                        (0, 0, 1, 1),
+                    ),
+                    dtype=bool,
+                )
+            ),
+            3.0 / 12.0,
+        )
+
+    def test_corridor_face_path_bridges_triangle_regions_only_by_faces(self) -> None:
+        existing = np.asarray(((0, 1, 2), (3, 4, 5)), dtype=np.int32)
+        region = np.asarray((0, 1), dtype=np.int32)
+        candidate = np.asarray(((1, 2, 3), (2, 3, 4)), dtype=np.int32)
+        path, cost = _minimum_face_path(
+            existing,
+            region,
+            candidate,
+            np.asarray((1.25, 1.5), dtype=np.float32),
+            first_region=0,
+            second_region=1,
+        )
+        np.testing.assert_array_equal(path, (0, 1))
+        self.assertAlmostEqual(cost, 2.75)
+        missing, missing_cost = _minimum_face_path(
+            existing,
+            region,
+            candidate,
+            np.asarray((1.25, 1.5), dtype=np.float32),
+            first_region=0,
+            second_region=1,
+            candidate_eligible=np.asarray((1, 0), dtype=bool),
+        )
+        self.assertEqual(len(missing), 0)
+        self.assertTrue(np.isinf(missing_cost))
+
+    def test_corridor_face_closure_excludes_isolated_candidates(self) -> None:
+        existing = np.asarray(((0, 1, 2),), dtype=np.int32)
+        candidates = np.asarray(
+            ((1, 2, 3), (2, 3, 4), (6, 7, 8)), dtype=np.int32
+        )
+        np.testing.assert_array_equal(
+            _attached_candidate_closure(
+                existing,
+                candidates,
+                np.asarray((1, 1, 1), dtype=bool),
+            ),
+            (1, 1, 0),
+        )
+
+    def test_corridor_face_gate_uses_local_physical_units(self) -> None:
+        settings = PhysicalRibbonCorridorFaceSettings()
+        metrics = {
+            "areaVoxelsSquared": 1.0,
+            "centerDistanceThicknesses": 0.10,
+            "centerHeightThicknesses": 0.05,
+            "centerTangentRasterSteps": 1.0,
+            "ctNormalResidualDegrees": 30.0,
+            "maximumEdgeThicknesses": 1.0,
+        }
+        self.assertTrue(_face_is_physical(metrics, settings=settings))
+        self.assertFalse(
+            _face_is_physical(
+                {**metrics, "maximumEdgeThicknesses": 1.5},
+                settings=settings,
+            )
+        )
+
+    def test_corridor_face_catalog_can_target_one_strict_component(self) -> None:
+        surface = {
+            "component": np.asarray((0, 0, 0, 1, 1, 1), dtype=np.int32),
+            "componentSize": np.full(6, 3, dtype=np.int32),
+            "chartUV": np.asarray(
+                (
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    (0.0, 1.0),
+                    (3.0, 0.0),
+                    (4.0, 0.0),
+                    (3.0, 1.0),
+                ),
+                dtype=np.float32,
+            ),
+        }
+        retained = _retained_chart_nodes(
+            surface,
+            minimum_component_ribbon_count=3,
+            minimum_chart_separation_voxels=0.1,
+            component_ids={1},
+        )
+        self.assertEqual(len(retained), 1)
+        np.testing.assert_array_equal(np.sort(retained[0]), (3, 4, 5))
+
+    def test_corridor_face_replay_prefers_lower_face_debt_on_conflict(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray((0, 1, 2, 3), dtype=np.int64),
+            "corridorVariantAddedFrontierIndex": np.asarray((0, 1, 2), dtype=np.int32),
+            "corridorVariantRemovedOffset": np.asarray((0, 0, 0, 0), dtype=np.int64),
+            "corridorVariantRemovedFrontierIndex": np.empty(0, dtype=np.int32),
+        }
+        candidates = [
+            {
+                "corridorRow": row,
+                "bestFailedVariantIndex": row,
+                "physicalPathCost": cost,
+                "physicalPathFaceCount": 1,
+                "sharedArcRegionFraction": 1.0,
+            }
+            for row, cost in ((0, 1.0), (1, 2.0), (2, 1.0))
+        ]
+        chosen, stats = _optimize_candidate_state(
+            candidates,
+            variants,
+            valid_modifications=lambda added, _removed: not ({0, 1} <= added),
+            beam_width=16,
+        )
+        self.assertEqual(chosen["rows"], (0, 2))
+        self.assertEqual(stats["chosenCount"], 2)
+
+    def test_supplemental_faces_preserve_edge_manifoldness(self) -> None:
+        clean = _edge_manifold_audit(
+            np.asarray(((0, 1, 2), (1, 0, 3)), dtype=np.int32)
+        )
+        self.assertEqual(clean["nonManifoldEdgeCount"], 0)
+        self.assertEqual(clean["maximumTriangleIncidencePerEdge"], 2)
+        broken = _edge_manifold_audit(
+            np.asarray(
+                ((0, 1, 2), (1, 0, 3), (0, 1, 4)), dtype=np.int32
+            )
+        )
+        self.assertEqual(broken["nonManifoldEdgeCount"], 1)
+
     def test_corridor_saturation_reuses_untouched_exact_failures(self) -> None:
         prior_corridor = {
             "corridorEvidenceEligible": np.asarray((1, 1), dtype=np.uint8),

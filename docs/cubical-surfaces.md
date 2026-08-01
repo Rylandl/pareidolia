@@ -494,6 +494,61 @@ the cumulative state contains 43 accepted corridor events. Further progress
 requires a different missing-geometry representation rather than deeper
 enumeration of the same one-sided ribbons.
 
+`analyze-physical-ribbon-corridor-deficits` reconstructs the strongest failed
+complete matching in each residual CT strip and measures the selected nodes and
+triangles against the fitted native-CT patch. Sixteen of the 21 strips have a
+non-conflicting, component-preserving state that can be reconstructed. Their
+median triangle coverage within half a local papyrus thickness is 1.0, median
+central unsupported fraction is zero, and median separation between the two
+dominant triangle islands is only 0.372 sheet thicknesses. Only row 90 is a
+clear sparse-support outlier, at 0.787 coverage and 1.425 thicknesses of
+separation. The residual class is therefore mostly not missing Acus samples.
+
+The surface contract was the actual bottleneck. Sheet identity and mesh-face
+support had shared one strict graph: a chart-Delaunay triangle was retained only
+when all three of its edges were already strict continuation edges. That is a
+valid conservative identity graph but an unnecessarily incomplete mesh graph.
+`analyze-physical-ribbon-corridor-faces` separates the two roles. Strict ribbon
+edges still define components. A supplemental face may only come from the
+existing component's chart-Delaunay tessellation, and its center must agree
+with the complete native-CT corridor patch in thickness-normalized distance,
+height, tangent displacement, normal, and edge length. The solver selects a
+minimum dual-face path between the two boundary-arc triangle regions; those
+faces are never promoted to topology edges.
+
+This representation repairs 14 of the 16 reconstructable failures. Each path
+uses one to three faces. The accepted face centers lie at most 0.083 sheet
+thicknesses from the CT model; maximum edge length is 1.204 local thicknesses.
+The tight-bend cases explain the old false negatives directly: one valid face
+has a 47.7-degree residual against its Acus node normals, just beyond the old
+45-degree fixed gate, while its center is 0.012 thicknesses from CT. The sparse
+row 90 and one other corridor remain rejected. Candidate tessellation is
+restricted to the strict component containing the two arcs, so the operation
+scales with the affected sheet rather than all 4,305 block components.
+
+`replay-physical-ribbon-corridor-faces` jointly selects the resulting ribbon
+assignments under the original interface and crossing conflicts, rebuilds the
+chosen strict sheets once, and then recomputes all face paths in their shared
+final charts. It starts from the cumulative 37,925-ribbon exact replay, thereby
+preserving the previously accepted row-93 repair. Thirteen of 14 face repairs
+coexist; rows 3 and 72 compete for one interface assignment, and the global
+objective keeps the lower-face-debt row-3 state. The cumulative selection adds
+80 ribbons and removes 34 for 37,971 total. Strict triangles rise from 28,332
+to 28,412. Nineteen separately marked faces are sufficient to prove all 13
+corridor connections. Growing the attached, physically eligible Delaunay
+closure adds 112 marked CT faces in total, producing 28,524 output triangles
+and reducing edge-connected triangle regions from 769 to 755.
+
+The cumulative artifact retains all 4,305 strict components with zero
+interface conflict, profile crossing, prior-component split, or cross-sheet
+fusion. All mesh edges have at most two incident triangles. The minimum strict
+surface-area retention over the 11 affected components is 0.999; the remaining
+components gain area. The attached closure reduces interior boundary holes
+from 30 to 27 and macro holes from three to two. Flattened native-CT previews
+contain no nonadjacent chart overlap. Deficit analysis takes 59 seconds,
+independent face screening about 85 seconds, and the cumulative replay plus
+eight flattened previews about 123 seconds on the current CPU implementation.
+
 The reproducible commands are:
 
 ```bash
@@ -618,4 +673,16 @@ python -m backend.cubical assess-physical-ribbon-corridor-saturation \
   --current-corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-iteration2-v1 \
   --current-frontier work/multiseam-2x2-b00c03c/physical-ribbon-corridor-frontier-iteration2-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-saturation-v1
+
+python -m backend.cubical analyze-physical-ribbon-corridor-deficits \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-iteration1-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-deficits-v1
+
+python -m backend.cubical analyze-physical-ribbon-corridor-faces \
+  --replay work/multiseam-2x2-b00c03c/physical-ribbon-one-sided-corridors-iteration1-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-faces-v1
+
+python -m backend.cubical replay-physical-ribbon-corridor-faces \
+  --faces work/multiseam-2x2-b00c03c/physical-ribbon-corridor-faces-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-face-replay-v1
 ```

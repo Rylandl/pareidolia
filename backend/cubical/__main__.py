@@ -149,6 +149,17 @@ from .physical_ribbon_replay_configuration import (
 from .physical_ribbon_corridor_saturation import (
     run_physical_ribbon_corridor_saturation,
 )
+from .physical_ribbon_corridor_deficits import (
+    run_physical_ribbon_corridor_deficits,
+)
+from .physical_ribbon_corridor_faces import (
+    PhysicalRibbonCorridorFaceSettings,
+    run_physical_ribbon_corridor_faces,
+)
+from .physical_ribbon_corridor_face_replay import (
+    PhysicalRibbonCorridorFaceReplaySettings,
+    run_physical_ribbon_corridor_face_replay,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -981,6 +992,48 @@ def _physical_ribbon_corridor_saturation(args: argparse.Namespace) -> None:
         args.current_frontier,
         args.output,
         force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_deficits(args: argparse.Namespace) -> None:
+    summary = run_physical_ribbon_corridor_deficits(
+        args.replay,
+        args.output,
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_faces(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_corridor_faces(
+        args.replay,
+        args.output,
+        settings=PhysicalRibbonCorridorFaceSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_face_replay(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_corridor_face_replay(
+        args.faces,
+        args.output,
+        settings=PhysicalRibbonCorridorFaceReplaySettings(**settings_values),
+        force=args.force,
+        progress=print,
     )
     print(json.dumps(summary, indent=2))
 
@@ -2813,6 +2866,71 @@ def main() -> None:
     )
     physical_ribbon_corridor_saturation.set_defaults(
         handler=_physical_ribbon_corridor_saturation
+    )
+    physical_ribbon_corridor_deficits = subparsers.add_parser(
+        "analyze-physical-ribbon-corridor-deficits",
+        description=(
+            "Reconstruct the best failed exact state for each residual CT "
+            "strip and measure its dense support and triangulation deficits."
+        ),
+    )
+    physical_ribbon_corridor_deficits.add_argument(
+        "--replay", type=Path, required=True
+    )
+    physical_ribbon_corridor_deficits.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_deficits.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_deficits.set_defaults(
+        handler=_physical_ribbon_corridor_deficits
+    )
+    physical_ribbon_corridor_faces = subparsers.add_parser(
+        "analyze-physical-ribbon-corridor-faces",
+        description=(
+            "Repair residual CT corridors with physically gated faces from "
+            "the existing chart Delaunay tessellation while leaving strict "
+            "ribbon graph identity unchanged."
+        ),
+    )
+    physical_ribbon_corridor_faces.add_argument(
+        "--replay", type=Path, required=True
+    )
+    physical_ribbon_corridor_faces.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_faces.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_corridor_faces.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_faces.set_defaults(
+        handler=_physical_ribbon_corridor_faces
+    )
+    physical_ribbon_corridor_face_replay = subparsers.add_parser(
+        "replay-physical-ribbon-corridor-faces",
+        description=(
+            "Jointly choose compatible CT-backed corridor assignments, "
+            "rebuild their strict sheets once, and attach supplemental mesh "
+            "faces without promoting those faces to topology edges."
+        ),
+    )
+    physical_ribbon_corridor_face_replay.add_argument(
+        "--faces", type=Path, required=True
+    )
+    physical_ribbon_corridor_face_replay.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_face_replay.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_corridor_face_replay.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_face_replay.set_defaults(
+        handler=_physical_ribbon_corridor_face_replay
     )
     gap_census = subparsers.add_parser(
         "gap-census",
