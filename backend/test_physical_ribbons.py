@@ -26,6 +26,7 @@ from backend.cubical.physical_ribbon_collective import (
     optimize_collective_patch,
 )
 from backend.cubical.physical_ribbon_flattened_audit import (
+    _rank_exact_variant_rows,
     boundary_texture_compatibility,
     flattened_texture_structure,
 )
@@ -38,9 +39,12 @@ from backend.cubical.physical_ribbon_depth_fields import (
 from backend.cubical.physical_ribbon_patch_states import (
     PhysicalRibbonPatchStateSettings,
     _lineage_audit,
+    _patch_state_groups,
+    _patch_state_proxy_screen,
     _prepare_component_exact_graph,
     _selection_conflicts,
     optimize_collective_patch_coverage,
+    optimize_collective_patch_coverage_binary,
     optimize_collective_patch_coverage_ensemble,
 )
 from backend.cubical.physical_ribbon_texture_gate import (
@@ -432,9 +436,49 @@ class PhysicalRibbonConfigurationTests(unittest.TestCase):
 class PhysicalRibbonCollectiveTests(unittest.TestCase):
     def test_patch_state_settings_allow_disabling_forced_exclusions(self) -> None:
         settings = PhysicalRibbonPatchStateSettings(
-            maximum_forced_exclusion_trials=0
+            maximum_forced_exclusion_trials=0,
+            maximum_individual_hole_scopes=0,
         )
         self.assertEqual(settings.maximum_forced_exclusion_trials, 0)
+        self.assertEqual(settings.maximum_individual_hole_scopes, 0)
+
+    def test_patch_state_groups_include_complete_single_loop_scopes(self) -> None:
+        groups = _patch_state_groups(
+            {4: [0, 1, 2]},
+            {"patchOffset": np.asarray((0, 10, 15, 35), dtype=np.int64)},
+            maximum_individual_hole_scopes=2,
+        )
+        self.assertEqual(
+            [
+                (component, rows.tolist(), scope, hole_row)
+                for component, rows, scope, hole_row in groups
+            ],
+            [
+                (4, [0, 1, 2], "component", -1),
+                (4, [2], "hole", 2),
+                (4, [0], "hole", 0),
+            ],
+        )
+
+    def test_ct_supported_counterexample_reaches_exact_screen(self) -> None:
+        settings = PhysicalRibbonPatchStateSettings()
+        screened, objective, counterexample = _patch_state_proxy_screen(
+            -8.0,
+            1.0,
+            depth_field_present=True,
+            settings=settings,
+        )
+        self.assertTrue(screened)
+        self.assertFalse(objective)
+        self.assertTrue(counterexample)
+        screened, _, counterexample = _patch_state_proxy_screen(
+            -8.0,
+            0.5,
+            depth_field_present=True,
+            settings=settings,
+        )
+        self.assertFalse(screened)
+        self.assertFalse(counterexample)
 
     def test_collective_patch_crosses_negative_single_node_barrier(self) -> None:
         selected, objective = optimize_collective_patch(
@@ -561,6 +605,34 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
             self.assertTrue(bool(np.any(selected[:2])))
             self.assertTrue(bool(np.any(selected[2:])))
 
+    def test_binary_patch_optimizer_exposes_coverage_lexicographic_state(self) -> None:
+        records, statistics = optimize_collective_patch_coverage_binary(
+            np.asarray((10.0, 0.0, 0.0), dtype=np.float32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float32),
+            np.asarray((0,), dtype=np.int32),
+            np.asarray((1,), dtype=np.int32),
+            np.asarray(
+                (
+                    (1, 0),
+                    (0, 1),
+                    (1, 0),
+                ),
+                dtype=bool,
+            ),
+            np.ones(2, dtype=np.float32),
+            maximum_states=2,
+            time_limit_seconds=10.0,
+        )
+        self.assertGreater(int(statistics["provenOptimalStateCount"]), 0)
+        self.assertTrue(
+            any(float(record["coveredPixelFraction"]) == 1.0 for record in records)
+        )
+        for record in records:
+            selected = np.asarray(record["selected"], dtype=bool)
+            self.assertFalse(bool(selected[0] and selected[1]))
+
     def test_component_exact_graph_marks_selected_external_neighbors(self) -> None:
         graph = _prepare_component_exact_graph(
             4,
@@ -624,7 +696,7 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
         self.assertFalse(bool(incompatible["compatible"]))
 
     def test_texture_gate_maps_patch_through_final_component(self) -> None:
-        geometry, measured, compatible = texture_patch_decisions(
+        geometry, measured, compatible, accepted = texture_patch_decisions(
             {
                 "patchAccepted": np.asarray((1, 1, 0), dtype=np.uint8),
                 "patchAddedOffset": np.asarray((0, 2, 3, 3), dtype=np.int64),
@@ -643,6 +715,102 @@ class PhysicalRibbonCollectiveTests(unittest.TestCase):
         np.testing.assert_array_equal(geometry, (1, 1, 0))
         np.testing.assert_array_equal(measured, (1, 1, 0))
         np.testing.assert_array_equal(compatible, (1, 0, 0))
+        np.testing.assert_array_equal(accepted, (1, 0, 0))
+
+    def test_texture_gate_tries_exact_alternative_after_ct_rejection(self) -> None:
+        def exact(row: int, component: int, area: float) -> dict[str, object]:
+            return {
+                "patchRow": row,
+                "priorComponent": component,
+                "accepted": True,
+                "before": {
+                    "macroHoleCount": 1,
+                    "interiorHoleCount": 2,
+                    "triangleRegionCount": 3,
+                    "triangleCount": 20,
+                },
+                "after": {
+                    "macroHoleCount": 0,
+                    "interiorHoleCount": 2,
+                    "triangleRegionCount": 3,
+                    "triangleCount": 20,
+                },
+                "triangleAreaRetention": area,
+            }
+
+        geometry, measured, compatible, accepted = texture_patch_decisions(
+            {
+                "patchAccepted": np.asarray((1, 0, 0), dtype=np.uint8),
+                "patchTargetPriorComponent": np.asarray((5, 5, 7), dtype=np.int32),
+            },
+            {
+                "audit": {
+                    "variants": [
+                        {
+                            "patchRow": 0,
+                            "componentId": 5,
+                            "variantRank": 0,
+                            "objectiveGain": 4.0,
+                            "boundaryTextureCompatible": False,
+                            "exactAudit": exact(0, 5, 1.02),
+                        },
+                        {
+                            "patchRow": 1,
+                            "componentId": 5,
+                            "variantRank": 1,
+                            "objectiveGain": 3.0,
+                            "boundaryTextureCompatible": True,
+                            "exactAudit": exact(1, 5, 1.01),
+                        },
+                        {
+                            "patchRow": 2,
+                            "componentId": 7,
+                            "variantRank": 0,
+                            "objectiveGain": -1.0,
+                            "boundaryTextureCompatible": True,
+                            "exactAudit": exact(2, 7, 1.00),
+                        },
+                    ]
+                }
+            },
+        )
+        np.testing.assert_array_equal(geometry, (1, 1, 1))
+        np.testing.assert_array_equal(measured, (1, 1, 1))
+        np.testing.assert_array_equal(compatible, (0, 1, 1))
+        np.testing.assert_array_equal(accepted, (0, 1, 1))
+
+    def test_flattened_variant_budget_is_shared_across_components(self) -> None:
+        def record(row: int, component: int, area: float) -> dict[str, object]:
+            return {
+                "patchRow": row,
+                "priorComponent": component,
+                "variantRank": row,
+                "before": {
+                    "macroHoleCount": 1,
+                    "interiorHoleCount": 1,
+                    "triangleRegionCount": 1,
+                    "triangleCount": 10,
+                },
+                "after": {
+                    "macroHoleCount": 0,
+                    "interiorHoleCount": 1,
+                    "triangleRegionCount": 1,
+                    "triangleCount": 10,
+                },
+                "triangleAreaRetention": area,
+            }
+
+        ranked = _rank_exact_variant_rows(
+            [
+                record(0, 0, 1.03),
+                record(1, 0, 1.02),
+                record(2, 0, 1.01),
+                record(3, 12, 1.04),
+                record(4, 12, 1.00),
+            ],
+            3,
+        )
+        self.assertEqual([int(value["patchRow"]) for value in ranked], [0, 3, 1])
 
     def test_collective_patch_requires_realized_mesh_attachment(self) -> None:
         arrays = {

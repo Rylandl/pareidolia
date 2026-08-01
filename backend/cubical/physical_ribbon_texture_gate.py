@@ -79,8 +79,72 @@ def _reference(path: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
 def texture_patch_decisions(
     patch_state: Mapping[str, np.ndarray],
     audit_payload: Mapping[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Map every geometry-accepted patch to its measured final component."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Measure alternatives and choose the best compatible state per component."""
+
+    variant_records = audit_payload.get("audit", {}).get("variants")
+    if variant_records is not None:
+        patch_count = len(np.asarray(patch_state["patchAccepted"]))
+        target_component = np.asarray(
+            patch_state["patchTargetPriorComponent"], dtype=np.int32
+        )
+        geometry_accepted = np.zeros(patch_count, dtype=bool)
+        measured = np.zeros(patch_count, dtype=bool)
+        compatible = np.zeros(patch_count, dtype=bool)
+        accepted = np.zeros(patch_count, dtype=bool)
+        records_by_component: dict[int, list[Mapping[str, Any]]] = {}
+        seen_rows: set[int] = set()
+        for record in variant_records:
+            row = int(record["patchRow"])
+            if row < 0 or row >= patch_count or row in seen_rows:
+                raise ValueError("texture audit contains an invalid patch row")
+            seen_rows.add(row)
+            exact_audit = record.get("exactAudit", {})
+            if not bool(exact_audit.get("accepted")):
+                raise ValueError("texture audit variant is not exact-geometry valid")
+            component_id = int(record["componentId"])
+            if int(target_component[row]) != component_id:
+                raise ValueError("texture audit variant targets a different component")
+            geometry_accepted[row] = True
+            value = record.get("boundaryTextureCompatible")
+            if value is None:
+                continue
+            measured[row] = True
+            compatible[row] = bool(value)
+            if bool(value):
+                records_by_component.setdefault(component_id, []).append(record)
+
+        def exact_key(record: Mapping[str, Any]) -> tuple[float, ...]:
+            exact = record["exactAudit"]
+            before = exact["before"]
+            after = exact["after"]
+            return (
+                float(
+                    int(before.get("macroHoleCount", 0))
+                    - int(after.get("macroHoleCount", 0))
+                ),
+                float(
+                    int(before.get("interiorHoleCount", 0))
+                    - int(after.get("interiorHoleCount", 0))
+                ),
+                float(
+                    int(before.get("triangleRegionCount", 0))
+                    - int(after.get("triangleRegionCount", 0))
+                ),
+                float(
+                    int(after.get("triangleCount", 0))
+                    - int(before.get("triangleCount", 0))
+                ),
+                float(exact.get("triangleAreaRetention", 0.0)),
+                float(record.get("objectiveGain", 0.0)),
+                -float(record.get("variantRank", 0)),
+                -float(record["patchRow"]),
+            )
+
+        for records in records_by_component.values():
+            winner = max(records, key=exact_key)
+            accepted[int(winner["patchRow"])] = True
+        return geometry_accepted, measured, compatible, accepted
 
     geometry_accepted = np.asarray(patch_state["patchAccepted"], dtype=np.uint8) > 0
     added_offset = np.asarray(patch_state["patchAddedOffset"], dtype=np.int64)
@@ -117,7 +181,7 @@ def texture_patch_decisions(
             )
         measured[row] = True
         compatible[row] = bool(value)
-    return geometry_accepted, measured, compatible
+    return geometry_accepted, measured, compatible, geometry_accepted & compatible
 
 
 def _surface_from_arrays(arrays: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -206,10 +270,14 @@ def run_physical_ribbon_texture_gate(
             return cached
 
     started = time.monotonic()
-    geometry_accepted, texture_measured, texture_compatible = (
+    (
+        geometry_accepted,
+        texture_measured,
+        texture_compatible,
+        final_patch_accepted,
+    ) = (
         texture_patch_decisions(patch_arrays, audit_manifest)
     )
-    final_patch_accepted = geometry_accepted & texture_compatible
     selected = np.asarray(configuration["selected"], dtype=np.uint8) > 0
     added_offset = np.asarray(patch_arrays["patchAddedOffset"], dtype=np.int64)
     added_node = np.asarray(
@@ -300,10 +368,25 @@ def run_physical_ribbon_texture_gate(
             "geometryAcceptedPatchCount": int(np.count_nonzero(geometry_accepted)),
             "textureMeasuredPatchCount": int(np.count_nonzero(texture_measured)),
             "textureCompatiblePatchCount": int(
+                np.count_nonzero(geometry_accepted & texture_compatible)
+            ),
+            "textureSelectedPatchCount": int(
                 np.count_nonzero(final_patch_accepted)
             ),
             "textureRejectedPatchCount": int(
-                np.count_nonzero(geometry_accepted & ~texture_compatible)
+                np.count_nonzero(
+                    geometry_accepted & texture_measured & ~texture_compatible
+                )
+            ),
+            "textureUnmeasuredPatchCount": int(
+                np.count_nonzero(geometry_accepted & ~texture_measured)
+            ),
+            "textureCompatibleAlternativeCount": int(
+                np.count_nonzero(
+                    geometry_accepted
+                    & texture_compatible
+                    & ~final_patch_accepted
+                )
             ),
             "acceptedAddedRibbonCount": int(
                 sum(

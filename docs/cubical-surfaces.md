@@ -911,6 +911,49 @@ next solver work should target complete correspondences that explicitly
 reduce a named boundary loop, rather than widening blind enumeration or
 returning to one-cell frontier growth.
 
+That targeted solve is now implemented.  A component still receives one
+complete matching scope, but each of its largest named loops also receives a
+complete isolated scope with the other holes frozen into the halo.  Proxy
+objective sign is no longer a truth gate when at least 90 percent of the full
+patch raster has independent CT support.  Every such counterexample is sent to
+the same exact component reconstruction.  Finally, flattened native CT is run
+for every exact-valid alternative, not just the first geometry-ranked state;
+the best texture-compatible complete state is then selected per component.
+
+On the three-hole checkpoint this exposes seven exact-valid states.  The
+locally negative component-12 state closes its hole and passes all three CT
+depths.  The first two and fourth component-0 alternatives cut across fiber
+texture, but its third complete matching passes at one fixed ply depth.  The
+two compatible states replace 20 incumbents with 18 alternatives.  An
+independent materialized restart verifies 3 to 1 macro holes, exactly 100
+interior holes, 734 triangle regions, 29,378 strict triangles, 38,289 selected
+ribbons, and all 4,303 component lineages, with no interface reuse, profile
+crossing, split, deletion, or fusion.
+
+The final hole then provides a clean representation audit.  All 207 raster
+pixels have coherent air-material-air CT support, with 0.951 median profile
+correlation and 0.552 median displaced-layer margin.  Its 154 alternatives
+form one continuation component; all attach to the inherited sheet.  The
+local matching has 209 binary variables, 3,014 explicit continuation products,
+730 hard assignment/crossing conflicts, and 207 saturated CT coverage
+variables.  HiGHS now solves both the canonical physical objective and a
+coverage-lexicographic objective under a declared time limit.  Binary states
+are reserved for exact reconstruction even when their proxy rank is below the
+heuristic top 16.
+
+The coverage state reaches 91.787 percent of the patch against a 92.754 percent
+candidate-bank ceiling, with a reported relative MIP gap of 0.000037.  Exact
+reconstruction still leaves the macro hole open and increases its component's
+triangle-region count from 12 to 13.  The canonical binary state adds five
+triangles and 0.31 percent area but likewise moves the hole and creates an
+interior loop.  This is materially different from a failed frontier heuristic:
+the present discrete ribbon hypotheses nearly saturate the observed CT yet
+cannot realize it as one attached surface.  Further score tuning is therefore
+off target.  The next representation layer should promote the coherent dense
+CT field to adaptive surface elements, stitch the complete patch boundary at
+once, and retain the ribbon bank as supporting/collision evidence rather than
+requiring one existing ribbon at every mesh vertex.
+
 The accepted artifacts are rooted at:
 
 ```text
@@ -921,6 +964,11 @@ work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-ensemble-iteration3-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-ensemble-iteration3-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-ensemble-iteration3-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-ensemble-iteration3-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-topology-scopes-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-topology-variants-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-topology-variants-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-topology-variants-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-binary-topology-v2
 ```
 
 The reproducible dense-field sequence is:

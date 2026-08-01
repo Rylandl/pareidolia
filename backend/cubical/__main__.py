@@ -2853,8 +2853,9 @@ def main() -> None:
         description=(
             "Jointly reconfigure every CT-supported closed-hole frontier on "
             "one reconstructed surface component inside a fixed selected "
-            "halo, enumerate diverse complete matchings, then retain only "
-            "exact topology or mesh-density improvements."
+            "halo, enumerate heuristic and binary-optimized complete "
+            "matchings, then retain only exact topology or mesh-density "
+            "improvements."
         ),
     )
     physical_ribbon_patch_states.add_argument(

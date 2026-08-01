@@ -1028,6 +1028,16 @@ The optional local CUDA environment is described by `requirements-gpu.txt`.
 `ACUS_GPU_BATCH_VOXELS` bounds each GPU launch (eight million voxels by default),
 so larger contexts are split without changing the fit contract.
 
+The bounded whole-sheet assignment solver is installed separately:
+
+```bash
+python3 -m pip install -r requirements-optimization.txt
+```
+
+It uses HiGHS mixed-integer optimization only for small residual component
+scopes; the declared node and time limits keep this diagnostic from changing
+the block-scale complexity of the ordinary pipeline.
+
 The backend tests cover the analytic rolled volume, exact seed anchoring,
 finite chart geometry, cube padding, Acus normal recovery on a crossed-needle
 phantom, the cached cuboid-wide neighbor field, air-seed rejection, and PNG

@@ -18,8 +18,14 @@ from .flatten import (
     rasterize_chart,
     sample_depth_stack,
 )
-from .physical_ribbon_bridging import _load_npz
+from .physical_ribbon_bridging import _load_inputs, _load_npz, _write_npz
 from .physical_ribbon_continuity import _draw_line
+from .physical_ribbon_patch_holes import PhysicalRibbonPatchHoleSettings
+from .physical_ribbon_patch_states import (
+    PHYSICAL_RIBBON_PATCH_STATE_SCHEMA,
+    _prepare_component_exact_graph,
+    _reconstruct_component_graph_state,
+)
 
 
 PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA = (
@@ -395,6 +401,361 @@ def _edge_orientation_disagreement(
     return _percentiles(np.asarray(values, dtype=np.float32))
 
 
+def _variant_topology_key(record: Mapping[str, Any]) -> tuple[float, ...]:
+    before = record.get("before", {})
+    after = record.get("after", {})
+    return (
+        float(
+            int(before.get("macroHoleCount", 0))
+            - int(after.get("macroHoleCount", 0))
+        ),
+        float(
+            int(before.get("interiorHoleCount", 0))
+            - int(after.get("interiorHoleCount", 0))
+        ),
+        float(
+            int(before.get("triangleRegionCount", 0))
+            - int(after.get("triangleRegionCount", 0))
+        ),
+        float(
+            int(after.get("triangleCount", 0))
+            - int(before.get("triangleCount", 0))
+        ),
+        float(record.get("triangleAreaRetention", 0.0)),
+        -float(record.get("variantRank", 0)),
+    )
+
+
+def _rank_exact_variant_rows(
+    exact_records: list[Mapping[str, Any]], maximum_count: int
+) -> list[Mapping[str, Any]]:
+    """Share a bounded texture budget across affected sheet components."""
+
+    by_component: dict[int, list[Mapping[str, Any]]] = {}
+    seen_rows: set[int] = set()
+    for record in exact_records:
+        row = int(record["patchRow"])
+        if row in seen_rows:
+            continue
+        seen_rows.add(row)
+        by_component.setdefault(int(record["priorComponent"]), []).append(record)
+    for records in by_component.values():
+        records.sort(key=_variant_topology_key, reverse=True)
+    ranked: list[Mapping[str, Any]] = []
+    depth = 0
+    while len(ranked) < maximum_count:
+        added = False
+        for component_id in sorted(by_component):
+            records = by_component[component_id]
+            if depth >= len(records):
+                continue
+            ranked.append(records[depth])
+            added = True
+            if len(ranked) >= maximum_count:
+                break
+        if not added:
+            break
+        depth += 1
+    return ranked
+
+
+def _proposal_records_from_arrays(
+    surface: Mapping[str, np.ndarray],
+) -> list[dict[str, Any]]:
+    added_offset = np.asarray(surface["patchAddedOffset"], dtype=np.int64)
+    added_node = np.asarray(
+        surface["patchAddedFrontierIndex"], dtype=np.int32
+    )
+    removed_offset = np.asarray(surface["patchRemovedOffset"], dtype=np.int64)
+    removed_node = np.asarray(
+        surface["patchRemovedFrontierIndex"], dtype=np.int32
+    )
+    return [
+        {
+            "added": added_node[
+                int(added_offset[row]) : int(added_offset[row + 1])
+            ],
+            "removed": removed_node[
+                int(removed_offset[row]) : int(removed_offset[row + 1])
+            ],
+        }
+        for row in range(len(added_offset) - 1)
+    ]
+
+
+def _write_variant_surface(
+    output: Path,
+    patch_state_path: Path,
+    surface_manifest: Mapping[str, Any],
+    local_surface: Mapping[str, np.ndarray],
+    component_global: np.ndarray,
+    proposal: Mapping[str, Any],
+    *,
+    patch_row: int,
+    prior_component: int,
+) -> Path:
+    output.mkdir(parents=True, exist_ok=True)
+    data_path = output / "physical-ribbon-patch-variant-surface-v1.npz"
+    manifest_path = output / "physical-ribbon-patch-variant-surface-v1.json"
+    added = set(int(value) for value in proposal["added"])
+    local_added = np.asarray(
+        [index for index, value in enumerate(component_global) if int(value) in added],
+        dtype=np.int32,
+    )
+    arrays = {
+        name: np.asarray(value)
+        for name, value in local_surface.items()
+    }
+    arrays["proposalOffset"] = np.asarray((0, len(local_added)), dtype=np.int64)
+    arrays["proposalFrontierIndex"] = local_added
+    arrays["proposalAccepted"] = np.ones(1, dtype=np.uint8)
+    arrays["sourceFrontierIndex"] = np.asarray(component_global, dtype=np.int32)
+    _write_npz(data_path, arrays)
+    identity = {
+        "patchState": {
+            "manifestPath": str(patch_state_path),
+            "manifestSha256": sha256_file(patch_state_path),
+            "dataSha256": surface_manifest["data"]["sha256"],
+        },
+        "topologyContinuity": surface_manifest["identity"][
+            "topologyContinuity"
+        ],
+        "patchRow": int(patch_row),
+        "priorComponent": int(prior_component),
+    }
+    payload = {
+        "schema": "pareidolia.physical-ribbon-patch-variant-surface",
+        "version": 1,
+        "state": "complete",
+        "identity": identity,
+        "source": surface_manifest["source"],
+        "geometry": surface_manifest["geometry"],
+        "data": {
+            "path": data_path.name,
+            "bytes": data_path.stat().st_size,
+            "sha256": sha256_file(data_path),
+            "fields": list(arrays),
+        },
+        "method": {
+            "decisionUnit": "one exact-valid complete patch matching",
+            "selectionMutated": False,
+            "identityLabelsUsed": False,
+        },
+    }
+    atomic_json(manifest_path, payload)
+    return manifest_path
+
+
+def _run_patch_variant_audit(
+    surface_path: Path,
+    surface_manifest: Mapping[str, Any],
+    surface: Mapping[str, np.ndarray],
+    output: Path,
+    montage_path: Path,
+    identity: Mapping[str, Any],
+    *,
+    settings: PhysicalRibbonFlattenedAuditSettings,
+    force: bool,
+    started: float,
+) -> dict[str, Any]:
+    exact_records = [
+        record
+        for record in surface_manifest.get("patchStates", {}).get(
+            "exactPatchAudits", ()
+        )
+        if bool(record.get("accepted"))
+    ]
+    selected_records = _rank_exact_variant_rows(
+        exact_records, settings.maximum_components
+    )
+    configuration_reference = surface_manifest["identity"]["configuration"]
+    (
+        _,
+        _,
+        configuration,
+        _,
+        _,
+        topology,
+        _,
+        _,
+        ribbon,
+    ) = _load_inputs(configuration_reference["manifestPath"])
+    proposals = _proposal_records_from_arrays(surface)
+    baseline_selected = np.asarray(configuration["selected"], dtype=np.uint8) > 0
+    baseline_component = np.asarray(configuration["component"], dtype=np.int32)
+    rows_by_component: dict[int, list[int]] = {}
+    for record in selected_records:
+        rows_by_component.setdefault(int(record["priorComponent"]), []).append(
+            int(record["patchRow"])
+        )
+    graph_by_component = {
+        component_id: _prepare_component_exact_graph(
+            component_id,
+            proposals,
+            rows,
+            baseline_selected,
+            baseline_component,
+            topology,
+        )
+        for component_id, rows in sorted(rows_by_component.items())
+    }
+    variant_records: list[dict[str, Any]] = []
+    artifact_records: list[dict[str, Any]] = []
+    variant_root = output / "variants"
+    for record in selected_records:
+        row = int(record["patchRow"])
+        component_id = int(record["priorComponent"])
+        ok, local_surface, _, component_global = _reconstruct_component_graph_state(
+            graph_by_component[component_id],
+            proposals[row],
+            ribbon,
+            topology,
+            settings=PhysicalRibbonPatchHoleSettings(),
+        )
+        if not ok or local_surface is None:
+            raise RuntimeError("exact-valid patch variant no longer reconstructs")
+        local_root = variant_root / f"patch-{row:06d}"
+        local_manifest_path = _write_variant_surface(
+            local_root / "surface",
+            surface_path,
+            surface_manifest,
+            local_surface,
+            component_global,
+            proposals[row],
+            patch_row=row,
+            prior_component=component_id,
+        )
+        audit_root = local_root / "audit"
+        local_audit = run_physical_ribbon_flattened_audit(
+            local_manifest_path,
+            audit_root,
+            settings=settings,
+            force=force,
+        )
+        components = local_audit.get("audit", {}).get("components", ())
+        if len(components) != 1:
+            raise RuntimeError("patch variant audit did not yield one component")
+        variant = {
+            **components[0],
+            "componentId": component_id,
+            "patchRow": row,
+            "variantRank": int(record.get("variantRank", 0)),
+            "variantProfile": str(record.get("variantProfile", "unknown")),
+            "objectiveGain": round(
+                float(np.asarray(surface["patchObjectiveGain"])[row]), 6
+            ),
+            "exactAudit": dict(record),
+        }
+        if "patchScopeKind" in surface:
+            variant["scopeKind"] = str(surface["patchScopeKind"][row])
+            variant["scopeHoleRow"] = int(surface["patchScopeHoleRow"][row])
+        variant_records.append(variant)
+        artifact_records.append(
+            {
+                "patchRow": row,
+                "surfaceManifest": str(local_manifest_path),
+                "auditManifest": str(
+                    audit_root
+                    / f"{PHYSICAL_RIBBON_FLATTENED_AUDIT_STEM}.json"
+                ),
+                "montage": str(audit_root / "physical-ribbon-flattened-audit.png"),
+            }
+        )
+
+    canvas = np.full(
+        (max(80 + 34 * len(variant_records), 120), 1100, 3),
+        (7, 11, 16),
+        dtype=np.uint8,
+    )
+    _draw_text(
+        canvas,
+        16,
+        14,
+        "EXACT PATCH VARIANTS / FLATTENED NATIVE CT",
+        (224, 231, 239),
+        scale=2,
+    )
+    for index, variant in enumerate(variant_records):
+        compatible = variant["boundaryTextureCompatible"]
+        color = (
+            (102, 227, 159)
+            if compatible is True
+            else (255, 105, 120)
+            if compatible is False
+            else (174, 184, 199)
+        )
+        depth_count = int(variant["boundaryTextureCompatibleDepthCount"])
+        _draw_text(
+            canvas,
+            18,
+            64 + 34 * index,
+            (
+                f"P {variant['patchRow']:>3}  C {variant['componentId']:>4}  "
+                f"V {variant['variantRank']:>2}  {variant['variantProfile']:<20} "
+                f"CT {depth_count}/{variant['boundaryTextureMeasuredDepthCount']}"
+            ),
+            color,
+        )
+    montage_path.write_bytes(rgb_png(canvas))
+    finished = time.monotonic()
+    compatible_rows = [
+        int(record["patchRow"])
+        for record in variant_records
+        if record["boundaryTextureCompatible"] is True
+    ]
+    incompatible_rows = [
+        int(record["patchRow"])
+        for record in variant_records
+        if record["boundaryTextureCompatible"] is False
+    ]
+    unmeasured_rows = [
+        int(record["patchRow"])
+        for record in variant_records
+        if record["boundaryTextureCompatible"] is None
+    ]
+    payload: dict[str, Any] = {
+        "schema": PHYSICAL_RIBBON_FLATTENED_AUDIT_SCHEMA,
+        "version": PHYSICAL_RIBBON_FLATTENED_AUDIT_VERSION,
+        "state": "complete",
+        "identity": dict(identity),
+        "source": surface_manifest["source"],
+        "audit": {
+            "mode": "all exact-valid complete patch variants",
+            "exactGeometryVariantCount": len(exact_records),
+            "flattenedVariantCount": len(variant_records),
+            "omittedVariantCount": len(exact_records) - len(variant_records),
+            "boundaryTextureCompatibleVariantCount": len(compatible_rows),
+            "boundaryTextureIncompatibleVariantCount": len(incompatible_rows),
+            "boundaryTextureUnmeasuredVariantCount": len(unmeasured_rows),
+            "boundaryTextureCompatiblePatchRows": compatible_rows,
+            "boundaryTextureIncompatiblePatchRows": incompatible_rows,
+            "boundaryTextureUnmeasuredPatchRows": unmeasured_rows,
+            "variants": variant_records,
+        },
+        "timingSeconds": {"total": round(finished - started, 6)},
+        "artifacts": {
+            "montage": montage_path.name,
+            "variantAudits": artifact_records,
+        },
+        "method": {
+            "measurement": (
+                "every retained exact-valid complete matching is rebuilt, "
+                "flattened, and sampled from native CT at fixed depths"
+            ),
+            "compatibility": (
+                "variant boundaries are compared with same-surface control "
+                "edges before one compatible state is chosen per component"
+            ),
+            "acceptanceMutated": False,
+            "identityLabelsUsed": False,
+        },
+    }
+    atomic_json(
+        output / f"{PHYSICAL_RIBBON_FLATTENED_AUDIT_STEM}.json", payload
+    )
+    return payload
+
+
 def run_physical_ribbon_flattened_audit(
     surface_root: str | Path,
     output_root: str | Path,
@@ -439,6 +800,27 @@ def run_physical_ribbon_flattened_audit(
             return cached
 
     started = time.monotonic()
+    if (
+        surface_manifest.get("schema") == PHYSICAL_RIBBON_PATCH_STATE_SCHEMA
+        and any(
+            bool(record.get("accepted"))
+            for record in surface_manifest.get("patchStates", {}).get(
+                "exactPatchAudits", ()
+            )
+        )
+    ):
+        return _run_patch_variant_audit(
+            surface_path,
+            surface_manifest,
+            surface,
+            output,
+            montage_path,
+            identity,
+            settings=resolved,
+            force=force,
+            started=started,
+        )
+
     selected = np.asarray(surface["selected"], dtype=np.uint8) > 0
     component = np.asarray(surface["component"], dtype=np.int32)
     added = _added_nodes(surface_manifest, surface)

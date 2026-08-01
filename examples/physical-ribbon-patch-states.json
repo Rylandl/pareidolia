@@ -18,7 +18,14 @@
   "maximum_local_optimization_sweeps": 8,
   "maximum_component_state_variants": 16,
   "maximum_forced_exclusion_trials": 24,
-  "maximum_exact_state_rounds": 16,
+  "maximum_individual_hole_scopes": 8,
+  "use_exact_binary_optimizer": true,
+  "maximum_exact_binary_nodes": 512,
+  "maximum_exact_binary_states": 2,
+  "exact_binary_time_limit_seconds": 30.0,
+  "maximum_exact_state_rounds": 64,
   "minimum_variant_hamming_fraction": 0.02,
+  "screen_ct_supported_counterexamples": true,
+  "minimum_counterexample_ct_supported_fraction": 0.9,
   "maximum_preview_components": 64
 }

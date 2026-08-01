@@ -67,8 +67,15 @@ class PhysicalRibbonPatchStateSettings:
     maximum_local_optimization_sweeps: int = 8
     maximum_component_state_variants: int = 16
     maximum_forced_exclusion_trials: int = 24
-    maximum_exact_state_rounds: int = 16
+    maximum_individual_hole_scopes: int = 8
+    use_exact_binary_optimizer: bool = True
+    maximum_exact_binary_nodes: int = 512
+    maximum_exact_binary_states: int = 2
+    exact_binary_time_limit_seconds: float = 30.0
+    maximum_exact_state_rounds: int = 64
     minimum_variant_hamming_fraction: float = 0.02
+    screen_ct_supported_counterexamples: bool = True
+    minimum_counterexample_ct_supported_fraction: float = 0.90
     maximum_preview_components: int = 64
 
     def __post_init__(self) -> None:
@@ -78,6 +85,8 @@ class PhysicalRibbonPatchStateSettings:
             self.minimum_density_only_boundary_anchor_count,
             self.maximum_local_optimization_sweeps,
             self.maximum_component_state_variants,
+            self.maximum_exact_binary_nodes,
+            self.maximum_exact_binary_states,
             self.maximum_exact_state_rounds,
             self.maximum_preview_components,
         )
@@ -85,8 +94,15 @@ class PhysicalRibbonPatchStateSettings:
             raise ValueError("patch-state integer settings must be positive")
         if self.maximum_forced_exclusion_trials < 0:
             raise ValueError("forced-exclusion trial count must be nonnegative")
+        if self.maximum_individual_hole_scopes < 0:
+            raise ValueError("individual-hole scope count must be nonnegative")
         if not math.isfinite(self.minimum_objective_gain):
             raise ValueError("patch-state objective gate must be finite")
+        if (
+            not math.isfinite(self.exact_binary_time_limit_seconds)
+            or self.exact_binary_time_limit_seconds <= 0.0
+        ):
+            raise ValueError("exact binary time limit must be finite and positive")
         for value in (
             self.candidate_coverage_weight,
             self.continuity_weight_multiplier,
@@ -104,6 +120,7 @@ class PhysicalRibbonPatchStateSettings:
             self.minimum_triangle_area_retention,
             self.minimum_density_only_retained_boundary_fraction,
             self.minimum_variant_hamming_fraction,
+            self.minimum_counterexample_ct_supported_fraction,
         ):
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError("patch-state fractions must lie in [0, 1]")
@@ -199,6 +216,222 @@ def _coverage_objective(
         covered = np.any(coverage[selected], axis=0)
         value += float(np.sum(pixel_weight[covered]))
     return value
+
+
+def _highs_version(*, required: bool) -> str | None:
+    try:
+        import highspy
+    except ImportError as error:
+        if required:
+            raise RuntimeError(
+                "exact patch-state optimization requires highspy; install "
+                "requirements-optimization.txt"
+            ) from error
+        return None
+    return str(highspy.Highs().version())
+
+
+def optimize_collective_patch_coverage_binary(
+    node_score: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    edge_weight: np.ndarray,
+    conflict_first: np.ndarray,
+    conflict_second: np.ndarray,
+    coverage: np.ndarray,
+    pixel_weight: np.ndarray,
+    *,
+    maximum_states: int,
+    time_limit_seconds: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Globally solve complete patch assignments as a binary program.
+
+    Node ownership, exact profile crossings, pairwise continuation, and
+    saturated whole-field CT coverage are represented explicitly.  The second
+    objective is coverage-lexicographic: no unary or continuation preference
+    can trade away one supported raster pixel.  This is a bounded whole-hole
+    check, not a cell or frontier growth rule.
+    """
+
+    import highspy
+
+    node_score = np.asarray(node_score, dtype=np.float64)
+    edge_first = np.asarray(edge_first, dtype=np.int32)
+    edge_second = np.asarray(edge_second, dtype=np.int32)
+    edge_weight = np.asarray(edge_weight, dtype=np.float64)
+    conflict_first = np.asarray(conflict_first, dtype=np.int32)
+    conflict_second = np.asarray(conflict_second, dtype=np.int32)
+    coverage = np.asarray(coverage, dtype=bool)
+    pixel_weight = np.asarray(pixel_weight, dtype=np.float64)
+    node_count = len(node_score)
+    if maximum_states < 1:
+        raise ValueError("binary patch-state count must be positive")
+    if coverage.shape != (node_count, len(pixel_weight)):
+        raise ValueError("binary patch coverage matrix has the wrong shape")
+    if len(edge_first) != len(edge_second) or len(edge_first) != len(edge_weight):
+        raise ValueError("binary patch continuation arrays differ in length")
+    if len(conflict_first) != len(conflict_second):
+        raise ValueError("binary patch conflict arrays differ in length")
+
+    regularizer_bound = float(
+        np.sum(np.abs(node_score)) + np.sum(np.abs(edge_weight))
+    )
+    positive_pixel = pixel_weight[pixel_weight > 0.0]
+    coverage_epsilon = (
+        float(np.min(positive_pixel)) / max(4.0 * regularizer_bound, 1.0)
+        if len(positive_pixel)
+        else 0.0
+    )
+    profiles = (
+        ("binary-canonical", 1.0, 1.0, 1.0),
+        (
+            "binary-coverage-lexicographic",
+            coverage_epsilon,
+            coverage_epsilon,
+            1.0,
+        ),
+    )
+    per_profile = max(int(math.ceil(maximum_states / len(profiles))), 1)
+    discovered: dict[bytes, dict[str, Any]] = {}
+    run_records: list[dict[str, Any]] = []
+    for profile_index, (
+        profile_name,
+        node_scale,
+        edge_scale,
+        coverage_scale,
+    ) in enumerate(profiles):
+        solver = highspy.Highs()
+        solver.silent()
+        solver.setOptionValue("time_limit", float(time_limit_seconds))
+        solver.setOptionValue("mip_rel_gap", 0.0)
+        node_variable = solver.addBinaries(node_count)
+        edge_variable = solver.addBinaries(len(edge_first))
+        pixel_variable = solver.addBinaries(len(pixel_weight))
+        for first, second in zip(conflict_first, conflict_second):
+            solver.addConstr(
+                node_variable[int(first)] + node_variable[int(second)] <= 1.0
+            )
+        for row, (first, second) in enumerate(zip(edge_first, edge_second)):
+            pair = edge_variable[row]
+            left = node_variable[int(first)]
+            right = node_variable[int(second)]
+            solver.addConstr(pair <= left)
+            solver.addConstr(pair <= right)
+            solver.addConstr(pair >= left + right - 1.0)
+        for pixel in range(len(pixel_weight)):
+            covering = np.flatnonzero(coverage[:, pixel])
+            if len(covering):
+                solver.addConstr(
+                    pixel_variable[pixel]
+                    <= solver.qsum(
+                        node_variable[int(node)] for node in covering
+                    )
+                )
+            else:
+                solver.addConstr(pixel_variable[pixel] <= 0.0)
+        objective = solver.qsum(
+            float(node_scale * value) * node_variable[row]
+            for row, value in enumerate(node_score)
+        )
+        objective += solver.qsum(
+            float(edge_scale * value) * edge_variable[row]
+            for row, value in enumerate(edge_weight)
+        )
+        objective += solver.qsum(
+            float(coverage_scale * value) * pixel_variable[row]
+            for row, value in enumerate(pixel_weight)
+        )
+        for solution_rank in range(per_profile):
+            solver.maximize(objective)
+            status = solver.getModelStatus()
+            solution = solver.getSolution()
+            status_name = solver.modelStatusToString(status)
+            if not solution.value_valid:
+                run_records.append(
+                    {
+                        "profile": profile_name,
+                        "rank": solution_rank,
+                        "status": status_name,
+                        "solutionAvailable": False,
+                    }
+                )
+                break
+            selected = np.asarray(solver.val(node_variable)) > 0.5
+            key = selected.tobytes()
+            canonical = _coverage_objective(
+                selected,
+                node_score,
+                edge_first,
+                edge_second,
+                edge_weight,
+                coverage,
+                pixel_weight,
+            )
+            covered_fraction = (
+                float(np.mean(np.any(coverage[selected], axis=0)))
+                if coverage.shape[1]
+                else 0.0
+            )
+            record = {
+                "selected": selected,
+                "canonicalObjective": canonical,
+                "profile": profile_name,
+                "profileIndex": profile_index,
+                "profileObjective": float(solver.getObjectiveValue()),
+                "provenOptimal": status == highspy.HighsModelStatus.kOptimal,
+                "coveredPixelFraction": covered_fraction,
+            }
+            prior = discovered.get(key)
+            if prior is None or canonical > float(prior["canonicalObjective"]):
+                discovered[key] = record
+            information = solver.getInfo()
+            run_records.append(
+                {
+                    "profile": profile_name,
+                    "rank": solution_rank,
+                    "status": status_name,
+                    "solutionAvailable": True,
+                    "provenOptimal": bool(record["provenOptimal"]),
+                    "canonicalObjective": round(canonical, 6),
+                    "coveredPixelFraction": round(covered_fraction, 6),
+                    "mipGap": round(float(information.mip_gap), 9),
+                    "mipNodeCount": int(information.mip_node_count),
+                }
+            )
+            selected_node = np.flatnonzero(selected)
+            unselected_node = np.flatnonzero(~selected)
+            solver.addConstr(
+                solver.qsum(
+                    node_variable[int(node)] for node in selected_node
+                )
+                - solver.qsum(
+                    node_variable[int(node)] for node in unselected_node
+                )
+                <= float(len(selected_node) - 1)
+            )
+    ordered = sorted(
+        discovered.values(),
+        key=lambda record: (
+            float(record["canonicalObjective"]),
+            float(record["coveredPixelFraction"]),
+            bool(record["provenOptimal"]),
+        ),
+        reverse=True,
+    )[:maximum_states]
+    return ordered, {
+        "solver": "HiGHS mixed-integer programming",
+        "solverVersion": str(highspy.Highs().version()),
+        "nodeCount": node_count,
+        "continuationProductVariableCount": len(edge_first),
+        "coverageVariableCount": len(pixel_weight),
+        "conflictConstraintCount": len(conflict_first),
+        "profileCount": len(profiles),
+        "retainedStateCount": len(ordered),
+        "provenOptimalStateCount": int(
+            sum(bool(record["provenOptimal"]) for record in ordered)
+        ),
+        "runs": run_records,
+    }
 
 
 def optimize_collective_patch_coverage(
@@ -362,6 +595,10 @@ def optimize_collective_patch_coverage_ensemble(
     maximum_states: int,
     maximum_forced_exclusion_trials: int,
     minimum_hamming_fraction: float,
+    use_exact_binary_optimizer: bool = False,
+    maximum_exact_binary_nodes: int = 512,
+    maximum_exact_binary_states: int = 4,
+    exact_binary_time_limit_seconds: float = 60.0,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """Return diverse complete local optima under a fixed objective ensemble.
 
@@ -385,6 +622,8 @@ def optimize_collective_patch_coverage_ensemble(
         raise ValueError("maximum_states must be positive")
     if maximum_forced_exclusion_trials < 0:
         raise ValueError("maximum_forced_exclusion_trials must be nonnegative")
+    if maximum_exact_binary_nodes < 1 or maximum_exact_binary_states < 1:
+        raise ValueError("exact binary optimizer bounds must be positive")
     if not 0.0 <= minimum_hamming_fraction <= 1.0:
         raise ValueError("minimum_hamming_fraction must lie in [0, 1]")
     if coverage.shape != (node_count, len(pixel_weight)):
@@ -512,6 +751,46 @@ def optimize_collective_patch_coverage_ensemble(
                 }
             )
 
+    binary_records: list[dict[str, Any]] = []
+    binary_statistics: dict[str, Any] = {
+        "requested": bool(use_exact_binary_optimizer),
+        "eligible": bool(node_count <= maximum_exact_binary_nodes),
+        "ran": False,
+    }
+    if use_exact_binary_optimizer and node_count <= maximum_exact_binary_nodes:
+        binary_records, binary_details = (
+            optimize_collective_patch_coverage_binary(
+                node_score,
+                edge_first,
+                edge_second,
+                edge_weight,
+                conflict_first,
+                conflict_second,
+                coverage,
+                pixel_weight,
+                maximum_states=maximum_exact_binary_states,
+                time_limit_seconds=exact_binary_time_limit_seconds,
+            )
+        )
+        binary_statistics = {
+            "requested": True,
+            "eligible": True,
+            "ran": True,
+            **binary_details,
+        }
+        for record in binary_records:
+            record["exactBinaryState"] = True
+            selected = np.asarray(record["selected"], dtype=bool)
+            key = selected.tobytes()
+            prior = discovered.get(key)
+            if prior is None or float(record["canonicalObjective"]) > float(
+                prior["canonicalObjective"]
+            ):
+                discovered[key] = record
+            else:
+                prior["exactBinaryState"] = True
+                prior["provenOptimal"] = bool(record["provenOptimal"])
+
     ordered = sorted(
         discovered.values(),
         key=lambda record: (
@@ -588,17 +867,38 @@ def optimize_collective_patch_coverage_ensemble(
             reverse=True,
         )
 
+    mandatory_binary_keys = list(
+        dict.fromkeys(
+            np.asarray(record["selected"], dtype=bool).tobytes()
+            for record in binary_records
+        )
+    )[:maximum_states]
+    mandatory_binary = [
+        discovered[key] for key in mandatory_binary_keys if key in discovered
+    ]
+    regular_budget = max(maximum_states - len(mandatory_binary), 0)
     retained: list[dict[str, Any]] = []
     for record in ordered:
+        if len(retained) >= regular_budget:
+            break
         selected = np.asarray(record["selected"], dtype=bool)
+        if selected.tobytes() in mandatory_binary_keys:
+            continue
         if retained and min(
             _normalized_hamming(selected, prior["selected"])
             for prior in retained
         ) < minimum_hamming_fraction:
             continue
         retained.append(record)
-        if len(retained) >= maximum_states:
-            break
+    retained.extend(mandatory_binary)
+    retained.sort(
+        key=lambda record: (
+            float(record["canonicalObjective"]),
+            int(np.count_nonzero(record["selected"])),
+            -int(record["profileIndex"]),
+        ),
+        reverse=True,
+    )
     if not retained:
         retained = [
             {
@@ -647,6 +947,14 @@ def optimize_collective_patch_coverage_ensemble(
                     if "excludedLocalNode" in record
                     else {}
                 ),
+                **(
+                    {
+                        "exactBinaryState": True,
+                        "provenOptimal": bool(record["provenOptimal"]),
+                    }
+                    if record.get("exactBinaryState")
+                    else {}
+                ),
             }
         )
     best = np.asarray(retained[0]["selected"], dtype=bool)
@@ -670,6 +978,7 @@ def optimize_collective_patch_coverage_ensemble(
         "objective": round(float(retained[0]["canonicalObjective"]), 6),
         "states": state_records,
         "runs": run_records,
+        "exactBinaryOptimization": binary_statistics,
     }
 
 
@@ -948,7 +1257,14 @@ def _component_candidate_coverage(
         pixel_cursor += count
     coverable = np.any(coverage, axis=0) if total_pixels else np.empty(0, dtype=bool)
     return coverage, weights, {
+        "patchPixelCount": int(total_pixels),
         "ctSupportedPixelCount": int(np.count_nonzero(weights)),
+        "ctSupportedPixelFraction": round(
+            float(np.count_nonzero(weights) / total_pixels)
+            if total_pixels
+            else 0.0,
+            6,
+        ),
         "depthCompatibleCandidateCount": int(compatible_candidate_count),
         "coverablePixelFraction": round(
             float(np.mean(coverable)) if len(coverable) else 0.0, 6
@@ -1050,6 +1366,69 @@ def _added_geometry(
     return two_core, tangent_ratio
 
 
+def _patch_state_groups(
+    rows_by_component: Mapping[int, list[int]],
+    holes: Mapping[str, np.ndarray],
+    *,
+    maximum_individual_hole_scopes: int,
+) -> list[tuple[int, np.ndarray, str, int]]:
+    """Declare complete component and individual-loop matching scopes.
+
+    Component scope permits coupled re-pairing where nearby holes interact.
+    Individual-loop scope freezes other hole candidates into the halo, which
+    prevents a valid closure from inheriting topology debt created around a
+    different loop on the same sheet.
+    """
+
+    patch_offset = np.asarray(holes["patchOffset"], dtype=np.int64)
+    groups: list[tuple[int, np.ndarray, str, int]] = []
+    for target_component, row_values in sorted(rows_by_component.items()):
+        rows = np.asarray(row_values, dtype=np.int32)
+        groups.append((int(target_component), rows, "component", -1))
+        if len(rows) <= 1 or maximum_individual_hole_scopes == 0:
+            continue
+        ranked = sorted(
+            (int(value) for value in rows),
+            key=lambda row: (
+                -int(patch_offset[row + 1] - patch_offset[row]),
+                row,
+            ),
+        )[:maximum_individual_hole_scopes]
+        groups.extend(
+            (
+                int(target_component),
+                np.asarray((row,), dtype=np.int32),
+                "hole",
+                row,
+            )
+            for row in ranked
+        )
+    return groups
+
+
+def _patch_state_proxy_screen(
+    objective_gain: float,
+    ct_supported_fraction: float,
+    *,
+    depth_field_present: bool,
+    settings: PhysicalRibbonPatchStateSettings,
+) -> tuple[bool, bool, bool]:
+    """Route a state to exact screening without treating proxy sign as truth."""
+
+    objective_qualified = objective_gain >= settings.minimum_objective_gain
+    counterexample_qualified = bool(
+        settings.screen_ct_supported_counterexamples
+        and depth_field_present
+        and ct_supported_fraction
+        >= settings.minimum_counterexample_ct_supported_fraction
+    )
+    return (
+        objective_qualified or counterexample_qualified,
+        objective_qualified,
+        counterexample_qualified and not objective_qualified,
+    )
+
+
 def solve_component_patch_states(
     holes: Mapping[str, np.ndarray],
     ribbon: Mapping[str, np.ndarray],
@@ -1096,10 +1475,18 @@ def solve_component_patch_states(
     for row, loop in enumerate(scored_loop):
         rows_by_component[int(loop_component[int(loop)])].append(row)
 
+    patch_groups = _patch_state_groups(
+        rows_by_component,
+        holes,
+        maximum_individual_hole_scopes=settings.maximum_individual_hole_scopes,
+    )
     proposals: list[dict[str, Any]] = []
-    rejected_external_candidate_count = 0
-    for target_component, row_values in sorted(rows_by_component.items()):
-        hole_rows = np.asarray(row_values, dtype=np.int32)
+    proposal_signature_by_component: dict[
+        int, set[tuple[bytes, bytes]]
+    ] = defaultdict(set)
+    rejected_external_candidate: set[int] = set()
+    binary_scope_records: list[dict[str, Any]] = []
+    for target_component, hole_rows, scope_kind, scope_hole_row in patch_groups:
         raw_candidate, raw_alignment, row_nearest = _group_candidates(
             hole_rows, holes
         )
@@ -1124,7 +1511,7 @@ def solve_component_patch_states(
                 if selected[int(value)]
             )
             if any(component[value] != target_component for value in blockers):
-                rejected_external_candidate_count += 1
+                rejected_external_candidate.add(node)
                 continue
             candidates.append(node)
             incumbents.update(blockers)
@@ -1199,7 +1586,9 @@ def solve_component_patch_states(
             local_edge_weight,
         )
         coverage_stats: dict[str, Any] = {
+            "patchPixelCount": 0,
             "ctSupportedPixelCount": 0,
+            "ctSupportedPixelFraction": 0.0,
             "depthCompatibleCandidateCount": 0,
             "coverablePixelFraction": 0.0,
         }
@@ -1235,7 +1624,27 @@ def solve_component_patch_states(
                     minimum_hamming_fraction=(
                         settings.minimum_variant_hamming_fraction
                     ),
+                    use_exact_binary_optimizer=(
+                        settings.use_exact_binary_optimizer
+                    ),
+                    maximum_exact_binary_nodes=(
+                        settings.maximum_exact_binary_nodes
+                    ),
+                    maximum_exact_binary_states=(
+                        settings.maximum_exact_binary_states
+                    ),
+                    exact_binary_time_limit_seconds=(
+                        settings.exact_binary_time_limit_seconds
+                    ),
                 )
+            )
+            binary_scope_records.append(
+                {
+                    "targetComponent": int(target_component),
+                    "scopeKind": scope_kind,
+                    "scopeHoleRow": int(scope_hole_row),
+                    **coverage_solver["exactBinaryOptimization"],
+                }
             )
             baseline_objective = _coverage_objective(
                 baseline_local,
@@ -1259,7 +1668,6 @@ def solve_component_patch_states(
             )
             optimized_states = [optimized]
 
-        proposal_seen: set[tuple[bytes, bytes]] = set()
         state_records = (
             coverage_solver.get("states", ()) if coverage_solver is not None else ()
         )
@@ -1281,9 +1689,9 @@ def solve_component_patch_states(
             added = options[proposed & ~baseline_local]
             removed = options[baseline_local & ~proposed]
             signature = (added.tobytes(), removed.tobytes())
-            if signature in proposal_seen:
+            if signature in proposal_signature_by_component[target_component]:
                 continue
-            proposal_seen.add(signature)
+            proposal_signature_by_component[target_component].add(signature)
             if coverage is None or pixel_weight is None:
                 proposal_objective = _objective(
                     proposed,
@@ -1323,9 +1731,18 @@ def solve_component_patch_states(
                 topology_neighbor,
             )
             objective_gain = float(proposal_objective - baseline_objective)
-            qualified = (
+            (
+                proxy_screened,
+                objective_qualified,
+                counterexample_qualified,
+            ) = _patch_state_proxy_screen(
+                objective_gain,
+                float(coverage_stats["ctSupportedPixelFraction"]),
+                depth_field_present=depth_field is not None,
+                settings=settings,
+            )
+            physical_qualified = (
                 len(added) >= settings.minimum_added_ribbon_count
-                and objective_gain >= settings.minimum_objective_gain
                 and two_core >= settings.minimum_added_two_core_fraction
                 and tangent_ratio >= settings.minimum_added_tangent_ratio
                 and bool(hole_metrics)
@@ -1342,6 +1759,7 @@ def solve_component_patch_states(
                     for record in hole_metrics
                 )
             )
+            qualified = physical_qualified and proxy_screened
             state_record = (
                 state_records[variant_rank]
                 if variant_rank < len(state_records)
@@ -1350,6 +1768,8 @@ def solve_component_patch_states(
             proposals.append(
                 {
                     "targetComponent": int(target_component),
+                    "scopeKind": scope_kind,
+                    "scopeHoleRow": int(scope_hole_row),
                     "variantRank": int(variant_rank),
                     "variantProfile": str(state_record.get("profile", "unknown")),
                     "holeRows": hole_rows,
@@ -1366,6 +1786,11 @@ def solve_component_patch_states(
                         state_record.get("coveredPixelFraction", 0.0)
                     ),
                     "coverageSolver": coverage_solver,
+                    "objectiveQualified": bool(objective_qualified),
+                    "ctCounterexampleQualified": bool(
+                        physical_qualified
+                        and counterexample_qualified
+                    ),
                     "qualified": bool(qualified),
                 }
             )
@@ -1412,6 +1837,10 @@ def solve_component_patch_states(
     statistics = {
         "scoredHoleCount": int(len(scored_loop)),
         "surfaceComponentPatchCount": int(len(rows_by_component)),
+        "patchStateScopeCount": int(len(patch_groups)),
+        "individualHoleScopeCount": int(
+            sum(scope_kind == "hole" for _, _, scope_kind, _ in patch_groups)
+        ),
         "componentStateVariantCount": int(len(proposals)),
         "candidateRibbonCount": int(
             sum(
@@ -1426,9 +1855,15 @@ def solve_component_patch_states(
                 for target_component in rows_by_component
             )
         ),
-        "externallyBlockedCandidateCount": int(rejected_external_candidate_count),
+        "externallyBlockedCandidateCount": int(len(rejected_external_candidate)),
         "qualifiedPatchCount": int(
             sum(proposal["qualified"] for proposal in proposals)
+        ),
+        "ctCounterexampleQualifiedPatchCount": int(
+            sum(
+                proposal["ctCounterexampleQualified"]
+                for proposal in proposals
+            )
         ),
         "composedPatchCount": int(np.count_nonzero(applied)),
         "proposedAddedRibbonCount": int(
@@ -1448,6 +1883,7 @@ def solve_component_patch_states(
         "denseCoverageObjective": bool(
             depth_field is not None and settings.candidate_coverage_weight > 0.0
         ),
+        "exactBinaryScopes": binary_scope_records,
     }
     return arrays, proposals, statistics
 
@@ -1490,6 +1926,14 @@ def _proposal_arrays(
     return {
         "patchTargetPriorComponent": np.asarray(
             [proposal["targetComponent"] for proposal in proposals], dtype=np.int32
+        ),
+        "patchScopeKind": np.asarray(
+            [proposal.get("scopeKind", "component") for proposal in proposals],
+            dtype="U16",
+        ),
+        "patchScopeHoleRow": np.asarray(
+            [proposal.get("scopeHoleRow", -1) for proposal in proposals],
+            dtype=np.int32,
         ),
         "patchVariantRank": np.asarray(
             [proposal.get("variantRank", 0) for proposal in proposals], dtype=np.int16
@@ -1539,6 +1983,17 @@ def _proposal_arrays(
         "patchRemovedFrontierIndex": np.asarray(removed_values, dtype=np.int32),
         "patchObjectiveGain": np.asarray(
             [proposal["objectiveGain"] for proposal in proposals], dtype=np.float32
+        ),
+        "patchObjectiveQualified": np.asarray(
+            [proposal.get("objectiveQualified", True) for proposal in proposals],
+            dtype=np.uint8,
+        ),
+        "patchCtCounterexampleQualified": np.asarray(
+            [
+                proposal.get("ctCounterexampleQualified", False)
+                for proposal in proposals
+            ],
+            dtype=np.uint8,
         ),
         "patchAddedTwoCoreFraction": np.asarray(
             [proposal["twoCoreFraction"] for proposal in proposals], dtype=np.float32
@@ -1920,6 +2375,11 @@ def run_physical_ribbon_patch_states(
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
+    if depth_field is not None and resolved.use_exact_binary_optimizer:
+        identity["exactBinarySolver"] = {
+            "name": "HiGHS",
+            "version": _highs_version(required=True),
+        }
     if depth_path is not None and depth_manifest is not None:
         identity["depthField"] = _reference(depth_path, depth_manifest)
     identity["identitySha256"] = canonical_json_hash(identity)
@@ -2325,8 +2785,8 @@ def run_physical_ribbon_patch_states(
             ),
             "optimization": (
                 "diverse collective alternating-interface matchings with "
-                "saturated whole-patch dense CT coverage inside a fixed "
-                "selected halo"
+                "saturated whole-patch dense CT coverage plus bounded binary "
+                "whole-scope optimization inside a fixed selected halo"
                 if depth_field is not None
                 else (
                     "collective alternating interface matching inside a fixed "
