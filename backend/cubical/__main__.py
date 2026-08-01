@@ -127,6 +127,10 @@ from .physical_ribbon_corridor_sets import (
     PhysicalRibbonCorridorSetSettings,
     run_physical_ribbon_corridor_sets,
 )
+from .physical_ribbon_corridor_extension import (
+    PhysicalRibbonCorridorExtensionSettings,
+    run_physical_ribbon_corridor_extension,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -863,6 +867,23 @@ def _physical_ribbon_corridor_sets(args: argparse.Namespace) -> None:
         args.configuration,
         args.output,
         settings=PhysicalRibbonCorridorSetSettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_corridor_extension(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_corridor_extension(
+        args.variants,
+        args.configuration,
+        args.output,
+        settings=PhysicalRibbonCorridorExtensionSettings(**settings_values),
         force=args.force,
         progress=print,
     )
@@ -2531,6 +2552,31 @@ def main() -> None:
     physical_ribbon_corridor_sets.add_argument("--force", action="store_true")
     physical_ribbon_corridor_sets.set_defaults(
         handler=_physical_ribbon_corridor_sets
+    )
+    physical_ribbon_corridor_extension = subparsers.add_parser(
+        "extend-physical-ribbon-corridor-variants",
+        description=(
+            "Extend a cached exact corridor bank to deeper complete matchings, "
+            "screening only variants from previously unresolved corridors."
+        ),
+    )
+    physical_ribbon_corridor_extension.add_argument(
+        "--variants", type=Path, required=True
+    )
+    physical_ribbon_corridor_extension.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_corridor_extension.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_corridor_extension.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_corridor_extension.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_corridor_extension.set_defaults(
+        handler=_physical_ribbon_corridor_extension
     )
     gap_census = subparsers.add_parser(
         "gap-census",

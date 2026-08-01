@@ -349,6 +349,32 @@ prior-component fusion. Component/global optimization takes about 14 seconds
 and final replay about 37 seconds. Flattened actual-CT previews have zero
 nonadjacent chart overlap.
 
+`extend-physical-ribbon-corridor-variants` measures search saturation without
+discarding that expensive evidence. It re-enumerates a deeper complete-state
+prefix, verifies every prior variant by its corridor/add/remove signature, and
+copies prior exact results to their new indices. Only new ranks belonging to
+previously unresolved corridors are reconstructed. The exact delta is a cached
+artifact, so component and block objectives can be changed without repeating
+the extension screen.
+
+Extending the current bank from eight to 16 variants preserves all 472 prior
+states and adds 276 targeted states across the 35 unresolved CT-supported
+corridors. Twelve new states connect their arcs exactly, seven preserve sheet
+density, and four corridors become resolvable (rows 45, 77, 111, and 119). The
+targeted screen takes about 233 seconds. Joint block optimization accepts all
+28 available repairs at once: selected ribbons change from 37,889 to 37,881,
+supported triangles from 28,116 to 28,195, and complete edge-connected triangle
+regions from 832 to 797. All component, collision, crossing, fusion, and chart
+overlap invariants remain clean. The four new flattened fragments have native-CT
+profile correlations of 0.918--0.988, competing-layer margins of 0.428--1.009,
+and boundary-texture correlations of 0.589--0.867.
+
+This also establishes the next bottleneck. Thirty of the remaining 31
+corridors have no exact connecting state anywhere in ranks zero through 15;
+one has connections that fail density preservation. Deeper permutations now
+have sharply diminishing yield. The residual problem is missing physical
+ribbon support, not local matching order.
+
 The reproducible commands are:
 
 ```bash
@@ -386,5 +412,17 @@ python -m backend.cubical optimize-physical-ribbon-corridor-sets \
   --variants work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-v1 \
   --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-sets-v1 \
+  --settings-json examples/physical-ribbon-corridor-sets.json
+
+python -m backend.cubical extend-physical-ribbon-corridor-variants \
+  --variants work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-16-v1 \
+  --settings-json examples/physical-ribbon-corridor-extension.json
+
+python -m backend.cubical optimize-physical-ribbon-corridor-sets \
+  --variants work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-16-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-sets-16-v1 \
   --settings-json examples/physical-ribbon-corridor-sets.json
 ```

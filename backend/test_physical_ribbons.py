@@ -39,6 +39,10 @@ from backend.cubical.physical_ribbon_corridor_variants import (
 from backend.cubical.physical_ribbon_corridor_sets import (
     _choose_global_variant_states,
 )
+from backend.cubical.physical_ribbon_corridor_extension import (
+    _delta_variant_arrays,
+    _variant_signature,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -418,6 +422,45 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_corridor_extension_preserves_ragged_variant_identity(self) -> None:
+        full = {
+            "corridorVariantRow": np.asarray((0, 0, 1), dtype=np.int32),
+            "corridorVariantRank": np.asarray((0, 1, 0), dtype=np.int16),
+            "corridorVariantAddedOffset": np.asarray(
+                (0, 1, 3, 4), dtype=np.int64
+            ),
+            "corridorVariantAddedFrontierIndex": np.asarray(
+                (10, 11, 12, 13), dtype=np.int32
+            ),
+            "corridorVariantRemovedOffset": np.asarray(
+                (0, 1, 2, 4), dtype=np.int64
+            ),
+            "corridorVariantRemovedFrontierIndex": np.asarray(
+                (20, 21, 22, 23), dtype=np.int32
+            ),
+        }
+        for name, dtype in (
+            ("corridorVariantLocalObjective", np.float32),
+            ("corridorVariantLocalObjectiveDelta", np.float32),
+            ("corridorVariantPatchCoverage", np.float32),
+            ("corridorVariantFirstArcAnchorCount", np.int16),
+            ("corridorVariantSecondArcAnchorCount", np.int16),
+            ("corridorVariantRetainedBoundaryFraction", np.float32),
+        ):
+            full[name] = np.arange(3, dtype=dtype)
+        delta, source_index = _delta_variant_arrays(
+            full, np.asarray((2, 1), dtype=np.int32), corridor_count=2
+        )
+        np.testing.assert_array_equal(source_index, (1, 2))
+        np.testing.assert_array_equal(delta["corridorVariantOffset"], (0, 1, 2))
+        np.testing.assert_array_equal(
+            delta["corridorVariantAddedFrontierIndex"], (11, 12, 13)
+        )
+        self.assertEqual(
+            _variant_signature(delta, 0),
+            _variant_signature(full, 1),
+        )
+
     def test_global_corridor_set_uses_compatible_lower_local_choice(self) -> None:
         empty_key = (0.0, 0.0, 0.0, 0.0, 0.0)
         states = (

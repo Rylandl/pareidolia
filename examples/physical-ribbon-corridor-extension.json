@@ -1,0 +1,4 @@
+{
+  "maximum_variants_per_corridor": 16,
+  "screen_only_previously_unresolved_corridors": true
+}
