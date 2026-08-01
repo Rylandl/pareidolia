@@ -46,6 +46,7 @@ from backend.cubical.physical_ribbon_corridor_extension import (
 from backend.cubical.physical_ribbon_corridor_dormant import (
     _combine_compiled_reconfigurations,
     _condition_crossings_on_immutable_baseline,
+    _union_crossing_continuity,
     _variant_dormant_addition_count,
 )
 
@@ -427,6 +428,28 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_crossing_screen_unions_strict_and_support_edges(self) -> None:
+        expanded = {
+            "frontierRibbonCandidate": np.asarray((1, 2, 3), dtype=np.int32),
+            "edgeFirstFrontierIndex": np.asarray((0,), dtype=np.int32),
+            "edgeSecondFrontierIndex": np.asarray((1,), dtype=np.int32),
+        }
+        support = {
+            "frontierRibbonCandidate": np.asarray((3, 1, 2), dtype=np.int32),
+            "edgeFirstFrontierIndex": np.asarray((0, 1), dtype=np.int32),
+            "edgeSecondFrontierIndex": np.asarray((2, 2), dtype=np.int32),
+        }
+        union, stats = _union_crossing_continuity(
+            expanded, support, ribbon_bank_count=4
+        )
+        np.testing.assert_array_equal(
+            union["edgeFirstFrontierIndex"], (0, 1)
+        )
+        np.testing.assert_array_equal(
+            union["edgeSecondFrontierIndex"], (1, 2)
+        )
+        self.assertEqual(stats["unionEdgeCount"], 2)
+
     def test_prior_and_dormant_exact_states_combine_in_expanded_space(self) -> None:
         def compiled(
             eligible: tuple[int, ...],

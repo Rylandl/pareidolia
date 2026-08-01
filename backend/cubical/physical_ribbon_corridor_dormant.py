@@ -145,6 +145,51 @@ def _condition_crossings_on_immutable_baseline(
     }
 
 
+def _union_crossing_continuity(
+    expanded: Mapping[str, np.ndarray],
+    support: Mapping[str, np.ndarray],
+    *,
+    ribbon_bank_count: int,
+) -> tuple[dict[str, np.ndarray], dict[str, int]]:
+    """Express expanded strict and inherited support edges in one frontier."""
+
+    frontier = np.asarray(expanded["frontierRibbonCandidate"], dtype=np.int32)
+    bank_to_expanded = np.full(ribbon_bank_count, -1, dtype=np.int32)
+    bank_to_expanded[frontier] = np.arange(len(frontier), dtype=np.int32)
+    support_frontier = np.asarray(
+        support["frontierRibbonCandidate"], dtype=np.int32
+    )
+    support_to_expanded = bank_to_expanded[support_frontier]
+    if np.any(support_to_expanded < 0):
+        raise ValueError("expanded frontier does not contain support continuity")
+    expanded_first = np.asarray(
+        expanded["edgeFirstFrontierIndex"], dtype=np.int32
+    )
+    expanded_second = np.asarray(
+        expanded["edgeSecondFrontierIndex"], dtype=np.int32
+    )
+    support_first = support_to_expanded[
+        np.asarray(support["edgeFirstFrontierIndex"], dtype=np.int32)
+    ]
+    support_second = support_to_expanded[
+        np.asarray(support["edgeSecondFrontierIndex"], dtype=np.int32)
+    ]
+    first = np.concatenate((expanded_first, support_first))
+    second = np.concatenate((expanded_second, support_second))
+    low = np.minimum(first, second).astype(np.int64)
+    high = np.maximum(first, second).astype(np.int64)
+    key = np.unique(low * len(frontier) + high)
+    return {
+        "frontierRibbonCandidate": frontier,
+        "edgeFirstFrontierIndex": (key // len(frontier)).astype(np.int32),
+        "edgeSecondFrontierIndex": (key % len(frontier)).astype(np.int32),
+    }, {
+        "expandedStrictEdgeCount": len(expanded_first),
+        "inheritedSupportEdgeCount": len(support_first),
+        "unionEdgeCount": len(key),
+    }
+
+
 def _condition_configuration_on_expanded_frontier(
     ribbon: Mapping[str, np.ndarray],
     interfaces: Mapping[str, np.ndarray],
@@ -152,6 +197,7 @@ def _condition_configuration_on_expanded_frontier(
     expanded_topology: Mapping[str, np.ndarray],
     base_configuration: Mapping[str, np.ndarray],
     *,
+    crossing_topology: Mapping[str, np.ndarray],
     continuity_manifest: Mapping[str, Any],
     configuration_settings: PhysicalRibbonConfigurationSettings,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
@@ -202,7 +248,7 @@ def _condition_configuration_on_expanded_frontier(
     crossings, crossing_stats = build_profile_crossing_conflicts(
         ribbon,
         interfaces,
-        expanded_topology,
+        crossing_topology,
         processing_world_start_xyz=source_origin + processing_start,
         processing_shape_sampling_xyz=tuple(int(value) for value in processing_shape),
         sampling_stride_voxels=stride,
@@ -511,6 +557,16 @@ def run_physical_ribbon_dormant_corridors(
     expanded_path, expanded_manifest, expanded_topology = (
         _load_continuity_artifact(expanded_continuity_root)
     )
+    support_reference = configuration_manifest["identity"]["continuity"]
+    support_path, support_manifest, support_topology = (
+        _load_continuity_artifact(support_reference["manifestPath"])
+    )
+    if (
+        sha256_file(support_path) != support_reference["manifestSha256"]
+        or support_manifest["data"]["sha256"]
+        != support_reference["dataSha256"]
+    ):
+        raise ValueError("configuration support continuity has changed")
     if (
         prior_manifest["identity"]["corridors"]["dataSha256"]
         != corridor_manifest["data"]["sha256"]
@@ -577,6 +633,11 @@ def run_physical_ribbon_dormant_corridors(
             "manifestSha256": sha256_file(expanded_path),
             "dataSha256": expanded_manifest["data"]["sha256"],
         },
+        "supportContinuity": {
+            "manifestPath": str(support_path),
+            "manifestSha256": sha256_file(support_path),
+            "dataSha256": support_manifest["data"]["sha256"],
+        },
         "ribbonBank": {
             "manifestPath": str(ribbon_path),
             "manifestSha256": sha256_file(ribbon_path),
@@ -609,6 +670,11 @@ def run_physical_ribbon_dormant_corridors(
     started = time.monotonic()
     if progress is not None:
         progress("conditioning the expanded frontier on the selected base surface")
+    crossing_topology, crossing_topology_stats = _union_crossing_continuity(
+        expanded_topology,
+        support_topology,
+        ribbon_bank_count=len(np.asarray(ribbon["sourceInterface"])),
+    )
     conditioned, old_to_expanded, conditioning_stats = (
         _condition_configuration_on_expanded_frontier(
             ribbon,
@@ -616,10 +682,12 @@ def run_physical_ribbon_dormant_corridors(
             base_topology,
             expanded_topology,
             base_configuration,
+            crossing_topology=crossing_topology,
             continuity_manifest=expanded_manifest,
             configuration_settings=configuration_settings,
         )
     )
+    conditioning_stats["crossingContinuity"] = crossing_topology_stats
     conditioned_at = time.monotonic()
     surface, surface_stats = build_physical_ribbon_surface_complex(
         ribbon,

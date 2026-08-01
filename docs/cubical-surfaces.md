@@ -387,24 +387,24 @@ cell.
 
 The rank-15 frontier contains 218,698 candidates and 5,321,794 strict
 continuation edges, adding 84,052 candidates and 3,663,205 edges without
-changing any of the 4,307 selected base components. It yields 152 dormant-
-supported states across 24 of the 31 residual corridors. Twelve reconstruct as
+changing any of the 4,307 selected base components. It yields 155 dormant-
+supported states across 25 of the 31 residual corridors. Twelve reconstruct as
 exact density-preserving connections and three corridors become resolvable
 (rows 46, 67, and 88), using six previously unavailable ribbons with ray ranks
 as deep as eight.
 
-The expanded profile raster also exposes 222 crossing pairs already present in
-the immutable baseline but missed by the sparser crossing graph. They are
-recorded as inherited debt: a counterfactual may retain one but may introduce
-no new crossing. This audit correctly removes two prior repairs (rows 48 and
-110), each of which activates one newly visible interior crossing. Joint replay
-therefore retains 26 prior repairs plus all three new repairs. The cumulative
-surface has 37,882 selected ribbons, 28,205 supported triangles, and 794
-edge-connected triangle regions, versus 28,118 triangles and 830 regions in
-the remapped baseline. It preserves all 4,307 components with zero new profile
-crossing, interface collision, component split, cross-sheet fusion, or
-flattened chart overlap. The complete conditioned screen and cumulative replay
-take about 225 seconds.
+The crossing screen uses the union of the 5,321,794 expanded strict edges and
+the original 3,263,301 support edges. This is essential: continuation-adjacent
+ribbons are not profile-crossing conflicts merely because the topology graph is
+stricter than the factor-support graph. The 6,926,506-edge union preserves the
+original zero-conflict baseline and still checks every new counterfactual pair.
+Joint replay retains all 28 prior repairs plus all three new repairs. The
+cumulative surface has 37,882 selected ribbons, 28,211 supported triangles,
+and 792 edge-connected triangle regions, versus 28,118 triangles and 830
+regions in the remapped baseline. It preserves all 4,307 components with zero
+new profile crossing, interface collision, component split, cross-sheet fusion,
+or flattened chart overlap. The complete conditioned screen and cumulative
+replay take about 243 seconds.
 
 The reproducible commands are:
 
