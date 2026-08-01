@@ -720,6 +720,78 @@ The following whole-hole pass brings the canonical state to 38,134 ribbons,
 triangle regions and all 4,303 components.  It preserves all 44 cumulative CT
 connections and leaves 40 macro holes explicit for later collective passes.
 
+The remaining free frontier exposes a configuration-energy barrier rather
+than a lack of local evidence.  Of 125,574 candidate interfaces, the canonical
+state initially uses 76,272; 14,781 noncrossing ribbons remain physically free.
+Many residual continuation regions have negative one-ribbon marginals but a
+positive complete-patch objective.  `optimize-physical-ribbon-collective-patches`
+therefore optimizes each connected residual region from several dense starts,
+then performs exact add/remove/swap ascent.  A proposal must have
+two-dimensional continuation support, attach to one prior component, become
+real triangle area, and not split an existing triangle region.  The first pass
+adds 140 ribbons and 361 strict triangles, closes six macro holes, and reduces
+triangle regions by one.  A second identical pass accepts no proposal, making
+the additive move class an explicit fixed point rather than an indefinitely
+repeated cell-growth heuristic.
+
+Additive saturation does not imply assignment saturation.  A missing patch can
+require several existing interface pairings to be replaced before its better
+surface state is reachable.  `optimize-physical-ribbon-patch-states` consumes
+the ordinary native-CT hole artifact and groups every scored hole frontier on
+one reconstructed surface component into a single factor state.  Candidate
+ribbons and the same-component incumbents they physically exclude are mutable;
+every other selected ribbon is a fixed halo.  Other components are immutable
+blockers.  The solver crosses negative unary barriers collectively, but an
+incumbent is removed only when a chosen alternative shares an interface or an
+exact profile-crossing conflict with it.
+
+Proposal gates use the already declared whole-patch air-material-air profile,
+normal-offset competing layers, two-dimensional continuation, and patch
+coverage.  They are intentionally broad: all component states are rebuilt in
+one exact surface pass, so screening more hypotheses does not add one expensive
+reconstruction per hole.  Exact acceptance then requires complete surface
+realization, unchanged component lineage, no interface or profile conflict, no
+new triangle region or closed hole, and at least 99.5 percent prior triangle
+area.  Low-anchor states must actually close a hole or join a triangle region;
+mere area growth still requires a well-retained boundary.
+
+On the 384 x 384 x 320 pilot block, 33 macro holes form 19 component-level
+states over 3,225 alternatives.  Fourteen reach exact replay and 12 survive.
+They replace 182 incumbents with 193 alternatives, raise strict triangles from
+29,237 to 29,346, reduce triangle regions from 735 to 734, reduce interior
+holes from 120 to 108, and reduce macro holes from 33 to 17.  The largest
+accepted state jointly re-pairs 206 ribbon assignments on one component and
+closes four of its six macro holes.  All 4,303 physical components remain,
+with zero deletion, split, fusion, interface reuse, or profile crossing.  The
+collective optimization itself takes 4.5 seconds; the two complete exact
+surface reconstructions dominate the 73-second run.
+
+`audit-physical-ribbon-flat-texture` samples the exact intrinsic charts from
+native CT at fixed ply depths and compares axial texture disagreement on new
+mesh edges against old edges from the same surface.  The 12 changed components
+contain no nonadjacent chart-overlap pixels.  In the eight largest, five new
+boundaries match or improve their own baseline at at least one depth; the
+101-ribbon state is 3--4 degrees above a roughly 17-degree baseline, while the
+weakest persistent diagnostic is about 9 degrees above baseline.  These are
+reported diagnostics, not post-hoc labels or slice-specific acceptance tuning.
+
+The audit also publishes a label-free compatibility decision.  At each fixed
+depth, the new-boundary median may exceed the same-surface control median by
+the larger of five degrees or one quarter of the control median-to-p90 spread.
+A component passes when any measured depth is compatible.  This adapts to the
+texture noise of each reconstructed surface rather than imposing a truth label
+or optimizing the depth after the fact.  All 12 first-wave components pass.
+
+`gate-physical-ribbon-patch-texture` compiles that decision back into an exact,
+materializable surface state.  A refreshed geometry pass proposed one further
+7-for-7 re-pairing that would add seven triangles and close two macro holes,
+but its flattened boundary was 15--31 degrees worse than its control at all
+three depths.  The gate rejects it and reproduces the 29,346-triangle,
+17-macro-hole first-wave state exactly.  Thus the current alternating move
+class is saturated under both exact geometry and actual-CT fiber continuity;
+the attractive geometry-only second wave is retained as a counterexample, not
+silently promoted to the canonical configuration.
+
 The final two iterative commands are:
 
 ```bash
@@ -745,6 +817,24 @@ python -m backend.cubical replay-physical-ribbon-lineage-strips \
 The reproducible commands are:
 
 ```bash
+python -m backend.cubical optimize-physical-ribbon-collective-patches \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-replay-configuration-cumulative-v10 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-collective-v1
+
+python -m backend.cubical optimize-physical-ribbon-patch-states \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-collective-v5 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-v2
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-v2 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-patch-state-v2 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+
+python -m backend.cubical gate-physical-ribbon-patch-texture \
+  --patch-state work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-v2 \
+  --texture-audit work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-patch-state-v2 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-patch-state-v2
+
 python -m backend.cubical build-physical-ribbon-bank \
   --interfaces work/multiseam-2x2-b00c03c/one-sided-interface-bank-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-bank-v1

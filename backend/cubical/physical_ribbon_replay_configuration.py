@@ -35,6 +35,9 @@ _REPLAY_MANIFEST_STEMS = (
     "physical-ribbon-lineage-strip-replay-v1",
     "physical-ribbon-cumulative-corridor-replay-v1",
     "physical-ribbon-cumulative-hole-replay-v1",
+    "physical-ribbon-collective-v1",
+    "physical-ribbon-patch-state-v1",
+    "physical-ribbon-texture-gate-v1",
 )
 _TOPOLOGY_FIELDS = (
     "frontierRibbonCandidate",

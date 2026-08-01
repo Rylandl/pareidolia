@@ -20,6 +20,22 @@ from backend.cubical.physical_ribbon_configuration import (
     build_profile_crossing_conflicts,
     optimize_physical_ribbon_configuration,
 )
+from backend.cubical.physical_ribbon_collective import (
+    PhysicalRibbonCollectiveSettings,
+    _filter_unrealized_surface_proposals,
+    optimize_collective_patch,
+)
+from backend.cubical.physical_ribbon_flattened_audit import (
+    boundary_texture_compatibility,
+    flattened_texture_structure,
+)
+from backend.cubical.physical_ribbon_patch_states import (
+    _lineage_audit,
+    _selection_conflicts,
+)
+from backend.cubical.physical_ribbon_texture_gate import (
+    texture_patch_decisions,
+)
 from backend.cubical.physical_ribbon_continuity import (
     PhysicalRibbonContinuitySettings,
     build_paired_boundary_continuity,
@@ -401,6 +417,170 @@ class PhysicalRibbonConfigurationTests(unittest.TestCase):
         self.assertEqual(stats["selectedContinuityEdgeCount"], 0)
         self.assertEqual(stats["componentCount"], 2)
         np.testing.assert_array_equal(solved["edgeSelected"], (0,))
+
+
+class PhysicalRibbonCollectiveTests(unittest.TestCase):
+    def test_collective_patch_crosses_negative_single_node_barrier(self) -> None:
+        selected, objective = optimize_collective_patch(
+            np.full(3, -0.6, dtype=np.float32),
+            np.asarray((0, 1), dtype=np.int32),
+            np.asarray((1, 2), dtype=np.int32),
+            np.ones(2, dtype=np.float32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+        )
+        np.testing.assert_array_equal(selected, (1, 1, 1))
+        self.assertAlmostEqual(objective, 0.2, places=5)
+
+    def test_collective_patch_enforces_joint_hard_conflicts(self) -> None:
+        selected, objective = optimize_collective_patch(
+            np.asarray((-0.2, -0.2, -0.2), dtype=np.float32),
+            np.asarray((0, 1, 0), dtype=np.int32),
+            np.asarray((2, 2, 1), dtype=np.int32),
+            np.asarray((0.8, 0.8, 0.1), dtype=np.float32),
+            np.asarray((0,), dtype=np.int32),
+            np.asarray((1,), dtype=np.int32),
+        )
+        self.assertFalse(bool(selected[0] and selected[1]))
+        self.assertTrue(bool(selected[2]))
+        self.assertGreater(objective, 0.0)
+
+    def test_collective_patch_accepts_feasible_incumbent_seed(self) -> None:
+        selected, objective = optimize_collective_patch(
+            np.asarray((-0.7, -0.7, -0.7), dtype=np.float32),
+            np.asarray((0, 1), dtype=np.int32),
+            np.asarray((1, 2), dtype=np.int32),
+            np.asarray((1.2, 1.2), dtype=np.float32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            initial_selection=np.ones(3, dtype=bool),
+        )
+        np.testing.assert_array_equal(selected, (1, 1, 1))
+        self.assertAlmostEqual(objective, 0.3, places=5)
+
+    def test_patch_state_lineage_detects_split_and_fusion(self) -> None:
+        baseline_selected = np.ones(4, dtype=bool)
+        baseline_component = np.asarray((0, 0, 1, 1), dtype=np.int32)
+        _, split = _lineage_audit(
+            baseline_selected,
+            baseline_component,
+            baseline_selected,
+            np.asarray((0, 2, 1, 1), dtype=np.int32),
+        )
+        self.assertEqual(split["splitPriorComponentCount"], 1)
+        _, fusion = _lineage_audit(
+            baseline_selected,
+            baseline_component,
+            baseline_selected,
+            np.zeros(4, dtype=np.int32),
+        )
+        self.assertEqual(fusion["crossPriorComponentFusionCount"], 1)
+
+    def test_patch_state_hard_conflicts_are_global(self) -> None:
+        selected = np.asarray((1, 1, 0), dtype=bool)
+        self.assertEqual(
+            _selection_conflicts(
+                selected,
+                np.asarray((0, 2, 0), dtype=np.int32),
+                np.asarray((1, 3, 4), dtype=np.int32),
+                np.asarray((0,), dtype=np.int32),
+                np.asarray((1,), dtype=np.int32),
+            ),
+            (0, 1),
+        )
+
+    def test_flattened_texture_audit_recovers_coherent_axial_pattern(self) -> None:
+        image = np.tile(np.arange(32, dtype=np.float32), (32, 1))
+        _, statistics = flattened_texture_structure(
+            image,
+            np.ones_like(image, dtype=bool),
+            window_radius=2,
+            minimum_coherence=0.15,
+        )
+        self.assertGreater(float(statistics["medianCoherence"]), 0.99)
+        self.assertLess(
+            float(statistics["adjacentAxialDisagreementDegrees"]["p90"]),
+            0.01,
+        )
+
+    def test_texture_compatibility_scales_with_same_surface_control(self) -> None:
+        compatible = boundary_texture_compatibility(
+            {"count": 20, "median": 27.0},
+            {"count": 200, "median": 17.0, "p90": 67.0},
+            minimum_measurements=12,
+            median_excess_floor_degrees=5.0,
+            control_spread_fraction=0.25,
+        )
+        self.assertTrue(bool(compatible["compatible"]))
+        incompatible = boundary_texture_compatibility(
+            {"count": 20, "median": 32.0},
+            {"count": 200, "median": 17.0, "p90": 67.0},
+            minimum_measurements=12,
+            median_excess_floor_degrees=5.0,
+            control_spread_fraction=0.25,
+        )
+        self.assertFalse(bool(incompatible["compatible"]))
+
+    def test_texture_gate_maps_patch_through_final_component(self) -> None:
+        geometry, measured, compatible = texture_patch_decisions(
+            {
+                "patchAccepted": np.asarray((1, 1, 0), dtype=np.uint8),
+                "patchAddedOffset": np.asarray((0, 2, 3, 3), dtype=np.int64),
+                "patchAddedFrontierIndex": np.asarray((1, 2, 4), dtype=np.int32),
+                "component": np.asarray((0, 5, 5, 1, 7), dtype=np.int32),
+            },
+            {
+                "audit": {
+                    "components": [
+                        {"componentId": 5, "boundaryTextureCompatible": True},
+                        {"componentId": 7, "boundaryTextureCompatible": False},
+                    ]
+                }
+            },
+        )
+        np.testing.assert_array_equal(geometry, (1, 1, 0))
+        np.testing.assert_array_equal(measured, (1, 1, 0))
+        np.testing.assert_array_equal(compatible, (1, 0, 0))
+
+    def test_collective_patch_requires_realized_mesh_attachment(self) -> None:
+        arrays = {
+            "proposalOffset": np.asarray((0, 1), dtype=np.int64),
+            "proposalFrontierIndex": np.asarray((1,), dtype=np.int32),
+            "proposalAccepted": np.asarray((1,), dtype=np.uint8),
+            "proposalRejectionReason": np.asarray((0,), dtype=np.uint8),
+            "proposalAnchorComponent": np.asarray((0,), dtype=np.int32),
+            "selected": np.asarray((1, 1), dtype=np.uint8),
+            "component": np.asarray((0, 0), dtype=np.int32),
+        }
+        statistics = {
+            "acceptedProposalCount": 1,
+            "acceptedRibbonCount": 1,
+        }
+        filtered = _filter_unrealized_surface_proposals(
+            arrays,
+            statistics,
+            {"triangleFrontierIndex": np.empty((0, 3), dtype=np.int32)},
+            {
+                "sourceInterface": np.asarray((0, 2), dtype=np.int32),
+                "targetInterface": np.asarray((1, 3), dtype=np.int32),
+                "interfaceCandidateDegree": np.ones(4, dtype=np.int32),
+            },
+            {
+                "frontierRibbonCandidate": np.asarray((0, 1), dtype=np.int32),
+                "edgeFirstFrontierIndex": np.asarray((0,), dtype=np.int32),
+                "edgeSecondFrontierIndex": np.asarray((1,), dtype=np.int32),
+            },
+            {
+                "selected": np.asarray((1, 0), dtype=np.uint8),
+                "component": np.asarray((0, -1), dtype=np.int32),
+            },
+            {"triangleFrontierIndex": np.empty((0, 3), dtype=np.int32)},
+            settings=PhysicalRibbonCollectiveSettings(),
+        )
+        self.assertTrue(filtered)
+        np.testing.assert_array_equal(arrays["selected"], (1, 0))
+        np.testing.assert_array_equal(arrays["proposalAccepted"], (0,))
+        self.assertEqual(statistics["surfaceRejectedProposalCount"], 1)
 
 
 class PhysicalRibbonBridgingTests(unittest.TestCase):

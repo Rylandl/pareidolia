@@ -111,9 +111,22 @@ from .physical_ribbon_bridging import (
     PhysicalRibbonBridgingSettings,
     run_physical_ribbon_bridging,
 )
+from .physical_ribbon_collective import (
+    PhysicalRibbonCollectiveSettings,
+    run_physical_ribbon_collective,
+)
+from .physical_ribbon_flattened_audit import (
+    PhysicalRibbonFlattenedAuditSettings,
+    run_physical_ribbon_flattened_audit,
+)
+from .physical_ribbon_texture_gate import run_physical_ribbon_texture_gate
 from .physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
     run_physical_ribbon_patch_holes,
+)
+from .physical_ribbon_patch_states import (
+    PhysicalRibbonPatchStateSettings,
+    run_physical_ribbon_patch_states,
 )
 from .physical_ribbon_patch_corridors import (
     PhysicalRibbonPatchCorridorSettings,
@@ -857,6 +870,61 @@ def _physical_ribbon_bridging(args: argparse.Namespace) -> None:
         args.output,
         bridge_continuity_root=args.bridge_continuity,
         settings=PhysicalRibbonBridgingSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_collective(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_collective(
+        args.configuration,
+        args.output,
+        settings=PhysicalRibbonCollectiveSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_flattened_audit(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_flattened_audit(
+        args.surface,
+        args.output,
+        settings=PhysicalRibbonFlattenedAuditSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_patch_states(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_patch_states(
+        args.holes,
+        args.output,
+        settings=PhysicalRibbonPatchStateSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_texture_gate(args: argparse.Namespace) -> None:
+    summary = run_physical_ribbon_texture_gate(
+        args.patch_state,
+        args.texture_audit,
+        args.output,
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2721,6 +2789,84 @@ def main() -> None:
     physical_ribbon_configuration.add_argument("--force", action="store_true")
     physical_ribbon_configuration.set_defaults(
         handler=_physical_ribbon_configuration
+    )
+    physical_ribbon_collective = subparsers.add_parser(
+        "optimize-physical-ribbon-collective-patches",
+        description=(
+            "Find coherent multi-ribbon residual regions and optimize each as "
+            "one collective surface move, crossing unary energy barriers while "
+            "preserving interface, crossing, and prior-sheet constraints."
+        ),
+    )
+    physical_ribbon_collective.add_argument(
+        "--configuration", type=Path, required=True
+    )
+    physical_ribbon_collective.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_collective.add_argument("--settings-json", type=Path)
+    physical_ribbon_collective.add_argument("--force", action="store_true")
+    physical_ribbon_collective.set_defaults(
+        handler=_physical_ribbon_collective
+    )
+    physical_ribbon_flattened_audit = subparsers.add_parser(
+        "audit-physical-ribbon-flat-texture",
+        description=(
+            "Flatten exact physical-ribbon components, sample native CT at "
+            "fixed ply depths, and report local axial texture continuity around "
+            "newly admitted surface patches."
+        ),
+    )
+    physical_ribbon_flattened_audit.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_flattened_audit.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_flattened_audit.add_argument("--settings-json", type=Path)
+    physical_ribbon_flattened_audit.add_argument("--force", action="store_true")
+    physical_ribbon_flattened_audit.set_defaults(
+        handler=_physical_ribbon_flattened_audit
+    )
+    physical_ribbon_patch_states = subparsers.add_parser(
+        "optimize-physical-ribbon-patch-states",
+        description=(
+            "Jointly reconfigure every CT-supported closed-hole frontier on "
+            "one reconstructed surface component inside a fixed selected "
+            "halo, then retain only exact mesh-density improvements."
+        ),
+    )
+    physical_ribbon_patch_states.add_argument(
+        "--holes", type=Path, required=True
+    )
+    physical_ribbon_patch_states.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_patch_states.add_argument("--settings-json", type=Path)
+    physical_ribbon_patch_states.add_argument("--force", action="store_true")
+    physical_ribbon_patch_states.set_defaults(
+        handler=_physical_ribbon_patch_states
+    )
+    physical_ribbon_texture_gate = subparsers.add_parser(
+        "gate-physical-ribbon-patch-texture",
+        description=(
+            "Retain exact component-level patch states only when their "
+            "flattened native-CT boundary texture is compatible with control "
+            "edges from the same surface."
+        ),
+    )
+    physical_ribbon_texture_gate.add_argument(
+        "--patch-state", type=Path, required=True
+    )
+    physical_ribbon_texture_gate.add_argument(
+        "--texture-audit", type=Path, required=True
+    )
+    physical_ribbon_texture_gate.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_texture_gate.add_argument("--force", action="store_true")
+    physical_ribbon_texture_gate.set_defaults(
+        handler=_physical_ribbon_texture_gate
     )
     physical_ribbon_bridging = subparsers.add_parser(
         "bridge-physical-ribbon-components",
