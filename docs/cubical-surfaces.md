@@ -375,6 +375,37 @@ one has connections that fail density preservation. Deeper permutations now
 have sharply diminishing yield. The residual problem is missing physical
 ribbon support, not local matching order.
 
+`analyze-physical-ribbon-dormant-corridors` tests that missing-support claim
+without permitting cell-at-a-time growth. It embeds the unchanged selected
+configuration in a deeper strict continuity frontier and proves that the full
+selected-node component partition is unchanged. Only complete matchings for a
+previously unresolved CT corridor are considered, and each matching must add
+at least one formerly unavailable bidirectional ribbon. Every state is then
+reconstructed in its complete source sheet. This makes the expansion frontier
+the whole multi-edge CT-supported corridor, rather than one locally plausible
+cell.
+
+The rank-15 frontier contains 218,698 candidates and 5,321,794 strict
+continuation edges, adding 84,052 candidates and 3,663,205 edges without
+changing any of the 4,307 selected base components. It yields 152 dormant-
+supported states across 24 of the 31 residual corridors. Twelve reconstruct as
+exact density-preserving connections and three corridors become resolvable
+(rows 46, 67, and 88), using six previously unavailable ribbons with ray ranks
+as deep as eight.
+
+The expanded profile raster also exposes 222 crossing pairs already present in
+the immutable baseline but missed by the sparser crossing graph. They are
+recorded as inherited debt: a counterfactual may retain one but may introduce
+no new crossing. This audit correctly removes two prior repairs (rows 48 and
+110), each of which activates one newly visible interior crossing. Joint replay
+therefore retains 26 prior repairs plus all three new repairs. The cumulative
+surface has 37,882 selected ribbons, 28,205 supported triangles, and 794
+edge-connected triangle regions, versus 28,118 triangles and 830 regions in
+the remapped baseline. It preserves all 4,307 components with zero new profile
+crossing, interface collision, component split, cross-sheet fusion, or
+flattened chart overlap. The complete conditioned screen and cumulative replay
+take about 225 seconds.
+
 The reproducible commands are:
 
 ```bash
@@ -425,4 +456,18 @@ python -m backend.cubical optimize-physical-ribbon-corridor-sets \
   --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
   --output work/multiseam-2x2-b00c03c/physical-ribbon-corridor-sets-16-v1 \
   --settings-json examples/physical-ribbon-corridor-sets.json
+
+python -m backend.cubical solve-physical-ribbon-continuity \
+  --ribbons work/multiseam-2x2-b00c03c/physical-ribbon-bank-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-continuity-rank15-v1 \
+  --settings-json examples/physical-ribbon-continuity-rank15.json
+
+python -m backend.cubical analyze-physical-ribbon-dormant-corridors \
+  --corridors work/multiseam-2x2-b00c03c/physical-ribbon-patch-corridors-v1 \
+  --variants work/multiseam-2x2-b00c03c/physical-ribbon-corridor-variants-16-v1 \
+  --corridor-sets work/multiseam-2x2-b00c03c/physical-ribbon-corridor-sets-16-v1 \
+  --configuration work/multiseam-2x2-b00c03c/physical-ribbon-configuration-multiscale-v1 \
+  --expanded-continuity work/multiseam-2x2-b00c03c/physical-ribbon-continuity-rank15-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-dormant-corridors-v1 \
+  --settings-json examples/physical-ribbon-dormant-corridors.json
 ```

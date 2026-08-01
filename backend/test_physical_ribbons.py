@@ -43,6 +43,11 @@ from backend.cubical.physical_ribbon_corridor_extension import (
     _delta_variant_arrays,
     _variant_signature,
 )
+from backend.cubical.physical_ribbon_corridor_dormant import (
+    _combine_compiled_reconfigurations,
+    _condition_crossings_on_immutable_baseline,
+    _variant_dormant_addition_count,
+)
 
 
 class PhysicalRibbonBankTests(unittest.TestCase):
@@ -422,6 +427,112 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_prior_and_dormant_exact_states_combine_in_expanded_space(self) -> None:
+        def compiled(
+            eligible: tuple[int, ...],
+            added_offset: tuple[int, ...],
+            added: tuple[int, ...],
+            removed_offset: tuple[int, ...],
+            removed: tuple[int, ...],
+            value: float,
+        ) -> dict[str, np.ndarray]:
+            result = {
+                "corridorEvidenceEligible": np.asarray(
+                    eligible, dtype=np.uint8
+                ),
+                "corridorProposalAddedOffset": np.asarray(
+                    added_offset, dtype=np.int64
+                ),
+                "corridorProposalAddedFrontierIndex": np.asarray(
+                    added, dtype=np.int32
+                ),
+                "corridorProposalRemovedOffset": np.asarray(
+                    removed_offset, dtype=np.int64
+                ),
+                "corridorProposalRemovedFrontierIndex": np.asarray(
+                    removed, dtype=np.int32
+                ),
+            }
+            for name in (
+                "corridorProposalLocalObjective",
+                "corridorProposalObjectiveDelta",
+                "corridorProposalPatchCoverage",
+                "corridorProposalRetainedBoundaryFraction",
+                "corridorProposalBoundaryAnchorCount",
+            ):
+                result[name] = np.full(3, value, dtype=np.float32)
+            return result
+
+        prior = compiled((1, 0, 0), (0, 1, 1, 1), (1,), (0, 1, 1, 1), (2,), 1.0)
+        dormant = compiled((0, 1, 0), (0, 0, 1, 1), (5,), (0, 0, 0, 0), (), 2.0)
+        combined, audit = _combine_compiled_reconfigurations(
+            {},
+            prior,
+            dormant,
+            prior_frontier_to_expanded=np.asarray((10, 11, 12), dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            combined["corridorEvidenceEligible"], (1, 1, 0)
+        )
+        np.testing.assert_array_equal(
+            combined["corridorProposalAddedOffset"], (0, 1, 2, 2)
+        )
+        np.testing.assert_array_equal(
+            combined["corridorProposalAddedFrontierIndex"], (11, 5)
+        )
+        np.testing.assert_array_equal(
+            combined["corridorProposalRemovedFrontierIndex"], (12,)
+        )
+        np.testing.assert_array_equal(
+            combined["corridorProposalObjectiveDelta"], (1.0, 2.0, 1.0)
+        )
+        np.testing.assert_array_equal(
+            audit["combinedCorridorDecisionSource"], (1, 2, 0)
+        )
+
+    def test_dormant_screen_excludes_only_inherited_crossing_debt(self) -> None:
+        crossings = {
+            "crossingFirstFrontierIndex": np.asarray(
+                (0, 0, 1, 2), dtype=np.int32
+            ),
+            "crossingSecondFrontierIndex": np.asarray(
+                (1, 2, 3, 3), dtype=np.int32
+            ),
+            "crossingDistanceVoxels": np.asarray(
+                (0.1, 0.2, 0.3, 0.4), dtype=np.float32
+            ),
+        }
+        conditioned, stats = _condition_crossings_on_immutable_baseline(
+            crossings, np.asarray((1, 1, 0, 0), dtype=bool)
+        )
+        np.testing.assert_array_equal(
+            conditioned["crossingFirstFrontierIndex"], (0, 1, 2)
+        )
+        np.testing.assert_array_equal(
+            conditioned["crossingSecondFrontierIndex"], (2, 3, 3)
+        )
+        self.assertEqual(stats["inheritedBaselineCrossingPairCount"], 1)
+        self.assertEqual(stats["enforcedCounterfactualCrossingPairCount"], 3)
+
+    def test_dormant_additions_are_counted_in_bank_identity_space(self) -> None:
+        variants = {
+            "corridorVariantAddedOffset": np.asarray(
+                (0, 3, 5, 5), dtype=np.int64
+            ),
+            "corridorVariantAddedFrontierIndex": np.asarray(
+                (0, 1, 3, 2, 4), dtype=np.int32
+            ),
+        }
+        expanded_frontier = np.asarray((7, 2, 9, 5, 4), dtype=np.int32)
+        base_bank_mask = np.zeros(10, dtype=bool)
+        base_bank_mask[[2, 4, 7]] = True
+        np.testing.assert_array_equal(
+            _variant_dormant_addition_count(
+                variants, expanded_frontier, base_bank_mask
+            ),
+            (1, 1, 0),
+        )
+
     def test_corridor_extension_preserves_ragged_variant_identity(self) -> None:
         full = {
             "corridorVariantRow": np.asarray((0, 0, 1), dtype=np.int32),

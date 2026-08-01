@@ -1,0 +1,5 @@
+{
+  "maximum_variants_per_corridor": 8,
+  "minimum_dormant_additions_per_variant": 1,
+  "maximum_preview_components": 8
+}
