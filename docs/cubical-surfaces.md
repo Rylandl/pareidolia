@@ -954,6 +954,72 @@ CT field to adaptive surface elements, stitch the complete patch boundary at
 once, and retain the ribbon bank as supporting/collision evidence rather than
 requiring one existing ribbon at every mesh vertex.
 
+### Dense-field surface completion
+
+`complete-physical-ribbon-dense-surfaces` implements that representation
+change.  The mutable unit is still one complete closed boundary, never one
+pixel or frontier cell.  Dense normal-depth samples become geometric vertices
+inside the boundary; existing physical ribbons define exact boundary
+ownership, inherited component context, and collision evidence, but a ribbon
+hypothesis is no longer required at every interior sample.
+
+The boundary contract is combinatorial rather than merely geometric.  The
+last loop is a weakly simple 27-edge walk: two vertices are each visited twice,
+forming three disk cycles that touch at pinch vertices.  Treating it as an
+ordinary polygon would cut across a real surface fan.  The completion stage
+therefore decomposes any repeated-vertex walk into oriented simple cycles and
+verifies that their edge multiset is exactly the original boundary.  Each
+cycle receives an ear-clipped constrained mesh, all sufficiently separated CT
+field samples are inserted, and boundary-preserving Lawson flips improve
+element quality.  A proposal is atomic and is retained only when:
+
+- every target edge has one incident face before and exactly two afterward;
+- no edge has more than two incident faces, no intrinsic triangle overlaps an
+  inherited triangle, and the target macro/interior loop disappears without
+  creating a triangle region;
+- the realized surface clears and does not intersect every other selected
+  component;
+- its realized (not merely fitted) vertex normals retain whole-patch native-CT
+  air-material-air support, boundary-profile correlation, and displaced-layer
+  separation; and
+- high fitted-normal disagreement occupies only a bounded area tail.  This
+  permits a localized CT-supported tight bend without allowing a broad layer
+  jump to hide behind a good median.
+
+On the final 207-pixel residual, 194 samples survive the declared 0.20-voxel
+boundary spacing and produce 409 constrained triangles.  The exact replay
+closes the last macro hole and one interior loop, keeps all 734 triangle
+regions, has zero non-manifold edges, zero intrinsic overlap, and zero broad-
+or narrow-phase intersections with the 27,915 triangles from other selected
+surfaces.  The realized mesh retains 99.485 percent CT support, 0.945 median
+profile correlation, and 0.792 median displaced-layer margin.  Although a
+narrow bend reaches 74.10 degrees relative to the unshifted fitted normal, its
+greater-than-45-degree tail occupies only 8.18 percent of patch area and the
+realized normals remain directly CT-supported.
+
+The independent flattened audit accepts the completed boundary at all three
+fixed ply depths with no nonadjacent chart-overlap pixels.  At center depth the
+new boundary has 9.54 degrees median axial fiber disagreement versus 18.15
+degrees on existing same-component control edges.  This is the decisive check:
+the representation change closes the topology while preserving fiber texture
+better than the surrounding reconstructed surface, rather than manufacturing
+a smooth but wrong bridge.
+
+The reproducible completion and flattened check are:
+
+```bash
+python -m backend.cubical complete-physical-ribbon-dense-surfaces \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-topology-variants-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-depth-fields-topology-variants-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-topology-variants-v1 \
+  --settings-json examples/physical-ribbon-dense-completion.json
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-topology-variants-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-flat-audit-v1 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+```
+
 The accepted artifacts are rooted at:
 
 ```text
@@ -969,6 +1035,8 @@ work/multiseam-2x2-b00c03c/physical-ribbon-flat-texture-topology-variants-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-texture-gate-topology-variants-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-patch-holes-topology-variants-v1
 work/multiseam-2x2-b00c03c/physical-ribbon-patch-state-binary-topology-v2
+work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-topology-variants-v1
+work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-flat-audit-v1
 ```
 
 The reproducible dense-field sequence is:

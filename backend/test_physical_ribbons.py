@@ -36,6 +36,11 @@ from backend.cubical.physical_ribbon_depth_fields import (
     _profile_fields,
     solve_collective_depth_labels,
 )
+from backend.cubical.physical_ribbon_dense_completion import (
+    PhysicalRibbonDenseCompletionSettings,
+    decompose_weak_boundary_cycles,
+    triangulate_weak_boundary_field,
+)
 from backend.cubical.physical_ribbon_patch_states import (
     PhysicalRibbonPatchStateSettings,
     _lineage_audit,
@@ -1238,6 +1243,102 @@ class PhysicalRibbonDepthFieldTests(unittest.TestCase):
         self.assertGreater(float(correlation[0, 0]), 0.99)
         self.assertLess(float(physical[0, 1]), 0.0)
         self.assertLess(float(correlation[0, 1]), -0.9)
+
+
+class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
+    def test_pinched_boundary_is_decomposed_without_losing_edges(self) -> None:
+        boundary = np.asarray((0, 1, 2, 3, 4, 2, 5, 6), dtype=np.int32)
+        cycles = decompose_weak_boundary_cycles(boundary)
+        self.assertEqual(
+            [value.tolist() for value in cycles],
+            [[2, 3, 4], [0, 1, 2, 5, 6]],
+        )
+        original = {
+            tuple(
+                sorted(
+                    (
+                        int(boundary[index]),
+                        int(boundary[(index + 1) % len(boundary)]),
+                    )
+                )
+            )
+            for index in range(len(boundary))
+        }
+        decomposed = {
+            tuple(
+                sorted(
+                    (
+                        int(cycle[index]),
+                        int(cycle[(index + 1) % len(cycle)]),
+                    )
+                )
+            )
+            for cycle in cycles
+            for index in range(len(cycle))
+        }
+        self.assertEqual(decomposed, original)
+
+    def test_dense_field_triangulation_closes_every_pinched_cycle_edge(self) -> None:
+        boundary = np.asarray((0, 1, 2, 3, 4, 2, 5, 6), dtype=np.int32)
+        chart = np.asarray(
+            (
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (2.0, 2.0),
+                (3.0, 2.0),
+                (2.5, 3.0),
+                (1.0, 3.0),
+                (0.0, 2.0),
+            ),
+            dtype=np.float32,
+        )
+        field = np.asarray(((1.0, 1.0), (2.5, 2.35)), dtype=np.float32)
+        mesh, statistics = triangulate_weak_boundary_field(
+            boundary,
+            chart[boundary],
+            field,
+            minimum_boundary_separation=0.01,
+            maximum_edge_flip_iterations=1024,
+        )
+        self.assertEqual(statistics["pinchCycleCount"], 2)
+        self.assertTrue(statistics["exactBoundaryPreserved"])
+        self.assertEqual(statistics["retainedFieldPixelCount"], 2)
+        point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
+        point_kind = np.asarray(mesh["pointKind"], dtype=np.uint8)
+        local = {
+            int(source): index
+            for index, source in enumerate(point_source)
+            if point_kind[index] == 0
+        }
+        expected = {
+            tuple(
+                sorted(
+                    (
+                        local[int(boundary[index])],
+                        local[int(boundary[(index + 1) % len(boundary)])],
+                    )
+                )
+            )
+            for index in range(len(boundary))
+        }
+        incidence: dict[tuple[int, int], int] = {}
+        for triangle in np.asarray(mesh["trianglePointIndex"], dtype=np.int32):
+            for index, first in enumerate(triangle):
+                second = int(triangle[(index + 1) % 3])
+                edge = (min(int(first), second), max(int(first), second))
+                incidence[edge] = incidence.get(edge, 0) + 1
+        self.assertTrue(all(incidence[edge] == 1 for edge in expected))
+        self.assertFalse(any(value > 2 for value in incidence.values()))
+        self.assertEqual(
+            {edge for edge, count in incidence.items() if count == 1}, expected
+        )
+
+    def test_normal_tail_gate_is_bounded_below_absolute_gate(self) -> None:
+        with self.assertRaises(ValueError):
+            PhysicalRibbonDenseCompletionSettings(
+                high_triangle_normal_residual_degrees=80.0,
+                maximum_triangle_normal_residual_degrees=70.0,
+            )
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):

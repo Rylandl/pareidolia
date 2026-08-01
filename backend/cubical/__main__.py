@@ -123,6 +123,10 @@ from .physical_ribbon_depth_fields import (
     PhysicalRibbonDepthFieldSettings,
     run_physical_ribbon_depth_fields,
 )
+from .physical_ribbon_dense_completion import (
+    PhysicalRibbonDenseCompletionSettings,
+    run_physical_ribbon_dense_completion,
+)
 from .physical_ribbon_texture_gate import run_physical_ribbon_texture_gate
 from .physical_ribbon_patch_holes import (
     PhysicalRibbonPatchHoleSettings,
@@ -919,6 +923,22 @@ def _physical_ribbon_depth_fields(args: argparse.Namespace) -> None:
         args.holes,
         args.output,
         settings=PhysicalRibbonDepthFieldSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_dense_completion(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_dense_completion(
+        args.holes,
+        args.depth_field,
+        args.output,
+        settings=PhysicalRibbonDenseCompletionSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2971,6 +2991,28 @@ def main() -> None:
     physical_ribbon_depth_fields.add_argument("--force", action="store_true")
     physical_ribbon_depth_fields.set_defaults(
         handler=_physical_ribbon_depth_fields
+    )
+    physical_ribbon_dense_completion = subparsers.add_parser(
+        "complete-physical-ribbon-dense-surfaces",
+        description=(
+            "Promote each complete collective native-CT depth field to one "
+            "edge-exact constrained surface patch, retaining it only when "
+            "whole-loop manifold, chart, competing-layer, and CT audits pass."
+        ),
+    )
+    physical_ribbon_dense_completion.add_argument(
+        "--holes", type=Path, required=True
+    )
+    physical_ribbon_dense_completion.add_argument(
+        "--depth-field", type=Path, required=True
+    )
+    physical_ribbon_dense_completion.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_dense_completion.add_argument("--settings-json", type=Path)
+    physical_ribbon_dense_completion.add_argument("--force", action="store_true")
+    physical_ribbon_dense_completion.set_defaults(
+        handler=_physical_ribbon_dense_completion
     )
     physical_ribbon_patch_corridors = subparsers.add_parser(
         "analyze-physical-ribbon-patch-corridors",
