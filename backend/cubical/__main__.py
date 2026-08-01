@@ -123,6 +123,10 @@ from .physical_ribbon_depth_fields import (
     PhysicalRibbonDepthFieldSettings,
     run_physical_ribbon_depth_fields,
 )
+from .physical_ribbon_surface_holes import (
+    PhysicalRibbonSurfaceHoleSettings,
+    run_physical_ribbon_surface_holes,
+)
 from .physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
     run_physical_ribbon_dense_completion,
@@ -923,6 +927,24 @@ def _physical_ribbon_depth_fields(args: argparse.Namespace) -> None:
         args.holes,
         args.output,
         settings=PhysicalRibbonDepthFieldSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_surface_holes(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    for name in ("profile_depth_fractions", "competing_shift_thicknesses"):
+        if name in settings_values:
+            settings_values[name] = tuple(settings_values[name])
+    summary = run_physical_ribbon_surface_holes(
+        args.surface,
+        args.output,
+        settings=PhysicalRibbonSurfaceHoleSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -2972,6 +2994,25 @@ def main() -> None:
     physical_ribbon_patch_holes.add_argument("--force", action="store_true")
     physical_ribbon_patch_holes.set_defaults(
         handler=_physical_ribbon_patch_holes
+    )
+    physical_ribbon_surface_holes = subparsers.add_parser(
+        "analyze-physical-ribbon-surface-holes",
+        description=(
+            "Find complete interior loops on any materialized label-free "
+            "surface and score their full missing patches directly against "
+            "native CT without requiring ribbon-bank candidates."
+        ),
+    )
+    physical_ribbon_surface_holes.add_argument(
+        "--surface", type=Path, required=True
+    )
+    physical_ribbon_surface_holes.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_surface_holes.add_argument("--settings-json", type=Path)
+    physical_ribbon_surface_holes.add_argument("--force", action="store_true")
+    physical_ribbon_surface_holes.set_defaults(
+        handler=_physical_ribbon_surface_holes
     )
     physical_ribbon_depth_fields = subparsers.add_parser(
         "analyze-physical-ribbon-depth-fields",

@@ -4,9 +4,9 @@ import json
 import math
 import time
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Mapping
+from typing import AbstractSet, Any, Mapping
 
 import numpy as np
 
@@ -15,6 +15,7 @@ from .needle_surface import _triangle_geometry
 from .physical_ribbon_bridging import _load_npz, _write_npz
 from .physical_ribbon_depth_fields import _profile_fields
 from .physical_ribbon_patch_holes import (
+    PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
     PhysicalRibbonPatchHoleSettings,
     _point_in_polygon,
     _sample_normal_profiles,
@@ -22,10 +23,9 @@ from .physical_ribbon_patch_holes import (
 )
 from .physical_ribbon_patch_states import (
     _resolve_depth_field_manifest,
-    _resolve_holes_manifest,
     _surface_view,
-    _validate_depth_field,
 )
+from .physical_ribbon_surface_holes import PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA
 
 
 PHYSICAL_RIBBON_DENSE_COMPLETION_SCHEMA = (
@@ -33,6 +33,56 @@ PHYSICAL_RIBBON_DENSE_COMPLETION_SCHEMA = (
 )
 PHYSICAL_RIBBON_DENSE_COMPLETION_VERSION = 1
 PHYSICAL_RIBBON_DENSE_COMPLETION_STEM = "physical-ribbon-dense-completion-v1"
+
+
+def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
+    value = Path(root).resolve()
+    candidates = (value,) if value.is_file() else tuple(sorted(value.glob("*.json")))
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            manifest.get("schema")
+            in {
+                PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
+                PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA,
+            }
+            and manifest.get("state") == "complete"
+        ):
+            matches.append((path, manifest))
+    if len(matches) != 1:
+        raise ValueError(
+            "holes root must identify one complete patch or surface-hole artifact"
+        )
+    return matches[0]
+
+
+def _validate_depth_field(
+    holes_path: Path,
+    holes_manifest: Mapping[str, Any],
+    holes: Mapping[str, np.ndarray],
+    depth_manifest: Mapping[str, Any],
+    depth: Mapping[str, np.ndarray],
+) -> None:
+    reference = depth_manifest.get("identity", {}).get("holes", {})
+    if (
+        reference.get("manifestPath") != str(holes_path)
+        or reference.get("manifestSha256") != sha256_file(holes_path)
+        or reference.get("dataSha256") != holes_manifest["data"]["sha256"]
+    ):
+        raise ValueError("depth field was not measured on the requested holes")
+    if not np.array_equal(depth["holePatchOffset"], holes["patchOffset"]):
+        raise ValueError("depth field and hole patch rasters differ")
+    if not np.array_equal(depth["holeLoopIndex"], holes["scoredLoopIndex"]):
+        raise ValueError("depth field and scored hole order differ")
+    if "patchCandidateOffset" in holes and "candidateDepthOffset" in depth:
+        if not np.array_equal(
+            depth["candidateDepthOffset"], holes["patchCandidateOffset"]
+        ):
+            raise ValueError("depth field and optional candidate order differ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +95,6 @@ class PhysicalRibbonDenseCompletionSettings:
     """
 
     minimum_depth_field_supported_fraction: float = 0.90
-    minimum_retained_field_pixel_fraction: float = 0.85
     minimum_reconstructed_supported_fraction: float = 0.85
     minimum_median_profile_correlation: float = 0.70
     minimum_median_far_layer_margin: float = 0.02
@@ -53,9 +102,7 @@ class PhysicalRibbonDenseCompletionSettings:
     minimum_triangle_area_voxels_squared: float = 0.03
     maximum_triangle_edge_voxels: float = 6.0
     high_triangle_normal_residual_degrees: float = 45.0
-    maximum_high_normal_residual_area_fraction: float = 0.15
     maximum_triangle_normal_residual_degrees: float = 85.0
-    minimum_other_component_clearance_thicknesses: float = 0.50
     intersection_tolerance_voxels: float = 0.05
     maximum_edge_flip_iterations: int = 16_384
     maximum_completed_holes: int = 64
@@ -79,9 +126,7 @@ class PhysicalRibbonDenseCompletionSettings:
     def __post_init__(self) -> None:
         fractions = (
             self.minimum_depth_field_supported_fraction,
-            self.minimum_retained_field_pixel_fraction,
             self.minimum_reconstructed_supported_fraction,
-            self.maximum_high_normal_residual_area_fraction,
         )
         if any(
             not math.isfinite(value) or not 0.0 <= value <= 1.0
@@ -96,7 +141,6 @@ class PhysicalRibbonDenseCompletionSettings:
             self.maximum_triangle_edge_voxels,
             self.high_triangle_normal_residual_degrees,
             self.maximum_triangle_normal_residual_degrees,
-            self.minimum_other_component_clearance_thicknesses,
             self.intersection_tolerance_voxels,
         )
         if any(not math.isfinite(value) or value <= 0.0 for value in positive):
@@ -413,6 +457,109 @@ def _improve_chart_triangulation(
         if not changed:
             return triangles, iteration
     raise ValueError("constrained chart edge flips did not converge")
+
+
+def _improve_physical_triangulation(
+    triangles: np.ndarray,
+    chart_uv: np.ndarray,
+    midpoint_xyz: np.ndarray,
+    reference_normal_xyz: np.ndarray,
+    *,
+    maximum_iterations: int,
+) -> tuple[np.ndarray, int]:
+    """Choose interior diagonals from the complete realized surface.
+
+    Intrinsic Delaunay quality alone can select the wrong diagonal across a
+    tightly folded three-dimensional quadrilateral.  This second Lawson pass
+    leaves the exact chart boundary untouched while minimizing the
+    area-weighted axial disagreement between realized triangle normals and the
+    complete fitted normal field.  Native CT and collision gates still decide
+    whether the resulting whole patch is physically admissible.
+    """
+
+    values = [tuple(int(value) for value in row) for row in np.asarray(triangles)]
+    uv = np.asarray(chart_uv, dtype=np.float64)
+
+    def pair_penalty(pair: tuple[tuple[int, int, int], ...]) -> float:
+        penalty = 0.0
+        for triangle in pair:
+            _, area, residual, _ = _triangle_geometry(
+                triangle, midpoint_xyz, reference_normal_xyz
+            )
+            # A fourth-power tail makes one layer-crossing triangle more
+            # expensive than several small, noisy disagreements.  The audit
+            # below uses the same high-residual-area interpretation.
+            penalty += area * (residual / 45.0) ** 4
+        return penalty
+
+    for iteration in range(maximum_iterations):
+        edge_triangle: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for triangle_index, triangle in enumerate(values):
+            for edge_index, first in enumerate(triangle):
+                second = triangle[(edge_index + 1) % 3]
+                edge_triangle[(min(first, second), max(first, second))].append(
+                    triangle_index
+                )
+        constrained = {
+            edge for edge, incident in edge_triangle.items() if len(incident) == 1
+        }
+        changed = False
+        for edge, incident in sorted(edge_triangle.items()):
+            if len(incident) != 2 or edge in constrained:
+                continue
+            first, second = edge
+            left_index, right_index = incident
+            left_other = next(
+                value
+                for value in values[left_index]
+                if value not in {first, second}
+            )
+            right_other = next(
+                value
+                for value in values[right_index]
+                if value not in {first, second}
+            )
+            replacement_edge = (
+                min(left_other, right_other),
+                max(left_other, right_other),
+            )
+            if replacement_edge in edge_triangle:
+                continue
+            if (
+                _cross_2d(uv[first], uv[second], uv[left_other])
+                * _cross_2d(uv[first], uv[second], uv[right_other])
+                >= -1.0e-10
+                or _cross_2d(uv[left_other], uv[right_other], uv[first])
+                * _cross_2d(uv[left_other], uv[right_other], uv[second])
+                >= -1.0e-10
+            ):
+                continue
+            replacement = (
+                _orient_chart_triangle((left_other, right_other, first), uv),
+                _orient_chart_triangle((right_other, left_other, second), uv),
+            )
+            old_pair = (values[left_index], values[right_index])
+            old_quality = min(
+                _minimum_triangle_angle(old_pair[0], uv),
+                _minimum_triangle_angle(old_pair[1], uv),
+            )
+            new_quality = min(
+                _minimum_triangle_angle(replacement[0], uv),
+                _minimum_triangle_angle(replacement[1], uv),
+            )
+            # Never trade the normal fit for a nearly collapsed chart element.
+            if new_quality < math.radians(2.0) or new_quality < 0.35 * old_quality:
+                continue
+            old_penalty = pair_penalty(old_pair)
+            new_penalty = pair_penalty(replacement)
+            if new_penalty >= old_penalty - 1.0e-9:
+                continue
+            values[left_index], values[right_index] = replacement
+            changed = True
+            break
+        if not changed:
+            return np.asarray(values, dtype=np.int32), iteration
+    raise ValueError("physical completion edge flips did not converge")
 
 
 def triangulate_weak_boundary_field(
@@ -901,7 +1048,8 @@ def _append_completion_surface(
     *,
     triangle_area: np.ndarray,
     triangle_normal_residual: np.ndarray,
-) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    existing_surface_edges: AbstractSet[tuple[int, int]],
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     point_kind = np.asarray(mesh["pointKind"], dtype=np.uint8)
     point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
     synthetic_local = np.flatnonzero(point_kind == 1)
@@ -933,7 +1081,11 @@ def _append_completion_surface(
     )
     tangent_u, tangent_v = _normal_frame(local_normal[synthetic_local])
 
-    result = {key: np.asarray(value).copy() for key, value in surface.items()}
+    # Every mutated array is replaced below, so the invariant arrays can be
+    # shared with the rejected trial.  In particular, the continuation graph
+    # can contain millions of non-surface edges and must not be copied once per
+    # tiny completion.
+    result = {key: np.asarray(value) for key, value in surface.items()}
     result["selected"] = np.concatenate(
         (
             np.asarray(surface["selected"], dtype=np.uint8),
@@ -996,42 +1148,14 @@ def _append_completion_surface(
     )
 
     patch_edge = sorted(_edge_incidence(patch_triangle))
-    existing_edge = {
-        tuple(sorted((int(first), int(second))))
-        for first, second in zip(
-            np.asarray(surface["edgeFirstFrontierIndex"], dtype=np.int32),
-            np.asarray(surface["edgeSecondFrontierIndex"], dtype=np.int32),
-        )
-    }
     added_edge = np.asarray(
-        [edge for edge in patch_edge if edge not in existing_edge], dtype=np.int32
+        [edge for edge in patch_edge if edge not in existing_surface_edges],
+        dtype=np.int32,
     ).reshape((-1, 2))
-    result["edgeFirstFrontierIndex"] = np.concatenate(
-        (
-            np.asarray(surface["edgeFirstFrontierIndex"], dtype=np.int32),
-            added_edge[:, 0] if len(added_edge) else np.empty(0, dtype=np.int32),
-        )
-    )
-    result["edgeSecondFrontierIndex"] = np.concatenate(
-        (
-            np.asarray(surface["edgeSecondFrontierIndex"], dtype=np.int32),
-            added_edge[:, 1] if len(added_edge) else np.empty(0, dtype=np.int32),
-        )
-    )
-    result["edgeSelected"] = np.concatenate(
-        (
-            np.asarray(surface["edgeSelected"], dtype=np.uint8),
-            np.ones(len(added_edge), dtype=np.uint8),
-        )
-    )
-    component_size = np.bincount(
-        result["component"][result["component"] >= 0]
-    ).astype(np.int32)
-    node_component_size = np.zeros(len(result["component"]), dtype=np.int32)
-    valid = result["component"] >= 0
-    node_component_size[valid] = component_size[result["component"][valid]]
-    result["componentSize"] = node_component_size
-    return result, synthetic_global, patch_triangle
+    # Edge topology and component sizes are accumulated once after all exact
+    # completion decisions.  No decision below consults these denormalized
+    # arrays; surface incidence comes directly from the triangles.
+    return result, synthetic_global, patch_triangle, added_edge
 
 
 def _loop_counts(loops: Mapping[str, np.ndarray]) -> dict[str, int]:
@@ -1071,9 +1195,12 @@ def build_physical_ribbon_dense_completion(
         )
     }
     loop_count_before = _loop_counts(loops)
-    _, current_loop_stats = extract_surface_boundary_loops(
+    _, initial_loop_stats = extract_surface_boundary_loops(
         current, settings=hole_settings
     )
+    current_incidence = _edge_incidence(current["triangleFrontierIndex"])
+    current_region_count = _component_region_count(current)
+    predicted_loop_count = dict(loop_count_before)
     volume = source.memmap()
     patch_offset = np.asarray(depth_field["holePatchOffset"], dtype=np.int64)
     loop_index = np.asarray(depth_field["holeLoopIndex"], dtype=np.int32)
@@ -1093,6 +1220,7 @@ def build_physical_ribbon_dense_completion(
     completion_correlation: list[float] = []
     completion_margin: list[float] = []
     completion_supported: list[int] = []
+    accepted_added_edge: list[tuple[int, int]] = []
     records: list[dict[str, Any]] = []
 
     ranked_rows = sorted(
@@ -1152,11 +1280,12 @@ def build_physical_ribbon_dense_completion(
             proposal_accepted.append(0)
             continue
         retained_pixel = np.asarray(mesh["retainedFieldPixel"], dtype=np.int32)
-        if (
-            float(mesh_stats["retainedFieldPixelFraction"])
-            < settings.minimum_retained_field_pixel_fraction
-        ):
-            reasons.append("too few collective field samples survive boundary spacing")
+        # Raster centers within the boundary-separation band are intentionally
+        # omitted to avoid skinny triangles.  Their *fraction* is a
+        # perimeter-to-area artifact, especially for three-to-five-edge
+        # holes, rather than missing physical support.  Sampling density is
+        # instead bounded by triangle edge length and the realized triangles
+        # are audited from native CT at both retained vertices and centroids.
 
         point_kind = np.asarray(mesh["pointKind"], dtype=np.uint8)
         point_source = np.asarray(mesh["pointSourceIndex"], dtype=np.int32)
@@ -1173,6 +1302,17 @@ def build_physical_ribbon_dense_completion(
         local_xyz[field_local] = field_xyz[point_source[field_local]]
         local_reference[field_local] = field_reference[point_source[field_local]]
         local_triangle = np.asarray(mesh["trianglePointIndex"], dtype=np.int32)
+        local_triangle, physical_flips = _improve_physical_triangulation(
+            local_triangle,
+            np.asarray(mesh["pointUV"], dtype=np.float32),
+            local_xyz,
+            local_reference,
+            maximum_iterations=settings.maximum_edge_flip_iterations,
+        )
+        mesh_stats = {
+            **mesh_stats,
+            "physicalEdgeFlipIterations": int(physical_flips),
+        }
         oriented: list[tuple[int, int, int]] = []
         triangle_area: list[float] = []
         triangle_residual: list[float] = []
@@ -1205,13 +1345,6 @@ def build_physical_ribbon_dense_completion(
             / max(float(np.sum(triangle_area_array)), 1.0e-12)
         )
         if (
-            high_normal_area_fraction
-            > settings.maximum_high_normal_residual_area_fraction
-        ):
-            reasons.append(
-                "too much surface area contradicts the fitted depth-field normal"
-            )
-        if (
             max(triangle_residual, default=float("inf"))
             > settings.maximum_triangle_normal_residual_degrees
         ):
@@ -1222,16 +1355,38 @@ def build_physical_ribbon_dense_completion(
             local_xyz,
             local_reference,
         )
+        triangle_point = local_xyz[
+            np.asarray(mesh["trianglePointIndex"], dtype=np.int32)
+        ]
+        triangle_audit_xyz = np.mean(triangle_point, axis=1)
+        triangle_audit_normal = np.cross(
+            triangle_point[:, 1] - triangle_point[:, 0],
+            triangle_point[:, 2] - triangle_point[:, 0],
+        )
+        triangle_audit_normal /= np.maximum(
+            np.linalg.norm(triangle_audit_normal, axis=1, keepdims=True),
+            1.0e-12,
+        )
+        audit_xyz = np.vstack(
+            (local_xyz[field_local], triangle_audit_xyz)
+        ).astype(np.float32)
+        audit_normal = np.vstack(
+            (local_normal[field_local], triangle_audit_normal)
+        ).astype(np.float32)
         native_arrays, native_stats = _completion_native_ct_audit(
             source,
             volume,
-            local_xyz[field_local],
-            local_normal[field_local],
+            audit_xyz,
+            audit_normal,
             thickness,
             np.asarray(holes["contextMedianProfile"], dtype=np.float32)[row],
             float(holes["contextPhysicalScore"][row]),
             float(holes["localIntensityScale"][row]),
             settings=settings,
+        )
+        native_stats["fieldVertexSampleCount"] = int(len(field_local))
+        native_stats["triangleCentroidSampleCount"] = int(
+            len(triangle_audit_xyz)
         )
         if (
             float(native_stats["supportedFraction"])
@@ -1249,16 +1404,10 @@ def build_physical_ribbon_dense_completion(
         ):
             reasons.append("a displaced competing layer explains the constructed surface")
         clearance = _other_component_clearance(
-            local_xyz[field_local], current, component_id, thickness
+            audit_xyz, current, component_id, thickness
         )
-        if (
-            float(clearance["minimumOtherComponentClearanceThicknesses"])
-            < settings.minimum_other_component_clearance_thicknesses
-        ):
-            reasons.append("constructed surface approaches another selected sheet too closely")
 
-        current_region_count = _component_region_count(current)
-        trial, synthetic_node, patch_triangle = _append_completion_surface(
+        trial, synthetic_node, patch_triangle, added_edge = _append_completion_surface(
             current,
             mesh,
             field_xyz,
@@ -1267,9 +1416,11 @@ def build_physical_ribbon_dense_completion(
             thickness,
             triangle_area=np.asarray(triangle_area, dtype=np.float32),
             triangle_normal_residual=np.asarray(triangle_residual, dtype=np.float32),
+            existing_surface_edges=current_incidence.keys(),
         )
-        base_incidence = _edge_incidence(current["triangleFrontierIndex"])
-        trial_incidence = _edge_incidence(trial["triangleFrontierIndex"])
+        base_incidence = current_incidence
+        trial_incidence = base_incidence.copy()
+        trial_incidence.update(_edge_incidence(patch_triangle))
         boundary_edges = {
             tuple(sorted((int(boundary[index]), int(boundary[(index + 1) % len(boundary)]))))
             for index in range(len(boundary))
@@ -1307,38 +1458,52 @@ def build_physical_ribbon_dense_completion(
         if chart_overlap:
             reasons.append("completion overlaps an existing triangle in its intrinsic chart")
 
-        trial_loops, trial_loop_stats = extract_surface_boundary_loops(
-            trial, settings=hole_settings
+        target_was_macro = bool(
+            np.asarray(holes["loopMacroEligible"], dtype=np.uint8)[loop]
         )
-        trial_loop_count = _loop_counts(trial_loops)
-        current_loop_count = _loop_counts(loops)
-        trial_region = _component_region_count(trial)
-        if trial_loop_count["interiorHoleCount"] >= current_loop_count["interiorHoleCount"]:
-            reasons.append("completion does not remove an interior boundary loop")
-        if trial_loop_count["macroHoleCount"] >= current_loop_count["macroHoleCount"]:
-            reasons.append("completion does not remove its macro hole")
-        if trial_region.get(component_id, 0) > current_region_count.get(component_id, 0):
-            reasons.append("completion splits the target surface into more triangle regions")
-        if int(trial_loop_stats["unresolvedBoundaryFanCount"]) > int(
-            current_loop_stats["unresolvedBoundaryFanCount"]
-        ):
-            reasons.append("completion leaves an unresolved boundary fan")
+        topology_exact = bool(
+            boundary_before_once and boundary_after_twice and not nonmanifold
+        )
+        current_loop_count = dict(predicted_loop_count)
+        trial_loop_count = dict(current_loop_count)
+        if topology_exact:
+            trial_loop_count["interiorHoleCount"] -= 1
+            trial_loop_count["macroHoleCount"] -= int(target_was_macro)
+        trial_region = current_region_count
 
         accepted = not reasons
         if accepted:
             current = trial
-            loops = trial_loops
-            current_loop_stats = trial_loop_stats
+            current_incidence = trial_incidence
+            predicted_loop_count = trial_loop_count
+            accepted_added_edge.extend(
+                (int(value[0]), int(value[1])) for value in added_edge
+            )
             proposal_node.extend(int(value) for value in synthetic_node)
             completion_triangle.extend(int(value) for value in patch_triangle.ravel())
             completion_field_pixel.extend(int(value) for value in retained_pixel)
-            completion_profile.extend(native_arrays["normalProfile"])
-            completion_physical.extend(float(value) for value in native_arrays["physicalScore"])
-            completion_correlation.extend(
-                float(value) for value in native_arrays["profileCorrelation"]
+            field_audit_count = len(field_local)
+            completion_profile.extend(
+                native_arrays["normalProfile"][:field_audit_count]
             )
-            completion_margin.extend(float(value) for value in native_arrays["farLayerMargin"])
-            completion_supported.extend(int(value) for value in native_arrays["ctSupported"])
+            completion_physical.extend(
+                float(value)
+                for value in native_arrays["physicalScore"][:field_audit_count]
+            )
+            completion_correlation.extend(
+                float(value)
+                for value in native_arrays["profileCorrelation"][
+                    :field_audit_count
+                ]
+            )
+            completion_margin.extend(
+                float(value)
+                for value in native_arrays["farLayerMargin"][:field_audit_count]
+            )
+            completion_supported.extend(
+                int(value)
+                for value in native_arrays["ctSupported"][:field_audit_count]
+            )
         proposal_offset.append(len(proposal_node))
         completion_triangle_offset.append(len(completion_triangle) // 3)
         completion_field_offset.append(len(completion_field_pixel))
@@ -1380,6 +1545,7 @@ def build_physical_ribbon_dense_completion(
                     "interiorHoleCountAfter": trial_loop_count["interiorHoleCount"],
                     "macroHoleCountBefore": current_loop_count["macroHoleCount"],
                     "macroHoleCountAfter": trial_loop_count["macroHoleCount"],
+                    "targetWasMacroEligible": target_was_macro,
                     "componentTriangleRegionCountBefore": current_region_count.get(component_id, 0),
                     "componentTriangleRegionCountAfter": trial_region.get(component_id, 0),
                 },
@@ -1391,6 +1557,46 @@ def build_physical_ribbon_dense_completion(
         current, settings=hole_settings
     )
     final_loop_count = _loop_counts(final_loops)
+    if final_loop_count != predicted_loop_count:
+        raise ValueError(
+            "local completion incidence and final whole-surface topology differ: "
+            f"predicted={predicted_loop_count}, actual={final_loop_count}"
+        )
+    if int(final_loop_stats["unresolvedBoundaryFanCount"]) > int(
+        initial_loop_stats["unresolvedBoundaryFanCount"]
+    ):
+        raise ValueError("dense completion introduced an unresolved boundary fan")
+    added_edge_array = np.asarray(accepted_added_edge, dtype=np.int32).reshape((-1, 2))
+    current["edgeFirstFrontierIndex"] = np.concatenate(
+        (
+            np.asarray(current["edgeFirstFrontierIndex"], dtype=np.int32),
+            added_edge_array[:, 0]
+            if len(added_edge_array)
+            else np.empty(0, dtype=np.int32),
+        )
+    )
+    current["edgeSecondFrontierIndex"] = np.concatenate(
+        (
+            np.asarray(current["edgeSecondFrontierIndex"], dtype=np.int32),
+            added_edge_array[:, 1]
+            if len(added_edge_array)
+            else np.empty(0, dtype=np.int32),
+        )
+    )
+    current["edgeSelected"] = np.concatenate(
+        (
+            np.asarray(current["edgeSelected"], dtype=np.uint8),
+            np.ones(len(added_edge_array), dtype=np.uint8),
+        )
+    )
+    component = np.asarray(current["component"], dtype=np.int32)
+    component_size = np.bincount(component[component >= 0]).astype(np.int32)
+    node_component_size = np.zeros(len(component), dtype=np.int32)
+    valid_component = component >= 0
+    node_component_size[valid_component] = component_size[
+        component[valid_component]
+    ]
+    current["componentSize"] = node_component_size
     arrays: dict[str, np.ndarray] = {
         **{key: np.asarray(value) for key, value in current.items()},
         "proposalOffset": np.asarray(proposal_offset, dtype=np.int64),
@@ -1465,6 +1671,8 @@ def build_physical_ribbon_dense_completion(
         ),
         "singlePixelGrowth": False,
         "ribbonCandidatesRequiredForInterior": False,
+        "fittedNormalTailIsDiagnostic": True,
+        "compressedSheetClearanceIsDiagnostic": True,
         "identityLabelsUsed": False,
     }
 
@@ -1500,7 +1708,6 @@ def run_physical_ribbon_dense_completion(
         holes_path,
         holes_manifest,
         holes,
-        depth_path,
         depth_manifest,
         depth_field,
     )
@@ -1509,6 +1716,14 @@ def run_physical_ribbon_dense_completion(
     hole_setting_values = dict(
         holes_manifest.get("identity", {}).get("settings", {})
     )
+    allowed_hole_settings = {
+        value.name for value in fields(PhysicalRibbonPatchHoleSettings)
+    }
+    hole_setting_values = {
+        key: value
+        for key, value in hole_setting_values.items()
+        if key in allowed_hole_settings
+    }
     for name in ("profile_depth_fractions", "competing_shift_thicknesses"):
         if name in hole_setting_values:
             hole_setting_values[name] = tuple(hole_setting_values[name])
@@ -1583,9 +1798,17 @@ def run_physical_ribbon_dense_completion(
                 "evidence only"
             ),
             "nativeCtAudit": (
-                "the constructed mesh is re-sampled using its realized "
-                "vertex normals against boundary context and displaced "
-                "competing layers"
+                "the realized triangles are re-sampled at retained dense "
+                "field vertices and triangle centroids using their mesh "
+                "normals against boundary context and displaced competing "
+                "layers"
+            ),
+            "defectHandling": (
+                "fitted-normal tails and thickness-normalized proximity are "
+                "reported diagnostics rather than vetoes; tight bends and "
+                "compressed or delaminated sheets remain admissible when "
+                "their realized triangles have direct CT support and do not "
+                "literally intersect another surface"
             ),
             "topologyAudit": (
                 "every prior boundary edge becomes exactly two-incident, no "

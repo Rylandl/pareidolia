@@ -1,0 +1,7 @@
+{
+  "maximum_scored_holes": 128,
+  "maximum_preview_holes": 24,
+  "minimum_scored_boundary_vertex_count": 3,
+  "minimum_scored_area_chart_voxels_squared": 1.0,
+  "minimum_scored_diameter_mean_boundary_edges": 1.0
+}

@@ -977,33 +977,107 @@ element quality.  A proposal is atomic and is retained only when:
 - no edge has more than two incident faces, no intrinsic triangle overlaps an
   inherited triangle, and the target macro/interior loop disappears without
   creating a triangle region;
-- the realized surface clears and does not intersect every other selected
-  component;
+- the realized surface does not intersect any other selected component;
 - its realized (not merely fitted) vertex normals retain whole-patch native-CT
   air-material-air support, boundary-profile correlation, and displaced-layer
   separation; and
-- high fitted-normal disagreement occupies only a bounded area tail.  This
-  permits a localized CT-supported tight bend without allowing a broad layer
-  jump to hide behind a good median.
+- no realized triangle turns 85 degrees or more from its local fitted-normal
+  frame.  The softer greater-than-45-degree area tail and the distance to
+  neighboring components remain diagnostics: tight bends and compressed or
+  delaminated sheets are decided by direct realized-surface CT support and
+  exact intersection, not vetoed by a quadratic prior or an inferred
+  thickness ratio.
 
 On the final 207-pixel residual, 194 samples survive the declared 0.20-voxel
 boundary spacing and produce 409 constrained triangles.  The exact replay
 closes the last macro hole and one interior loop, keeps all 734 triangle
 regions, has zero non-manifold edges, zero intrinsic overlap, and zero broad-
 or narrow-phase intersections with the 27,915 triangles from other selected
-surfaces.  The realized mesh retains 99.485 percent CT support, 0.945 median
-profile correlation, and 0.792 median displaced-layer margin.  Although a
-narrow bend reaches 74.10 degrees relative to the unshifted fitted normal, its
-greater-than-45-degree tail occupies only 8.18 percent of patch area and the
+surfaces.  Re-sampling all 194 retained field vertices and all 409 realized
+triangle centroids retains 96.517 percent CT support, 0.945 median profile
+correlation, and 0.780 median displaced-layer margin.  Although a narrow bend
+reaches 74.10 degrees relative to the unshifted fitted normal, its
+greater-than-45-degree tail occupies only 7.45 percent of patch area and the
 realized normals remain directly CT-supported.
 
 The independent flattened audit accepts the completed boundary at all three
 fixed ply depths with no nonadjacent chart-overlap pixels.  At center depth the
-new boundary has 9.54 degrees median axial fiber disagreement versus 18.15
+new boundary has 9.78 degrees median axial fiber disagreement versus 18.15
 degrees on existing same-component control edges.  This is the decisive check:
 the representation change closes the topology while preserving fiber texture
 better than the surrounding reconstructed surface, rather than manufacturing
 a smooth but wrong bridge.
+
+### Surface-wide residual closure
+
+The same dense representation is now reusable after the macro-hole pipeline
+has saturated.  `analyze-physical-ribbon-surface-holes` accepts any materialized
+label-free triangle surface, extracts every complete interior loop, and ranks
+loops by physical chart area and diameter.  It does not consult the ribbon
+candidate bank.  This separates the general surface-completion contract from
+the historical definition of a six-or-more-edge "macro" hole.
+
+On the completed 512-deep block, the remaining census contains 99 interior
+loops and no macro loops.  All are three-to-five-edge loops; 92 exceed one
+square chart voxel and together contain 988 dense raster samples.  The
+candidate-free ordered-label solve finds direct native-CT support at 986 of
+988 samples.  These are complete normal-depth fields with truncated
+smoothness and displaced-layer competition, not independent pixel-growth
+decisions.
+
+The completion stage then reconstructs and audits all 92 loops against the
+evolving block surface.  Intrinsic Delaunay triangles receive a second
+boundary-preserving edge-flip pass using the complete realized 3-D surface,
+which avoids choosing a chart-preferred diagonal across a tight physical
+bend.  Exact local edge incidence proves each atomic closure; one final
+whole-surface boundary extraction verifies the aggregate prediction.  The
+invariant 6.3-million-edge continuation graph is shared rather than copied and
+rescanned for every proposal, reducing the complete 92-hole solve to about
+6.3 seconds.
+
+Seventy-two loops pass the native-CT, geometry, topology, displaced-layer, and
+intersection contracts.  They add 553 dense vertices and 1,266 triangles,
+reduce interior loops from 99 to 27, preserve all 734 triangle regions, and
+leave zero unresolved boundary fans or non-cycle boundaries.  The 20 scored
+rejections now fail substantive realized-surface evidence: 20 lose required CT
+support, eight lose boundary-profile correlation, seven violate the hard
+normal limit, two contain overlong triangles, and two prefer a displaced
+layer (categories overlap).  The other seven residual loops are below the
+declared one-square-voxel analysis floor.
+
+All 41 affected components are independently flattened and sampled from the
+source scan at three fixed ply depths.  Every component has enough boundary
+texture to measure; all 41 are compatible with their own unchanged
+same-surface controls at at least one depth, with zero texture-incompatible or
+unmeasured fragments.  This is the acceptance evidence for retaining the
+CT-led treatment of tight bends and compressed proximity.  Fitted-normal tail
+and thickness-normalized clearance remain published diagnostics rather than
+being tuned into slice-specific truth labels.
+
+The reusable residual sequence is:
+
+```bash
+python -m backend.cubical analyze-physical-ribbon-surface-holes \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-topology-variants-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-surface-holes-meso-v1 \
+  --settings-json examples/physical-ribbon-surface-holes.json
+
+python -m backend.cubical analyze-physical-ribbon-depth-fields \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-surface-holes-meso-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-depth-fields-meso-v1 \
+  --settings-json examples/physical-ribbon-depth-fields.json
+
+python -m backend.cubical complete-physical-ribbon-dense-surfaces \
+  --holes work/multiseam-2x2-b00c03c/physical-ribbon-surface-holes-meso-v1 \
+  --depth-field work/multiseam-2x2-b00c03c/physical-ribbon-depth-fields-meso-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-v1 \
+  --settings-json examples/physical-ribbon-dense-completion.json
+
+python -m backend.cubical audit-physical-ribbon-flat-texture \
+  --surface work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-v1 \
+  --output work/multiseam-2x2-b00c03c/physical-ribbon-dense-completion-meso-flat-audit-v1 \
+  --settings-json examples/physical-ribbon-flattened-audit.json
+```
 
 The reproducible completion and flattened check are:
 

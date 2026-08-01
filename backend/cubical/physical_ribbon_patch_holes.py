@@ -891,8 +891,20 @@ def score_surface_patch_holes(
     source: VolumeSource,
     *,
     settings: PhysicalRibbonPatchHoleSettings,
+    loop_indices: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    eligible = np.flatnonzero(np.asarray(loops["loopMacroEligible"]) > 0)
+    eligible = (
+        np.flatnonzero(np.asarray(loops["loopMacroEligible"]) > 0)
+        if loop_indices is None
+        else np.asarray(loop_indices, dtype=np.int32)
+    )
+    if len(eligible) and (
+        np.any(eligible < 0)
+        or np.any(eligible >= len(np.asarray(loops["loopKind"])))
+        or len(np.unique(eligible)) != len(eligible)
+        or np.any(np.asarray(loops["loopKind"], dtype=np.uint8)[eligible] != 1)
+    ):
+        raise ValueError("explicit patch-hole rows must be unique interior loops")
     if len(eligible):
         area = np.asarray(loops["loopAreaChartVoxelsSquared"])
         eligible = eligible[

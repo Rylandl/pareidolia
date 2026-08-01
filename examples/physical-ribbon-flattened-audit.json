@@ -1,4 +1,4 @@
 {
-  "maximum_components": 16,
+  "maximum_components": 128,
   "minimum_boundary_edge_measurements": 6
 }

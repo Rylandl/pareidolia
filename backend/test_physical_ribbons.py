@@ -39,6 +39,7 @@ from backend.cubical.physical_ribbon_depth_fields import (
 from backend.cubical.physical_ribbon_dense_completion import (
     PhysicalRibbonDenseCompletionSettings,
     decompose_weak_boundary_cycles,
+    _improve_physical_triangulation,
     triangulate_weak_boundary_field,
 )
 from backend.cubical.physical_ribbon_patch_states import (
@@ -65,6 +66,10 @@ from backend.cubical.physical_ribbon_patch_holes import (
     _fit_patch_models,
     _point_in_polygon,
     extract_surface_boundary_loops,
+)
+from backend.cubical.physical_ribbon_surface_holes import (
+    PhysicalRibbonSurfaceHoleSettings,
+    _selected_interior_loops,
 )
 from backend.cubical.physical_ribbon_patch_corridors import (
     PhysicalRibbonPatchCorridorSettings,
@@ -993,6 +998,29 @@ class PhysicalRibbonBridgingTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchHoleTests(unittest.TestCase):
+    def test_surface_hole_selector_uses_physical_loop_scale_not_macro_label(self) -> None:
+        loops = {
+            "loopOffset": np.asarray((0, 3, 7, 12, 16), dtype=np.int64),
+            "loopKind": np.asarray((1, 1, 1, 0), dtype=np.uint8),
+            "loopAreaChartVoxelsSquared": np.asarray(
+                (2.0, 5.0, 0.5, 100.0), dtype=np.float32
+            ),
+            "loopDiameterChartVoxels": np.asarray(
+                (2.0, 2.0, 2.0, 10.0), dtype=np.float32
+            ),
+            "loopMeanBoundaryEdgeVoxels": np.ones(4, dtype=np.float32),
+        }
+        selected = _selected_interior_loops(
+            loops,
+            settings=PhysicalRibbonSurfaceHoleSettings(
+                maximum_scored_holes=2,
+                minimum_scored_boundary_vertex_count=3,
+                minimum_scored_area_chart_voxels_squared=1.0,
+                minimum_scored_diameter_mean_boundary_edges=1.0,
+            ),
+        )
+        np.testing.assert_array_equal(selected, (1, 0))
+
     def test_counterexample_trim_rebuilds_complete_hole_state(self) -> None:
         candidates = [
             {
@@ -1246,6 +1274,53 @@ class PhysicalRibbonDepthFieldTests(unittest.TestCase):
 
 
 class PhysicalRibbonDenseCompletionTests(unittest.TestCase):
+    def test_physical_edge_flip_preserves_boundary_and_improves_curved_quad(self) -> None:
+        chart = np.asarray(
+            ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+            dtype=np.float32,
+        )
+        x_value, y_value = chart[:, 0], chart[:, 1]
+        scale = -0.2
+        z_value = scale * (
+            x_value * x_value
+            + x_value * y_value
+            + y_value * y_value
+            + x_value
+            + y_value
+        )
+        midpoint = np.column_stack((x_value, y_value, z_value)).astype(
+            np.float32
+        )
+        derivative_x = scale * (2.0 * x_value + y_value + 1.0)
+        derivative_y = scale * (x_value + 2.0 * y_value + 1.0)
+        normal = np.column_stack(
+            (-derivative_x, -derivative_y, np.ones(4, dtype=np.float32))
+        )
+        normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+        initial = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int32)
+        improved, iterations = _improve_physical_triangulation(
+            initial,
+            chart,
+            midpoint,
+            normal,
+            maximum_iterations=32,
+        )
+        self.assertGreater(iterations, 0)
+        initial_boundary = {
+            (0, 1), (1, 2), (2, 3), (0, 3)
+        }
+        incidence: dict[tuple[int, int], int] = {}
+        for triangle in improved:
+            for index, first in enumerate(triangle):
+                second = int(triangle[(index + 1) % 3])
+                edge = (min(int(first), second), max(int(first), second))
+                incidence[edge] = incidence.get(edge, 0) + 1
+        self.assertEqual(
+            {edge for edge, count in incidence.items() if count == 1},
+            initial_boundary,
+        )
+        self.assertIn((1, 3), incidence)
+
     def test_pinched_boundary_is_decomposed_without_losing_edges(self) -> None:
         boundary = np.asarray((0, 1, 2, 3, 4, 2, 5, 6), dtype=np.int32)
         cycles = decompose_weak_boundary_cycles(boundary)

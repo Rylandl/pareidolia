@@ -14,15 +14,41 @@ from .export import rgb_png
 from .flatten import _draw_text
 from .physical_ribbon_bridging import _load_npz, _write_npz
 from .physical_ribbon_patch_holes import (
+    PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
     _loop_vertices,
     _sample_normal_profiles,
 )
-from .physical_ribbon_patch_states import _resolve_holes_manifest
+from .physical_ribbon_surface_holes import PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA
 
 
 PHYSICAL_RIBBON_DEPTH_FIELD_SCHEMA = "pareidolia.physical-ribbon-depth-field"
 PHYSICAL_RIBBON_DEPTH_FIELD_VERSION = 1
 PHYSICAL_RIBBON_DEPTH_FIELD_STEM = "physical-ribbon-depth-field-v1"
+
+
+def _resolve_holes_manifest(root: str | Path) -> tuple[Path, dict[str, Any]]:
+    value = Path(root).resolve()
+    candidates = (value,) if value.is_file() else tuple(sorted(value.glob("*.json")))
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in candidates:
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            manifest.get("schema")
+            in {
+                PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
+                PHYSICAL_RIBBON_SURFACE_HOLES_SCHEMA,
+            }
+            and manifest.get("state") == "complete"
+        ):
+            matches.append((path, manifest))
+    if len(matches) != 1:
+        raise ValueError(
+            "holes root must identify exactly one complete patch or surface-hole artifact"
+        )
+    return matches[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,6 +540,12 @@ def build_physical_ribbon_depth_fields(
     context_profile = np.asarray(holes["contextMedianProfile"], dtype=np.float32)
     intensity_scale = np.asarray(holes["localIntensityScale"], dtype=np.float32)
     context_score = np.asarray(holes["contextPhysicalScore"], dtype=np.float32)
+    candidate_bank_used = bool(
+        np.asarray(
+            holes.get("candidateBankUsed", np.ones(1, dtype=np.uint8)),
+            dtype=np.uint8,
+        )[0]
+    )
 
     coordinate_values: list[np.ndarray] = []
     edge_first_values: list[np.ndarray] = []
@@ -622,11 +654,24 @@ def build_physical_ribbon_depth_fields(
         support_fraction = float(np.mean(supported)) if len(supported) else 0.0
         compatible_coverage = float(np.mean(coverage["candidateCompatibleNearby"]))
         direct_coverage = float(np.mean(coverage["candidateCompatibleDirect"]))
-        failure = _failure_class(
-            coherent_fraction,
-            compatible_coverage,
-            minimum_coherent_support=settings.minimum_coherent_support_fraction,
-            minimum_candidate_coverage=settings.minimum_candidate_coverage_fraction,
+        failure = (
+            _failure_class(
+                coherent_fraction,
+                compatible_coverage,
+                minimum_coherent_support=(
+                    settings.minimum_coherent_support_fraction
+                ),
+                minimum_candidate_coverage=(
+                    settings.minimum_candidate_coverage_fraction
+                ),
+            )
+            if candidate_bank_used
+            else (
+                "surface-completion-ready"
+                if coherent_fraction
+                >= settings.minimum_coherent_support_fraction
+                else "ct-or-model-ambiguous"
+            )
         )
         chosen_shift = shifts[collective]
         edge_jump = (
@@ -795,6 +840,7 @@ def build_physical_ribbon_depth_fields(
         "profileSampleCount": int(pixel_count * label_count * profile_count),
         "ctSupportedPixelCount": int(np.count_nonzero(arrays["pixelCtSupported"])),
         "failureClassCount": class_count,
+        "candidateBankUsed": candidate_bank_used,
         "singlePixelGrowth": False,
         "selectionMutated": False,
         "identityLabelsUsed": False,
@@ -1015,7 +1061,12 @@ def run_physical_ribbon_depth_fields(
             "optimization": "multi-start alternating exact row/column Viterbi fields with truncated physical smoothness",
             "boundaryCondition": "soft attachment to the fitted surrounding surface, strongest at the complete frontier",
             "defectHandling": "truncated depth-jump cost retains coherent delamination steps; no common layer depth is forced",
-            "candidateRole": "ribbon-bank hypotheses are audited after the CT field and never define its data term",
+            "candidateRole": (
+                "ribbon-bank hypotheses are audited after the CT field and "
+                "never define its data term"
+                if statistics["candidateBankUsed"]
+                else "candidate-free surface completion; no ribbon bank was consulted"
+            ),
             "selectionMutated": False,
             "singlePixelGrowth": False,
             "identityLabelsUsed": False,
