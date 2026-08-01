@@ -24,6 +24,7 @@ from .physical_ribbon_corridor_face_replay import (
     _component_inheritance_audit,
     _edge_manifold_audit,
     _hard_conflict_counts,
+    _preserves_prior_component_anchors,
     _selection_contract,
     _supplemental_face_arrays,
 )
@@ -366,7 +367,12 @@ def run_physical_ribbon_complete_strip_replay(
     def valid_modifications(
         added: frozenset[int], removed: frozenset[int]
     ) -> bool:
-        return _modifications_valid(
+        return _preserves_prior_component_anchors(
+            added,
+            removed,
+            baseline_selected=baseline_selected,
+            baseline_component=baseline_component,
+        ) and _modifications_valid(
             added,
             removed,
             baseline_selected=contract["baselineSelected"],

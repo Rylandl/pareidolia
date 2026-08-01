@@ -70,6 +70,10 @@ def _load_prior_replay(
             PHYSICAL_RIBBON_DORMANT_CORRIDORS_STEM,
             "physical-ribbon-one-sided-corridors-v1",
             "physical-ribbon-patch-corridors-v1",
+            "physical-ribbon-complete-strip-replay-v1",
+            "physical-ribbon-lineage-strip-replay-v1",
+            "physical-ribbon-cumulative-corridor-replay-v1",
+            "physical-ribbon-cumulative-hole-replay-v1",
         )
         matches = [
             value / f"{stem}.json"
@@ -91,10 +95,22 @@ def _load_prior_replay(
         )
     data_path = manifest_path.parent / str(manifest["data"]["path"])
     arrays = _load_npz(data_path, manifest["data"]["sha256"])
+    arrays = dict(arrays)
+    if {
+        "selected",
+        "component",
+    }.issubset(arrays):
+        arrays.setdefault(
+            "corridorReplaySelected",
+            np.asarray(arrays["selected"], dtype=np.uint8),
+        )
+        arrays.setdefault(
+            "corridorReplayComponent",
+            np.asarray(arrays["component"], dtype=np.int32),
+        )
     if not {
         "corridorReplaySelected",
         "corridorReplayComponent",
-        "corridorReplayProposalSuccessful",
     }.issubset(arrays):
         raise ValueError("prior artifact does not contain a cumulative replay")
     return (
@@ -129,6 +145,44 @@ def _map_frontier_by_bank(
     if np.any(result < 0):
         raise ValueError("targeted frontier does not contain the source frontier")
     return result
+
+
+def _configuration_materializes_replay(
+    configuration_manifest: Mapping[str, Any],
+    replay_path: Path,
+    replay_manifest: Mapping[str, Any],
+) -> bool:
+    reference = configuration_manifest.get("identity", {}).get("sourceReplay")
+    return bool(
+        reference is not None
+        and reference.get("manifestSha256") == sha256_file(replay_path)
+        and reference.get("dataSha256") == replay_manifest["data"]["sha256"]
+    )
+
+
+def _successful_corridor_mask(
+    prior_path: Path,
+    prior_manifest: Mapping[str, Any],
+    prior: Mapping[str, np.ndarray],
+    corridor_path: Path,
+    corridor_manifest: Mapping[str, Any],
+    corridor_count: int,
+) -> np.ndarray:
+    reference = prior_manifest.get("identity", {}).get("corridors")
+    same_catalog = bool(
+        prior_path == corridor_path
+        or (
+            reference is not None
+            and reference.get("dataSha256")
+            == corridor_manifest["data"]["sha256"]
+        )
+    )
+    if not same_catalog:
+        return np.zeros(corridor_count, dtype=bool)
+    values = prior.get("corridorReplayProposalSuccessful")
+    if values is None or len(values) != corridor_count:
+        raise ValueError("prior replay success mask and corridor catalog differ")
+    return np.asarray(values, dtype=np.uint8) > 0
 
 
 def _sampling_geometry(
@@ -314,23 +368,33 @@ def run_physical_ribbon_corridor_frontier(
     if prior_configuration_reference is None:
         raise ValueError("prior replay does not identify its configuration")
     prior_topology_reference = _prior_topology_reference(prior_manifest)
-    if (
+    direct_configuration = (
         prior_configuration_reference["dataSha256"]
-        != configuration_manifest["data"]["sha256"]
-        or prior_topology_reference["dataSha256"]
-        != continuity_manifest["data"]["sha256"]
+        == configuration_manifest["data"]["sha256"]
+    )
+    materialized_configuration = _configuration_materializes_replay(
+        configuration_manifest, prior_path, prior_manifest
+    )
+    prior_frontier = np.asarray(
+        prior.get("frontierRibbonCandidate", ()), dtype=np.int32
+    )
+    continuity_frontier = np.asarray(
+        continuity["frontierRibbonCandidate"], dtype=np.int32
+    )
+    direct_topology = (
+        prior_topology_reference["dataSha256"]
+        == continuity_manifest["data"]["sha256"]
+    )
+    same_frontier = len(prior_frontier) and np.array_equal(
+        prior_frontier, continuity_frontier
+    )
+    if (
+        not (direct_configuration or materialized_configuration)
+        or not (direct_topology or same_frontier)
         or continuity_manifest["identity"]["ribbonBank"]["dataSha256"]
         != ribbon_manifest["data"]["sha256"]
     ):
         raise ValueError("corridor frontier inputs do not share one ribbon state")
-    prior_corridor_reference = prior_manifest["identity"].get("corridors")
-    same_corridor_artifact = prior_path == corridor_path
-    if not same_corridor_artifact and (
-        prior_corridor_reference is None
-        or prior_corridor_reference["dataSha256"]
-        != corridor_manifest["data"]["sha256"]
-    ):
-        raise ValueError("prior replay decisions belong to different corridors")
     support_reference = configuration_manifest["identity"]["continuity"]
     support_path, support_manifest, support_topology = (
         _load_continuity_artifact(support_reference["manifestPath"])
@@ -389,16 +453,22 @@ def run_physical_ribbon_corridor_frontier(
 
     started = time.monotonic()
     prior_selected = np.asarray(prior["corridorReplaySelected"]) > 0
-    continuity_frontier = np.asarray(
-        continuity["frontierRibbonCandidate"], dtype=np.int32
-    )
     if len(prior_selected) != len(continuity_frontier):
         raise ValueError("prior replay and bidirectional frontier differ")
+    if not np.array_equal(
+        prior_selected, np.asarray(base_configuration["selected"]) > 0
+    ):
+        raise ValueError("configuration is not the materialized prior selection")
     selected_bank = continuity_frontier[prior_selected]
-    successful = np.asarray(
-        prior["corridorReplayProposalSuccessful"], dtype=np.uint8
-    ) > 0
     evidence = np.asarray(corridor["corridorEvidenceEligible"]) > 0
+    successful = _successful_corridor_mask(
+        prior_path,
+        prior_manifest,
+        prior,
+        corridor_path,
+        corridor_manifest,
+        len(evidence),
+    )
     target_rows = np.flatnonzero(evidence & ~successful).astype(np.int32)
     corridor_settings = _corridor_settings_from_manifest(corridor_manifest)
     if progress is not None:

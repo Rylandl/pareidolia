@@ -35,6 +35,9 @@ from .physical_ribbon_patch_holes import (
     extract_surface_boundary_loops,
 )
 from .physical_ribbon_configuration import _component_labels
+from .physical_ribbon_cumulative_replay import (
+    load_materialized_cumulative_surface,
+)
 
 
 PHYSICAL_RIBBON_PATCH_CORRIDORS_SCHEMA = (
@@ -3039,10 +3042,99 @@ def write_replayed_corridor_fragment_montage(
     }
 
 
+def _baseline_cumulative_corridor_replay(
+    surface: Mapping[str, np.ndarray],
+    loops: Mapping[str, np.ndarray],
+    corridors: Mapping[str, np.ndarray],
+    scored: Mapping[str, np.ndarray],
+    configuration: Mapping[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Expose an immutable cumulative baseline through the replay contract.
+
+    The ordinary strict counterfactual replay cannot safely reconstruct and
+    preserve previously accepted CT faces.  A cumulative census therefore
+    proposes no local mutation.  Downstream whole-strip optimization receives
+    every unresolved CT corridor and the exact selected state, then makes the
+    first permitted change as a complete multi-cell decision.
+    """
+
+    scored_count = len(np.asarray(scored["scoredCorridorIndex"]))
+    selected = np.asarray(configuration["selected"], dtype=np.uint8)
+    component = np.asarray(configuration["component"], dtype=np.int32)
+    selected_component = component[selected > 0]
+    component_size = (
+        np.bincount(selected_component).astype(np.int32)
+        if len(selected_component)
+        else np.empty(0, dtype=np.int32)
+    )
+    connections = _evaluate_corridor_connections(surface, corridors, scored)
+    zeros = np.zeros(scored_count, dtype=np.uint8)
+    arrays = {
+        "corridorReplayProposalTrialApplied": zeros.copy(),
+        "corridorReplayProposalSuccessful": zeros.copy(),
+        "corridorReplayProposalRejectedNoConnection": zeros.copy(),
+        "corridorReplayProposalRejectedSurfaceRegression": zeros.copy(),
+        "corridorReplayProposalRejectedComponentSplit": zeros.copy(),
+        "corridorReplaySelected": selected.copy(),
+        "corridorReplayComponent": component.copy(),
+        "corridorReplayComponentSize": component_size,
+        "corridorReplayChartUV": np.asarray(
+            surface["chartUV"], dtype=np.float32
+        ),
+        "corridorReplayTriangleFrontierIndex": np.asarray(
+            connections["triangleFrontierIndex"], dtype=np.int32
+        ),
+        "corridorReplayTriangleAreaVoxelsSquared": np.asarray(
+            surface["triangleAreaVoxelsSquared"], dtype=np.float32
+        ),
+        "corridorReplayTriangleRegion": np.asarray(
+            connections["triangleRegion"], dtype=np.int32
+        ),
+        "corridorReplayBoundaryArcsConnected": np.asarray(
+            connections["boundaryArcsConnected"], dtype=np.uint8
+        ),
+        "corridorReplayConnectingTriangleRegion": np.asarray(
+            connections["connectingTriangleRegion"], dtype=np.int32
+        ),
+        "corridorReplayBoundaryArcSharedRegionFraction": np.asarray(
+            connections["boundaryArcSharedRegionFraction"], dtype=np.float32
+        ),
+        "corridorReplayBaselineBoundaryArcsDistinct": np.asarray(
+            connections["baselineBoundaryArcsDistinct"], dtype=np.uint8
+        ),
+        "corridorReplayPatchTriangleCoverage": np.asarray(
+            connections["patchTriangleCoverage"], dtype=np.float32
+        ),
+        "corridorReplayLoopOffset": np.asarray(loops["loopOffset"], dtype=np.int64),
+        "corridorReplayLoopVertexFrontierIndex": np.asarray(
+            loops["loopVertexFrontierIndex"], dtype=np.int32
+        ),
+        "corridorReplayLoopKind": np.asarray(loops["loopKind"], dtype=np.uint8),
+        "corridorReplayLoopTriangleRegion": np.asarray(
+            loops["loopTriangleRegion"], dtype=np.int32
+        ),
+    }
+    return arrays, {
+        "candidateProposalCount": scored_count,
+        "trialAppliedPositiveEvidenceProposalCount": 0,
+        "replaySuccessfulCorridorCount": 0,
+        "selectedRibbonCountBefore": int(np.count_nonzero(selected)),
+        "selectedRibbonCountAfter": int(np.count_nonzero(selected)),
+        "componentCountAfter": len(component_size),
+        "selectionMutated": False,
+        "replayMeaning": (
+            "immutable cumulative baseline; mutation is deferred to exact "
+            "whole-strip optimization"
+        ),
+        "identityLabelsUsed": False,
+    }
+
+
 def run_physical_ribbon_patch_corridors(
     configuration_root: str | Path,
     output_root: str | Path,
     *,
+    surface_replay_root: str | Path | None = None,
     settings: PhysicalRibbonPatchCorridorSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -3058,6 +3150,26 @@ def run_physical_ribbon_patch_corridors(
         ribbon_manifest,
         ribbon,
     ) = _load_inputs(configuration_root)
+    cumulative_surface: dict[str, np.ndarray] | None = None
+    cumulative_surface_stats: dict[str, Any] | None = None
+    cumulative_reference: dict[str, Any] | None = None
+    if surface_replay_root is not None:
+        (
+            cumulative_path,
+            cumulative_manifest,
+            cumulative_surface,
+            cumulative_surface_stats,
+        ) = load_materialized_cumulative_surface(
+            surface_replay_root,
+            configuration_manifest,
+            configuration,
+            topology,
+        )
+        cumulative_reference = {
+            "manifestPath": str(cumulative_path),
+            "manifestSha256": sha256_file(cumulative_path),
+            "dataSha256": cumulative_manifest["data"]["sha256"],
+        }
     identity: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_PATCH_CORRIDORS_SCHEMA,
         "version": PHYSICAL_RIBBON_PATCH_CORRIDORS_VERSION,
@@ -3079,6 +3191,8 @@ def run_physical_ribbon_patch_corridors(
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
+    if cumulative_reference is not None:
+        identity["cumulativeSurfaceReplay"] = cumulative_reference
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -3096,12 +3210,16 @@ def run_physical_ribbon_patch_corridors(
         ):
             return cached
     started = time.monotonic()
-    surface, surface_stats = build_physical_ribbon_surface_complex(
-        ribbon,
-        topology,
-        configuration,
-        settings=resolved.surface_settings(),
-    )
+    if cumulative_surface is None:
+        surface, surface_stats = build_physical_ribbon_surface_complex(
+            ribbon,
+            topology,
+            configuration,
+            settings=resolved.surface_settings(),
+        )
+    else:
+        surface = cumulative_surface
+        surface_stats = dict(cumulative_surface_stats or {})
     surfaced = time.monotonic()
     loops, loop_stats = extract_surface_boundary_loops(
         surface, settings=resolved.surface_settings()
@@ -3134,16 +3252,21 @@ def run_physical_ribbon_patch_corridors(
         settings=resolved,
     )
     reconfigured_at = time.monotonic()
-    replay, replay_stats = replay_patch_corridor_reconfigurations(
-        surface,
-        corridors,
-        scored,
-        reconfiguration,
-        ribbon,
-        topology,
-        configuration,
-        settings=resolved,
-    )
+    if cumulative_surface is None:
+        replay, replay_stats = replay_patch_corridor_reconfigurations(
+            surface,
+            corridors,
+            scored,
+            reconfiguration,
+            ribbon,
+            topology,
+            configuration,
+            settings=resolved,
+        )
+    else:
+        replay, replay_stats = _baseline_cumulative_corridor_replay(
+            surface, loops, corridors, scored, configuration
+        )
     replayed_at = time.monotonic()
     arrays = {
         **surface,
@@ -3210,7 +3333,12 @@ def run_physical_ribbon_patch_corridors(
             "bendHandling": "ruled and tangent-plane-constrained cubic Hermite strips compete directly against native CT",
             "defectHandling": "profile ambiguity and failed boundary texture continuation remain unresolved rather than forcing a bridge",
             "reconfiguration": "complete alternating interface swaps are selected jointly under strict continuation, interface-exclusivity, and profile-crossing factors",
-            "replayAcceptance": "a proposal survives only when its two original boundary arcs share one rebuilt triangle region; failed or component-splitting swaps are removed",
+            "replayAcceptance": (
+                "cumulative census preserves the exact augmented surface and "
+                "defers mutation to complete-strip optimization"
+                if cumulative_surface is not None
+                else "a proposal survives only when its two original boundary arcs share one rebuilt triangle region; failed or component-splitting swaps are removed"
+            ),
             "mutation": "counterfactual only; the source ribbon configuration is unchanged",
             "identityLabelsUsed": False,
         },

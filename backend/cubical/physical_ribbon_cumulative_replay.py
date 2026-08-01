@@ -13,11 +13,50 @@ from .physical_ribbon_bridging import _load_npz
 _CUMULATIVE_REPLAY_STEMS = (
     "physical-ribbon-complete-strip-replay-v1",
     "physical-ribbon-lineage-strip-replay-v1",
+    "physical-ribbon-cumulative-corridor-replay-v1",
+    "physical-ribbon-cumulative-hole-replay-v1",
 )
 _CUMULATIVE_REPLAY_SCHEMAS = {
     "pareidolia.physical-ribbon-complete-strip-replay",
     "pareidolia.physical-ribbon-lineage-strip-replay",
+    "pareidolia.physical-ribbon-cumulative-corridor-replay",
+    "pareidolia.physical-ribbon-cumulative-hole-replay",
 }
+
+_CUMULATIVE_SURFACE_FIELDS = (
+    "frontierRibbonCandidate",
+    "selected",
+    "component",
+    "componentSize",
+    "signedNormalXYZ",
+    "tangentUxyz",
+    "tangentVxyz",
+    "chartUV",
+    "integrationResidualVoxels",
+    "edgeFirstFrontierIndex",
+    "edgeSecondFrontierIndex",
+    "edgeSelected",
+    "midpointXYZ",
+    "thicknessVoxels",
+    "triangleFrontierIndex",
+    "triangleAreaVoxelsSquared",
+    "triangleNormalResidualDegrees",
+)
+_CUMULATIVE_OPTIONAL_SURFACE_FIELDS = (
+    "triangleSupplementalCtFace",
+    "triangleMinimumCorridorPathFace",
+    "triangleCtNormalResidualDegrees",
+    "baseStrictTriangleCount",
+    "supplementalTriangleFrontierIndex",
+    "supplementalTrianglePrimaryCorridorRow",
+    "supplementalTriangleMinimumPath",
+    "supplementalTriangleAreaVoxelsSquared",
+    "supplementalTriangleNodeNormalResidualDegrees",
+    "supplementalTriangleCtNormalResidualDegrees",
+    "supplementalTriangleCenterDistanceThicknesses",
+    "supplementalTriangleCenterHeightThicknesses",
+    "supplementalTriangleMaximumEdgeThicknesses",
+)
 
 
 def load_cumulative_strip_replay_artifact(
@@ -51,6 +90,86 @@ def load_cumulative_strip_replay_artifact(
     return manifest_path, manifest, _load_npz(
         data_path, manifest["data"]["sha256"]
     )
+
+
+def load_materialized_cumulative_surface(
+    replay_root: str | Path,
+    configuration_manifest: Mapping[str, Any],
+    configuration: Mapping[str, np.ndarray],
+    topology: Mapping[str, np.ndarray],
+) -> tuple[Path, dict[str, Any], dict[str, np.ndarray], dict[str, Any]]:
+    """Load an exact augmented surface coupled to its materialized state."""
+
+    replay_path, replay_manifest, replay = load_cumulative_strip_replay_artifact(
+        replay_root
+    )
+    replay_reference = configuration_manifest.get("identity", {}).get(
+        "sourceReplay"
+    )
+    if replay_reference is None:
+        raise ValueError(
+            "a cumulative surface requires a configuration materialized from "
+            "that exact replay"
+        )
+    if (
+        replay_reference["manifestSha256"] != sha256_file(replay_path)
+        or replay_reference["dataSha256"] != replay_manifest["data"]["sha256"]
+    ):
+        raise ValueError(
+            "cumulative surface and materialized configuration identify "
+            "different exact replays"
+        )
+    missing = [name for name in _CUMULATIVE_SURFACE_FIELDS if name not in replay]
+    if missing:
+        raise ValueError(f"cumulative surface is missing fields: {missing}")
+    surface = {
+        name: np.asarray(replay[name]).copy()
+        for name in _CUMULATIVE_SURFACE_FIELDS
+    }
+    for name in _CUMULATIVE_OPTIONAL_SURFACE_FIELDS:
+        if name in replay:
+            surface[name] = np.asarray(replay[name]).copy()
+    frontier = np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
+    if not np.array_equal(surface["frontierRibbonCandidate"], frontier):
+        raise ValueError("cumulative surface and materialized frontier differ")
+    selected = np.asarray(configuration["selected"], dtype=np.uint8)
+    component = np.asarray(configuration["component"], dtype=np.int32)
+    if not np.array_equal(surface["selected"], selected):
+        raise ValueError("cumulative surface and materialized selection differ")
+    if not np.array_equal(surface["component"], component):
+        raise ValueError("cumulative surface and materialized components differ")
+    triangles = np.asarray(surface["triangleFrontierIndex"], dtype=np.int32)
+    if len(triangles) and (
+        np.any(~selected.astype(bool)[triangles])
+        or np.any(component[triangles] != component[triangles[:, :1]])
+    ):
+        raise ValueError(
+            "cumulative surface contains a triangle outside one selected sheet"
+        )
+    strict_count = int(
+        np.asarray(surface.get("baseStrictTriangleCount", (len(triangles),)))
+        .reshape(-1)[0]
+    )
+    supplemental_count = int(
+        np.count_nonzero(
+            np.asarray(
+                surface.get(
+                    "triangleSupplementalCtFace",
+                    np.zeros(len(triangles), dtype=np.uint8),
+                )
+            )
+        )
+    )
+    statistics = {
+        "selectedRibbonCount": int(np.count_nonzero(selected)),
+        "strictTriangleCount": strict_count,
+        "supplementalCtFaceCount": supplemental_count,
+        "augmentedTriangleCount": len(triangles),
+        "sourceReplaySchema": replay_manifest["schema"],
+        "surfaceSource": "cumulative strict-plus-native-CT replay",
+        "identityLabelsUsed": False,
+    }
+    return replay_path, replay_manifest, surface, statistics
 
 
 def cumulative_face_replay_reference(

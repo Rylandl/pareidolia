@@ -31,6 +31,7 @@ from .physical_ribbon_corridor_face_replay import (
     _component_inheritance_audit,
     _edge_manifold_audit,
     _hard_conflict_counts,
+    _preserves_prior_component_anchors,
     _selection_contract,
     _supplemental_face_arrays,
 )
@@ -156,6 +157,8 @@ def _complete_inheritance_audit(
     final_component: np.ndarray,
     *,
     minimum_substantial_ribbon_count: int,
+    source_interface: np.ndarray | None = None,
+    target_interface: np.ndarray | None = None,
 ) -> dict[str, Any]:
     audit = _component_inheritance_audit(
         baseline_selected,
@@ -194,6 +197,70 @@ def _complete_inheritance_audit(
         for component_id in np.unique(baseline_component[baseline_selected])
         if component_id >= 0
     }
+    final_interfaces: set[int] | None = None
+    if source_interface is not None or target_interface is not None:
+        if source_interface is None or target_interface is None:
+            raise ValueError("both frontier interface arrays are required")
+        source_interface = np.asarray(source_interface, dtype=np.int32)
+        target_interface = np.asarray(target_interface, dtype=np.int32)
+        if len(source_interface) != len(baseline_selected) or len(
+            target_interface
+        ) != len(baseline_selected):
+            raise ValueError("frontier interface arrays and selection differ")
+        final_interfaces = set(
+            int(value)
+            for value in np.concatenate(
+                (
+                    source_interface[final_selected],
+                    target_interface[final_selected],
+                )
+            )
+        )
+    deletion_records: list[dict[str, Any]] = []
+    forbidden_deletion_count = 0
+    allowed_provisional_replacement_count = 0
+    for component_id in deleted:
+        component_nodes = baseline_selected & (
+            baseline_component == component_id
+        )
+        interface_values: set[int] = set()
+        if final_interfaces is not None:
+            interface_values = set(
+                int(value)
+                for value in np.concatenate(
+                    (
+                        source_interface[component_nodes],
+                        target_interface[component_nodes],
+                    )
+                )
+            )
+        replaced_count = (
+            len(interface_values & final_interfaces)
+            if final_interfaces is not None
+            else 0
+        )
+        replacement_fraction = (
+            replaced_count / len(interface_values) if interface_values else 0.0
+        )
+        substantial = prior_size[component_id] >= minimum_substantial_ribbon_count
+        fully_replaced = bool(interface_values) and replaced_count == len(
+            interface_values
+        )
+        forbidden = substantial or not fully_replaced
+        forbidden_deletion_count += int(forbidden)
+        allowed_provisional_replacement_count += int(not forbidden)
+        deletion_records.append(
+            {
+                "priorComponent": component_id,
+                "priorRibbonCount": prior_size[component_id],
+                "priorInterfaceCount": len(interface_values),
+                "replacedInterfaceCount": replaced_count,
+                "replacedInterfaceFraction": round(replacement_fraction, 6),
+                "substantial": substantial,
+                "fullyReplaced": fully_replaced,
+                "forbidden": forbidden,
+            }
+        )
     fusion_records: list[dict[str, Any]] = []
     forbidden_fusion_count = 0
     for fusion in audit["crossPriorComponentFusions"]:
@@ -229,6 +296,11 @@ def _complete_inheritance_audit(
         ),
         "deletedPriorComponentCount": len(deleted),
         "deletedPriorComponents": deleted,
+        "deletedPriorComponentRecords": deletion_records,
+        "forbiddenPriorComponentDeletionCount": forbidden_deletion_count,
+        "allowedProvisionalReplacementCount": (
+            allowed_provisional_replacement_count
+        ),
         "orphanFinalComponentCount": len(orphaned),
         "orphanFinalComponents": orphaned,
     }
@@ -241,6 +313,7 @@ def _cumulative_supplemental_face_arrays(
     *,
     surface_settings: Any,
     face_settings: PhysicalRibbonCorridorFaceSettings,
+    require_baseline_distinct: bool = True,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], tuple[int, ...]]:
     """Rebuild face paths while accepting rows already strict-connected."""
 
@@ -253,10 +326,19 @@ def _cumulative_supplemental_face_arrays(
             face_settings.maximum_arc_triangle_distance_edges
         ),
     )
+    strict_connected = (
+        np.asarray(strict_connections["boundaryArcsConnected"]) > 0
+        if require_baseline_distinct
+        else np.asarray(
+            strict_connections["boundaryArcSharedRegionFraction"],
+            dtype=np.float32,
+        )
+        >= face_settings.minimum_arc_region_fraction
+    )
     strict_rows = tuple(
         int(row)
         for row in chosen_rows
-        if strict_connections["boundaryArcsConnected"][row]
+        if strict_connected[row]
     )
     strict_set = set(strict_rows)
     face_rows = tuple(int(row) for row in chosen_rows if row not in strict_set)
@@ -419,7 +501,12 @@ def run_physical_ribbon_lineage_strip_replay(
     def valid_modifications(
         added: frozenset[int], removed: frozenset[int]
     ) -> bool:
-        return _modifications_valid(
+        return _preserves_prior_component_anchors(
+            added,
+            removed,
+            baseline_selected=baseline_selected,
+            baseline_component=baseline_component,
+        ) and _modifications_valid(
             added,
             removed,
             baseline_selected=contract["baselineSelected"],
@@ -481,13 +568,19 @@ def run_physical_ribbon_lineage_strip_replay(
             minimum_substantial_ribbon_count=(
                 surface_settings.minimum_component_ribbon_count
             ),
+            source_interface=np.asarray(ribbon["sourceInterface"], dtype=np.int32)[
+                np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
+            ],
+            target_interface=np.asarray(ribbon["targetInterface"], dtype=np.int32)[
+                np.asarray(topology["frontierRibbonCandidate"], dtype=np.int32)
+            ],
         )
         topology_valid = not (
             interface_conflict
             or crossing_conflict
             or inheritance["splitPriorComponentCount"]
             or inheritance["forbiddenSubstantialFusionCount"]
-            or inheritance["deletedPriorComponentCount"]
+            or inheritance["forbiddenPriorComponentDeletionCount"]
             or inheritance["orphanFinalComponentCount"]
         )
         attempt_record: dict[str, Any] = {

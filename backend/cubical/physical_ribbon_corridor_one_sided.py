@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -48,6 +49,32 @@ PHYSICAL_RIBBON_ONE_SIDED_CORRIDORS_VERSION = 1
 PHYSICAL_RIBBON_ONE_SIDED_CORRIDORS_STEM = (
     "physical-ribbon-one-sided-corridors-v1"
 )
+
+
+def _array_mapping_sha256(arrays: Mapping[str, np.ndarray]) -> str:
+    """Hash exact-stage array inputs independently of report serialization.
+
+    The exact corridor screen is the expensive part of this stage.  Its cache
+    must be invalidated when any numeric input changes, but not when only the
+    surrounding manifest or preview code changes.
+    """
+
+    digest = hashlib.sha256()
+    for name in sorted(arrays):
+        value = np.asarray(arrays[name])
+        if value.dtype.hasobject:
+            raise TypeError(f"cannot fingerprint object array {name!r}")
+        contiguous = np.ascontiguousarray(value)
+        name_bytes = name.encode("utf-8")
+        dtype_bytes = contiguous.dtype.str.encode("ascii")
+        digest.update(len(name_bytes).to_bytes(4, "little"))
+        digest.update(name_bytes)
+        digest.update(len(dtype_bytes).to_bytes(2, "little"))
+        digest.update(dtype_bytes)
+        digest.update(len(contiguous.shape).to_bytes(2, "little"))
+        digest.update(np.asarray(contiguous.shape, dtype="<i8").tobytes())
+        digest.update(contiguous.tobytes())
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +388,24 @@ def run_physical_ribbon_one_sided_corridors(
     checkpoint_identity = {
         "schema": PHYSICAL_RIBBON_ONE_SIDED_CORRIDORS_SCHEMA,
         "stage": "targeted-exact-screen",
-        "identitySha256": identity["identitySha256"],
+        "version": 2,
+        "frontierDataSha256": frontier_manifest["data"]["sha256"],
+        "ribbonBankDataSha256": frontier_manifest["identity"]["ribbonBank"][
+            "dataSha256"
+        ],
+        "remappedArraysSha256": _array_mapping_sha256(remapped),
+        "targetVariantArraysSha256": _array_mapping_sha256(target_variants),
+        "corridorSettings": corridor_settings.record(),
+        "variantSettings": variant_settings.record(),
+        "exactImplementationSha256": sha256_file(
+            Path(__file__).with_name("physical_ribbon_corridor_variants.py")
+        ),
+        "surfaceImplementationSha256": sha256_file(
+            Path(__file__).with_name("physical_ribbon_patch_corridors.py")
+        ),
+        "configurationImplementationSha256": sha256_file(
+            Path(__file__).with_name("physical_ribbon_configuration.py")
+        ),
         "variantRows": [
             int(value) for value in target_variants["corridorVariantRow"]
         ],
@@ -481,8 +525,13 @@ def run_physical_ribbon_one_sided_corridors(
     successful_rows = np.flatnonzero(
         np.asarray(replay["corridorReplayProposalSuccessful"]) > 0
     )
+    # The targeted frontier has already resolved whether its corridor catalog
+    # is the same catalog as the prior replay.  A cumulative hole replay (or a
+    # refreshed corridor census) intentionally has no row-aligned success
+    # mask, so carrying the frontier's audited count avoids coupling unrelated
+    # catalogs at serialization time.
     prior_success_count = int(
-        np.count_nonzero(prior["corridorReplayProposalSuccessful"])
+        frontier_manifest["targets"]["priorSuccessfulCorridorCount"]
     )
     baseline_triangle = np.asarray(surface["triangleFrontierIndex"], dtype=np.int32)
     final_triangle = np.asarray(

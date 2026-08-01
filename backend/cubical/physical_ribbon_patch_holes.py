@@ -21,6 +21,9 @@ from .needle_surface import (
 from .physical_ribbon_bridging import _load_inputs, _write_npz
 from .physical_ribbon_configuration import _component_labels
 from .physical_ribbon_continuity import _draw_line
+from .physical_ribbon_cumulative_replay import (
+    load_materialized_cumulative_surface,
+)
 
 
 PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA = "pareidolia.physical-ribbon-patch-holes"
@@ -399,54 +402,126 @@ def extract_surface_boundary_loops(
         second_root = find(records[1])
         if first_root != second_root:
             triangle_parent[max(first_root, second_root)] = min(first_root, second_root)
+    triangle_region = np.asarray(
+        [find(index) for index in range(len(triangles))], dtype=np.int32
+    )
     boundary_by_region: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for edge, records in edge_triangle.items():
         if len(records) == 1:
-            boundary_by_region[find(records[0])].append(edge)
+            boundary_by_region[int(triangle_region[records[0]])].append(edge)
     loop_values: list[list[int]] = []
     loop_region: list[int] = []
-    ambiguous_boundary_components = 0
+    pinched_boundary_components = 0
+    split_boundary_fan_count = 0
+    unresolved_boundary_fan_count = 0
+    unresolved_boundary_trace_count = 0
     for region, edges in boundary_by_region.items():
+        boundary_edge_set = set(edges)
         graph: dict[int, list[int]] = defaultdict(list)
         for left, right in edges:
             graph[left].append(right)
             graph[right].append(left)
-        unseen = set(graph)
-        while unseen:
-            seed = min(unseen)
-            group = {seed}
-            queue = [seed]
-            unseen.remove(seed)
-            while queue:
-                current = queue.pop()
-                for neighbor in graph[current]:
-                    if neighbor in unseen:
-                        unseen.remove(neighbor)
-                        group.add(neighbor)
+        if any(len(neighbor) != 2 for neighbor in graph.values()):
+            pinched_boundary_components += 1
+
+        # Boundary vertices with degree four or greater are commonly two
+        # otherwise independent surface fans that happen to use the same
+        # ribbon.  Treating the vertex as one undirected graph node fuses their
+        # boundaries and caused the old extractor to discard the whole region.
+        # Pair boundary edges through connected triangle fans in the vertex
+        # link instead.  This is the combinatorial boundary of the simplicial
+        # surface and remains well-defined even when its embedding pinches at a
+        # vertex.
+        region_triangles = np.flatnonzero(triangle_region == region)
+        incident_triangles: dict[int, list[int]] = defaultdict(list)
+        for triangle_index in region_triangles:
+            for vertex in triangles[triangle_index]:
+                incident_triangles[int(vertex)].append(int(triangle_index))
+        boundary_pair: dict[tuple[int, tuple[int, int]], tuple[int, int]] = {}
+        for vertex, incident_values in incident_triangles.items():
+            incident = set(incident_values)
+            fan_neighbor: dict[int, list[int]] = defaultdict(list)
+            for triangle_index in incident:
+                triangle = triangles[triangle_index]
+                for other_value in triangle:
+                    other = int(other_value)
+                    if other == vertex:
+                        continue
+                    edge = (min(vertex, other), max(vertex, other))
+                    records = edge_triangle[edge]
+                    if len(records) != 2:
+                        continue
+                    neighbor = records[0] if records[1] == triangle_index else records[1]
+                    if neighbor in incident:
+                        fan_neighbor[triangle_index].append(int(neighbor))
+            unseen_fan = set(incident)
+            fans: list[set[int]] = []
+            while unseen_fan:
+                seed = min(unseen_fan)
+                fan = {seed}
+                queue = [seed]
+                unseen_fan.remove(seed)
+                while queue:
+                    current = queue.pop()
+                    for neighbor in fan_neighbor.get(current, ()):
+                        if neighbor not in unseen_fan:
+                            continue
+                        unseen_fan.remove(neighbor)
+                        fan.add(neighbor)
                         queue.append(neighbor)
-            if not all(len(graph[value]) == 2 for value in group):
-                ambiguous_boundary_components += 1
-                continue
-            start = min(group)
-            previous = -1
-            current = start
-            loop = []
-            while True:
-                loop.append(current)
-                candidates = sorted(value for value in graph[current] if value != previous)
-                if not candidates:
+                fans.append(fan)
+            if len(fans) > 1:
+                split_boundary_fan_count += len(fans) - 1
+            incident_boundary = [
+                edge for edge in boundary_edge_set if vertex in edge
+            ]
+            for fan in fans:
+                fan_edges = [
+                    edge
+                    for edge in incident_boundary
+                    if int(edge_triangle[edge][0]) in fan
+                ]
+                if not fan_edges:
+                    continue
+                if len(fan_edges) != 2:
+                    unresolved_boundary_fan_count += 1
+                    continue
+                first_edge, second_edge = sorted(fan_edges)
+                boundary_pair[(vertex, first_edge)] = second_edge
+                boundary_pair[(vertex, second_edge)] = first_edge
+
+        unseen_edge = set(edges)
+        while unseen_edge:
+            start_edge = min(unseen_edge)
+            start_vertex = int(start_edge[0])
+            current_edge = start_edge
+            current_vertex = start_vertex
+            loop: list[int] = []
+            traversed: list[tuple[int, int]] = []
+            closed = False
+            for _ in range(len(edges) + 1):
+                loop.append(current_vertex)
+                traversed.append(current_edge)
+                other_vertex = (
+                    int(current_edge[1])
+                    if int(current_edge[0]) == current_vertex
+                    else int(current_edge[0])
+                )
+                following = boundary_pair.get((other_vertex, current_edge))
+                if following is None:
                     break
-                following = candidates[0]
-                previous, current = current, following
-                if current == start:
+                current_vertex = other_vertex
+                current_edge = following
+                if current_edge == start_edge and current_vertex == start_vertex:
+                    closed = True
                     break
-                if len(loop) > len(group):
-                    break
-            if current == start and len(loop) == len(group):
+            for edge in traversed:
+                unseen_edge.discard(edge)
+            if closed and len(loop) >= 3:
                 loop_values.append(loop)
                 loop_region.append(region)
             else:
-                ambiguous_boundary_components += 1
+                unresolved_boundary_trace_count += 1
     kind = np.full(len(loop_values), 2, dtype=np.uint8)
     for region in sorted(set(loop_region)):
         indices = [index for index, value in enumerate(loop_region) if value == region]
@@ -526,7 +601,10 @@ def extract_surface_boundary_loops(
         "interiorHoleLoopCount": int(np.count_nonzero(kind == 1)),
         "ambiguousLoopCount": int(np.count_nonzero(kind == 2)),
         "macroEligibleHoleCount": int(np.count_nonzero(macro_eligible)),
-        "nonCycleBoundaryComponentCount": ambiguous_boundary_components,
+        "pinchedBoundaryComponentCount": pinched_boundary_components,
+        "splitBoundaryFanCount": split_boundary_fan_count,
+        "unresolvedBoundaryFanCount": unresolved_boundary_fan_count,
+        "nonCycleBoundaryComponentCount": unresolved_boundary_trace_count,
     }
 
 
@@ -1863,10 +1941,71 @@ def write_patch_hole_montage(
     return output
 
 
+def _baseline_cumulative_hole_replay(
+    surface: Mapping[str, np.ndarray],
+    loops: Mapping[str, np.ndarray],
+    reconfiguration: Mapping[str, np.ndarray],
+    configuration: Mapping[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Keep an augmented surface immutable until a whole-hole exact stage."""
+
+    hole_index = np.asarray(
+        reconfiguration["reconfigurationLoopIndex"], dtype=np.int32
+    )
+    selected = np.asarray(configuration["selected"], dtype=np.uint8)
+    component = np.asarray(configuration["component"], dtype=np.int32)
+    selected_component = component[selected > 0]
+    component_size = (
+        np.bincount(selected_component).astype(np.int32)
+        if len(selected_component)
+        else np.empty(0, dtype=np.int32)
+    )
+    return {
+        "replayProposalApplied": np.zeros(len(hole_index), dtype=np.uint8),
+        "replaySelected": selected.copy(),
+        "replayComponent": component.copy(),
+        "replayComponentSize": component_size,
+        "replayChartUV": np.asarray(surface["chartUV"], dtype=np.float32),
+        "replayTriangleFrontierIndex": np.asarray(
+            surface["triangleFrontierIndex"], dtype=np.int32
+        ),
+        "replayTriangleAreaVoxelsSquared": np.asarray(
+            surface["triangleAreaVoxelsSquared"], dtype=np.float32
+        ),
+        "replayLoopOffset": np.asarray(loops["loopOffset"], dtype=np.int64),
+        "replayLoopVertexFrontierIndex": np.asarray(
+            loops["loopVertexFrontierIndex"], dtype=np.int32
+        ),
+        "replayLoopKind": np.asarray(loops["loopKind"], dtype=np.uint8),
+        "replayLoopMacroEligible": np.asarray(
+            loops["loopMacroEligible"], dtype=np.uint8
+        ),
+        "replayOriginalHoleNearestMacroLoop": hole_index.copy(),
+        "replayOriginalHoleNearestMacroDistanceVoxels": np.zeros(
+            len(hole_index), dtype=np.float32
+        ),
+        "replayOriginalHoleStillOpen": np.ones(len(hole_index), dtype=np.uint8),
+    }, {
+        "candidateProposalCount": len(hole_index),
+        "appliedPositiveNonconflictingProposalCount": 0,
+        "selectedRibbonCountBefore": int(np.count_nonzero(selected)),
+        "selectedRibbonCountAfter": int(np.count_nonzero(selected)),
+        "componentCountAfter": len(component_size),
+        "originalMacroHoleStillOpenCount": len(hole_index),
+        "selectionMutated": False,
+        "replayMeaning": (
+            "immutable cumulative baseline; mutation is deferred to exact "
+            "whole-hole optimization"
+        ),
+        "identityLabelsUsed": False,
+    }
+
+
 def run_physical_ribbon_patch_holes(
     configuration_root: str | Path,
     output_root: str | Path,
     *,
+    surface_replay_root: str | Path | None = None,
     settings: PhysicalRibbonPatchHoleSettings | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -1882,6 +2021,26 @@ def run_physical_ribbon_patch_holes(
         ribbon_manifest,
         ribbon,
     ) = _load_inputs(configuration_root)
+    cumulative_surface: dict[str, np.ndarray] | None = None
+    cumulative_surface_stats: dict[str, Any] | None = None
+    cumulative_reference: dict[str, Any] | None = None
+    if surface_replay_root is not None:
+        (
+            cumulative_path,
+            cumulative_manifest,
+            cumulative_surface,
+            cumulative_surface_stats,
+        ) = load_materialized_cumulative_surface(
+            surface_replay_root,
+            configuration_manifest,
+            configuration,
+            topology,
+        )
+        cumulative_reference = {
+            "manifestPath": str(cumulative_path),
+            "manifestSha256": sha256_file(cumulative_path),
+            "dataSha256": cumulative_manifest["data"]["sha256"],
+        }
     identity: dict[str, Any] = {
         "schema": PHYSICAL_RIBBON_PATCH_HOLES_SCHEMA,
         "version": PHYSICAL_RIBBON_PATCH_HOLES_VERSION,
@@ -1903,6 +2062,8 @@ def run_physical_ribbon_patch_holes(
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
     }
+    if cumulative_reference is not None:
+        identity["cumulativeSurfaceReplay"] = cumulative_reference
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1919,9 +2080,13 @@ def run_physical_ribbon_patch_holes(
         ):
             return cached
     started = time.monotonic()
-    surface, surface_stats = build_physical_ribbon_surface_complex(
-        ribbon, topology, configuration, settings=resolved
-    )
+    if cumulative_surface is None:
+        surface, surface_stats = build_physical_ribbon_surface_complex(
+            ribbon, topology, configuration, settings=resolved
+        )
+    else:
+        surface = cumulative_surface
+        surface_stats = dict(cumulative_surface_stats or {})
     surfaced = time.monotonic()
     loops, loop_stats = extract_surface_boundary_loops(surface, settings=resolved)
     looped = time.monotonic()
@@ -1949,15 +2114,20 @@ def run_physical_ribbon_patch_holes(
         settings=resolved,
     )
     reconfigured_at = time.monotonic()
-    replay, replay_stats = replay_patch_hole_reconfigurations(
-        surface,
-        loops,
-        reconfiguration,
-        ribbon,
-        topology,
-        configuration,
-        settings=resolved,
-    )
+    if cumulative_surface is None:
+        replay, replay_stats = replay_patch_hole_reconfigurations(
+            surface,
+            loops,
+            reconfiguration,
+            ribbon,
+            topology,
+            configuration,
+            settings=resolved,
+        )
+    else:
+        replay, replay_stats = _baseline_cumulative_hole_replay(
+            surface, loops, reconfiguration, configuration
+        )
     replayed_at = time.monotonic()
     arrays = {**surface, **loops, **scored, **reconfiguration, **replay}
     _write_npz(data_path, arrays)

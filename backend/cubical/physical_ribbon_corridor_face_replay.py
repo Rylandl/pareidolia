@@ -142,6 +142,46 @@ def _selection_contract(
     }
 
 
+def _preserves_prior_component_anchors(
+    added: frozenset[int],
+    removed: frozenset[int],
+    *,
+    baseline_selected: np.ndarray,
+    baseline_component: np.ndarray,
+) -> bool:
+    """Reject a joint state that removes every inherited node of a sheet.
+
+    This inexpensive condition belongs in the assignment beam, before exact
+    triangulation.  It prevents high-scoring dense states from monopolizing
+    the beam while deleting singleton or otherwise provisional components;
+    exact replay can then apply the richer size/interface lineage audit.
+    """
+
+    effective_removed = removed - added
+    if not effective_removed:
+        return True
+    removed_index = np.asarray(sorted(effective_removed), dtype=np.int32)
+    baseline_selected = np.asarray(baseline_selected, dtype=bool)
+    baseline_component = np.asarray(baseline_component, dtype=np.int32)
+    removed_index = removed_index[baseline_selected[removed_index]]
+    if not len(removed_index):
+        return True
+    removed_labels, removed_count = np.unique(
+        baseline_component[removed_index], return_counts=True
+    )
+    for component_id, count in zip(removed_labels, removed_count):
+        if component_id < 0:
+            continue
+        component_size = int(
+            np.count_nonzero(
+                baseline_selected & (baseline_component == component_id)
+            )
+        )
+        if int(count) >= component_size:
+            return False
+    return True
+
+
 def _optimize_candidate_state(
     candidates: Sequence[Mapping[str, Any]],
     variants: Mapping[str, np.ndarray],

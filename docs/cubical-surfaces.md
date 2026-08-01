@@ -673,6 +673,53 @@ replay usable for successive repairs rather than requiring a one-off script.
 The two coverage-aware audits take 55 and 44 seconds respectively; each exact
 cumulative replay takes about 103 seconds on the current CPU implementation.
 
+The next repair generation removes the last implicit single-boundary-cycle
+assumption.  A boundary graph can contain several triangle fans that touch at
+one ribbon vertex.  Treating that pinched graph as one failed cycle had silently
+discarded 137 complexes.  The boundary tracer now pairs incident boundary edges
+inside each triangle-link fan before tracing loops.  All 137 complexes resolve:
+the refreshed surface has no unresolved boundary fan and exposes 122 genuine
+interior loops, including 48 macro holes, rather than deleting difficult
+geometry from the census.
+
+`replay-physical-ribbon-cumulative-holes` makes a closed loop the smallest
+admissible mutation.  It optimizes complete patch-covering re-pairings, then
+rebuilds every inherited CT connection, chart, triangle, boundary loop, and
+manifold edge in one exact state.  When a dense multi-hole proposal leaves some
+of its target loops open, the next state removes all observed counterexamples
+at once instead of trying one ribbon or one cell.  Two saturation passes close
+seven macro holes; two later refreshed passes close one each, first by
+exchanging five ribbons for five and then by replacing three with seven.  Every
+accepted pass preserves inherited components and CT connections with zero
+interface conflict, profile crossing, or non-manifold edge.
+
+`replay-physical-ribbon-cumulative-corridors` applies the same contract to open
+multi-edge strips.  The assignment beam may select only one complete matching
+per CT corridor and may not remove the final selected anchor of any inherited
+component.  Exact replay then rejects component splits, substantial-component
+fusion, incomplete provisional-fragment replacement, deleted components,
+failed inherited connections, and surface-area regression.  This prevents a
+high-scoring strip from erasing a singleton fragment or creating a thin local
+tendril while still allowing a fully supported provisional fragment to be
+absorbed.
+
+The first fan-aware strip pass exact-screens 196 complete states and commits 15
+corridors.  The next refreshed pass exact-screens 159 complete states and finds
+eight locally valid corridors; the inherited-component anchor constraint keeps
+the strongest six.  Across the final pass, 65 ribbons replace 24 alternatives,
+strict triangles rise from 28,748 to 28,857, augmented triangles from 28,926 to
+29,035, and edge-connected triangle regions fall from 727 to 718.  All 4,303
+inherited components and 38 previous CT connections remain; six new corridor
+connections are added.  Minimum affected strict and augmented area retention
+are both 1.0, with no deletion, split, fusion, crossing, interface conflict, or
+non-manifold edge.  The expensive one-sided exact checkpoint is fingerprinted
+from its numerical surface and variant arrays plus exact-solver dependencies,
+so report or preview edits no longer invalidate a several-minute solve.
+The following whole-hole pass brings the canonical state to 38,134 ribbons,
+28,870 strict triangles, and 29,048 augmented triangles while keeping 718
+triangle regions and all 4,303 components.  It preserves all 44 cumulative CT
+connections and leaves 40 macro holes explicit for later collective passes.
+
 The final two iterative commands are:
 
 ```bash

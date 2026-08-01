@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -48,6 +49,9 @@ from backend.cubical.physical_ribbon_corridor_extension import (
     _delta_variant_arrays,
     _variant_signature,
 )
+from backend.cubical.physical_ribbon_cumulative_hole_replay import (
+    _proposal_state_for_rows,
+)
 from backend.cubical.physical_ribbon_corridor_dormant import (
     _combine_compiled_reconfigurations,
     _condition_crossings_on_immutable_baseline,
@@ -55,10 +59,12 @@ from backend.cubical.physical_ribbon_corridor_dormant import (
     _variant_dormant_addition_count,
 )
 from backend.cubical.physical_ribbon_corridor_one_sided import (
+    _array_mapping_sha256,
     _variant_one_sided_addition_count,
 )
 from backend.cubical.physical_ribbon_corridor_frontier import (
     _map_frontier_by_bank,
+    _successful_corridor_mask,
 )
 from backend.cubical.physical_ribbon_corridor_saturation import (
     _assess_saturation,
@@ -77,6 +83,7 @@ from backend.cubical.physical_ribbon_corridor_faces import (
 from backend.cubical.physical_ribbon_corridor_face_replay import (
     _edge_manifold_audit,
     _optimize_candidate_state,
+    _preserves_prior_component_anchors,
 )
 from backend.cubical.physical_ribbon_complete_strips import (
     PhysicalRibbonCompleteStripSettings,
@@ -107,6 +114,15 @@ from backend.cubical.physical_ribbon_lineage_strip_replay import (
 )
 from backend.cubical.physical_ribbon_replay_configuration import (
     _materialize_replay_arrays,
+)
+from backend.cubical.physical_ribbon_cumulative_corridor_replay import (
+    _candidate_records as _cumulative_candidate_records,
+    _merge_connection_catalogs,
+    _merge_supplemental_faces,
+)
+from backend.cubical.physical_ribbon_cumulative_hole_replay import (
+    PhysicalRibbonCumulativeHoleReplaySettings,
+    _eligible_hole_proposals,
 )
 
 
@@ -188,6 +204,56 @@ class PhysicalRibbonConfigurationTests(unittest.TestCase):
         np.testing.assert_array_equal(configuration["selected"], (1, 1, 0))
         self.assertEqual(stats["selectedRibbonCount"], 2)
         self.assertEqual(stats["componentCount"], 1)
+        self.assertEqual(stats["selectedCrossingConflictCount"], 0)
+
+    def test_materialize_chained_replay_loads_constraints_from_configuration(
+        self,
+    ) -> None:
+        replay = {
+            "corridorReplaySelected": np.asarray((1, 1, 0), dtype=np.uint8),
+            "corridorReplayComponent": np.asarray((0, 0, -1), dtype=np.int32),
+        }
+        topology = {
+            "frontierRibbonCandidate": np.asarray((0, 1, 2), dtype=np.int32),
+            "frontierMidpointKeyXYZ": np.zeros((3, 3), dtype=np.int32),
+            "continuitySupportDegree": np.asarray((1, 1, 0), dtype=np.int32),
+            "continuitySupportScore": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "tangentRankRatio": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "selectionObjective": np.asarray((1.0, 1.0, 0.0), dtype=np.float32),
+            "selected": np.asarray((0, 0, 1), dtype=np.uint8),
+            "component": np.asarray((-1, -1, 0), dtype=np.int32),
+            "edgeFirstFrontierIndex": np.asarray((0, 1), dtype=np.int32),
+            "edgeSecondFrontierIndex": np.asarray((1, 2), dtype=np.int32),
+            "edgeScore": np.asarray((0.8, 0.7), dtype=np.float32),
+            "edgeSelected": np.asarray((0, 0), dtype=np.uint8),
+            "edgeNormalDegrees": np.zeros(2, dtype=np.float32),
+            "edgeMidpointHeightResidualVoxels": np.zeros(2, dtype=np.float32),
+            "edgeBoundaryHeightResidualVoxels": np.zeros(2, dtype=np.float32),
+            "edgeThicknessChangeVoxels": np.zeros(2, dtype=np.float32),
+            "edgeBoundaryShiftDifferenceVoxels": np.zeros(2, dtype=np.float32),
+        }
+        constraints = {
+            "crossingFirstFrontierIndex": np.asarray((0,), dtype=np.int32),
+            "crossingSecondFrontierIndex": np.asarray((2,), dtype=np.int32),
+            "crossingDistanceVoxels": np.asarray((0.5,), dtype=np.float32),
+            "crossingFirstParameter": np.asarray((0.5,), dtype=np.float32),
+            "crossingSecondParameter": np.asarray((0.5,), dtype=np.float32),
+            "nodeUnaryScore": np.asarray((0.8, 0.7, 0.6), dtype=np.float32),
+        }
+        ribbon = {
+            "sourceInterface": np.asarray((0, 2, 4), dtype=np.int32),
+            "targetInterface": np.asarray((1, 3, 5), dtype=np.int32),
+        }
+        _, configuration, stats = _materialize_replay_arrays(
+            replay,
+            topology,
+            ribbon,
+            constraint_configuration=constraints,
+        )
+        np.testing.assert_array_equal(configuration["selected"], (1, 1, 0))
+        np.testing.assert_array_equal(
+            configuration["crossingFirstFrontierIndex"], (0,)
+        )
         self.assertEqual(stats["selectedCrossingConflictCount"], 0)
 
     def test_explicit_continuity_frontier_can_include_one_sided_ribbon(self) -> None:
@@ -472,6 +538,34 @@ class PhysicalRibbonBridgingTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchHoleTests(unittest.TestCase):
+    def test_counterexample_trim_rebuilds_complete_hole_state(self) -> None:
+        candidates = [
+            {
+                "row": row,
+                "eligible": True,
+                "added": frozenset((10 + row,)),
+                "removed": frozenset((20 + row,)),
+                "patchCoverage": 0.8 + 0.05 * row,
+                "profileCorrelation": 0.9,
+                "competingLayerMargin": 0.3,
+                "localObjectiveDelta": 1.0 + row,
+            }
+            for row in range(3)
+        ]
+        state = _proposal_state_for_rows(
+            candidates,
+            (0, 2),
+            valid_modifications=lambda added, removed: (
+                len(added) == len(removed)
+            ),
+        )
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state["rows"], (0, 2))
+        self.assertEqual(state["added"], frozenset((10, 12)))
+        self.assertEqual(state["removed"], frozenset((20, 22)))
+        self.assertEqual(state["key"][0], 2.0)
+
     def test_polygon_test_preserves_signed_edge_denominator(self) -> None:
         counterclockwise = np.asarray(
             ((0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0))
@@ -527,6 +621,50 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
         self.assertEqual(stats["macroEligibleHoleCount"], 1)
         self.assertEqual(int(np.sum(loops["loopMacroEligible"])), 1)
 
+    def test_touching_boundary_fans_are_traced_without_discarding_loop(self) -> None:
+        # Two triangular boundary lobes share vertex zero, while their
+        # triangles remain one edge-connected surface through the center
+        # strip.  The undirected boundary has degree four at zero; its triangle
+        # link nevertheless contains two independent fans.  Pairing through
+        # those fans recovers the one abstract boundary circle, with the shared
+        # embedded vertex visited twice.
+        chart = np.asarray(
+            (
+                (0.0, 0.0),
+                (-2.0, -1.0),
+                (-2.0, 1.0),
+                (2.0, -1.0),
+                (2.0, 1.0),
+            ),
+            dtype=np.float32,
+        )
+        triangles = np.asarray(
+            (
+                (0, 1, 2),
+                (1, 3, 2),
+                (2, 3, 4),
+                (0, 3, 4),
+            ),
+            dtype=np.int32,
+        )
+        loops, stats = extract_surface_boundary_loops(
+            {
+                "triangleFrontierIndex": triangles,
+                "chartUV": chart,
+                "component": np.zeros(5, dtype=np.int32),
+                "thicknessVoxels": np.ones(5, dtype=np.float32),
+            },
+            settings=PhysicalRibbonPatchHoleSettings(),
+        )
+        self.assertEqual(stats["closedBoundaryLoopCount"], 1)
+        self.assertEqual(stats["pinchedBoundaryComponentCount"], 1)
+        self.assertEqual(stats["splitBoundaryFanCount"], 1)
+        self.assertEqual(stats["nonCycleBoundaryComponentCount"], 0)
+        values = loops["loopVertexFrontierIndex"]
+        self.assertEqual(len(values), 6)
+        self.assertEqual(set(values.tolist()), {0, 1, 2, 3, 4})
+        self.assertEqual(int(np.count_nonzero(values == 0)), 2)
+
     def test_quadratic_patch_is_fit_from_the_whole_context(self) -> None:
         uv = np.asarray(
             [
@@ -570,6 +708,122 @@ class PhysicalRibbonPatchHoleTests(unittest.TestCase):
 
 
 class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
+    def test_cumulative_hole_gate_requires_dense_macro_support(self) -> None:
+        arrays = {
+            "reconfigurationLoopIndex": np.asarray((0, 1), dtype=np.int32),
+            "selectedModel": np.asarray((0, 0), dtype=np.int32),
+            "zeroShiftContextProfileCorrelation": np.asarray(
+                ((0.99,), (0.62,)), dtype=np.float32
+            ),
+            "zeroShiftCompetingMargin": np.asarray(
+                ((0.42,), (0.14,)), dtype=np.float32
+            ),
+            "proposalPatchCoverage": np.asarray((1.0, 0.35), dtype=np.float32),
+            "proposalRetainedBoundaryFraction": np.asarray(
+                (0.9, 0.6), dtype=np.float32
+            ),
+            "proposalBoundaryAnchorCount": np.asarray((6, 5), dtype=np.int32),
+            "proposalObjectiveDelta": np.asarray((4.0, 8.0), dtype=np.float32),
+            "loopOffset": np.asarray((0, 6, 16), dtype=np.int64),
+            "proposalAddedOffset": np.asarray((0, 1, 2), dtype=np.int64),
+            "proposalAddedFrontierIndex": np.asarray((3, 4), dtype=np.int32),
+            "proposalRemovedOffset": np.asarray((0, 0, 0), dtype=np.int64),
+            "proposalRemovedFrontierIndex": np.empty(0, dtype=np.int32),
+        }
+        proposals = _eligible_hole_proposals(
+            arrays, settings=PhysicalRibbonCumulativeHoleReplaySettings()
+        )
+        self.assertTrue(proposals[0]["eligible"])
+        self.assertFalse(proposals[1]["eligible"])
+
+    def test_cumulative_candidate_beam_uses_only_exact_surface_states(self) -> None:
+        arrays = {
+            "corridorVariantSurfaceEligible": np.asarray((0, 1), dtype=np.uint8),
+            "corridorVariantRow": np.asarray((3, 3), dtype=np.int32),
+            "corridorVariantRank": np.asarray((0, 1), dtype=np.int32),
+            "corridorVariantTriangleRegionCountBefore": np.asarray(
+                (2, 2), dtype=np.int32
+            ),
+            "corridorVariantTriangleRegionCountAfter": np.asarray(
+                (2, 1), dtype=np.int32
+            ),
+            "corridorVariantTriangleAreaBefore": np.asarray(
+                (10.0, 10.0), dtype=np.float32
+            ),
+            "corridorVariantTriangleAreaAfter": np.asarray(
+                (10.0, 11.0), dtype=np.float32
+            ),
+            "corridorVariantPatchCoverage": np.asarray(
+                (0.5, 0.8), dtype=np.float32
+            ),
+            "corridorVariantLocalObjectiveDelta": np.asarray(
+                (1.0, 2.0), dtype=np.float32
+            ),
+        }
+        records = _cumulative_candidate_records(arrays)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["variantIndex"], 1)
+        self.assertAlmostEqual(records[0]["strictAreaRetention"], 1.1)
+
+    def test_cumulative_catalog_merge_preserves_prior_and_new_rows(self) -> None:
+        settings = PhysicalRibbonCorridorFaceSettings()
+        reference = {
+            "manifestPath": "corridors.json",
+            "manifestSha256": "manifest",
+            "dataSha256": "data",
+        }
+        merged = _merge_connection_catalogs(
+            (
+                {
+                    "corridors": reference,
+                    "rows": (2, 4),
+                    "faceSettings": settings.record(),
+                },
+            ),
+            reference,
+            (4, 7),
+            settings,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["rows"], [2, 4, 7])
+
+    def test_cumulative_face_merge_deduplicates_across_catalogs(self) -> None:
+        def faces(row: int, residual: float) -> dict[str, np.ndarray]:
+            return {
+                "supplementalTriangleFrontierIndex": np.asarray(
+                    ((2, 0, 1),), dtype=np.int32
+                ),
+                "supplementalTrianglePrimaryCorridorRow": np.asarray(
+                    (row,), dtype=np.int32
+                ),
+                "supplementalTriangleMinimumPath": np.asarray(
+                    (row == 4,), dtype=np.uint8
+                ),
+                "supplementalTriangleAreaVoxelsSquared": np.asarray(
+                    (1.0,), dtype=np.float32
+                ),
+                "supplementalTriangleNodeNormalResidualDegrees": np.asarray(
+                    (2.0,), dtype=np.float32
+                ),
+                "supplementalTriangleCtNormalResidualDegrees": np.asarray(
+                    (residual,), dtype=np.float32
+                ),
+                "supplementalTriangleCenterDistanceThicknesses": np.asarray(
+                    (0.1,), dtype=np.float32
+                ),
+                "supplementalTriangleCenterHeightThicknesses": np.asarray(
+                    (0.1,), dtype=np.float32
+                ),
+                "supplementalTriangleMaximumEdgeThicknesses": np.asarray(
+                    (0.5,), dtype=np.float32
+                ),
+            }
+
+        merged = _merge_supplemental_faces(((0, faces(2, 10.0)), (1, faces(4, 5.0))))
+        self.assertEqual(len(merged["supplementalTriangleFrontierIndex"]), 1)
+        self.assertEqual(int(merged["supplementalTriangleCatalogIndex"][0]), 1)
+        self.assertEqual(int(merged["supplementalTriangleMinimumPath"][0]), 1)
+
     def test_ct_closure_may_replace_small_strict_area_loss(self) -> None:
         settings = PhysicalRibbonCompleteStripSettings()
         self.assertEqual(
@@ -772,7 +1026,40 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
         )
         self.assertEqual(audit["deletedPriorComponentCount"], 1)
         self.assertEqual(audit["deletedPriorComponents"], [1])
+        self.assertEqual(audit["forbiddenPriorComponentDeletionCount"], 1)
         self.assertEqual(audit["orphanFinalComponentCount"], 0)
+
+    def test_lineage_replay_allows_fully_replaced_provisional_component(
+        self,
+    ) -> None:
+        audit = _complete_inheritance_audit(
+            np.asarray((1, 1, 1, 0, 0), dtype=bool),
+            np.asarray((0, 0, 1, -1, -1), dtype=np.int32),
+            np.asarray((1, 1, 0, 1, 1), dtype=bool),
+            np.asarray((0, 0, -1, 0, 0), dtype=np.int32),
+            minimum_substantial_ribbon_count=2,
+            source_interface=np.asarray((0, 2, 4, 4, 6), dtype=np.int32),
+            target_interface=np.asarray((1, 3, 5, 7, 5), dtype=np.int32),
+        )
+        self.assertEqual(audit["deletedPriorComponentCount"], 1)
+        self.assertEqual(audit["forbiddenPriorComponentDeletionCount"], 0)
+        self.assertEqual(audit["allowedProvisionalReplacementCount"], 1)
+        self.assertTrue(audit["deletedPriorComponentRecords"][0]["fullyReplaced"])
+
+    def test_lineage_replay_rejects_partially_replaced_provisional_component(
+        self,
+    ) -> None:
+        audit = _complete_inheritance_audit(
+            np.asarray((1, 1, 1, 0), dtype=bool),
+            np.asarray((0, 0, 1, -1), dtype=np.int32),
+            np.asarray((1, 1, 0, 1), dtype=bool),
+            np.asarray((0, 0, -1, 0), dtype=np.int32),
+            minimum_substantial_ribbon_count=2,
+            source_interface=np.asarray((0, 2, 4, 4), dtype=np.int32),
+            target_interface=np.asarray((1, 3, 5, 7), dtype=np.int32),
+        )
+        self.assertEqual(audit["forbiddenPriorComponentDeletionCount"], 1)
+        self.assertEqual(audit["allowedProvisionalReplacementCount"], 0)
 
     def test_lineage_replay_only_absorbs_provisional_components(self) -> None:
         allowed = _complete_inheritance_audit(
@@ -1150,6 +1437,66 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
             (2, 0, 3),
         )
 
+    def test_assignment_beam_preserves_one_anchor_per_prior_component(self) -> None:
+        selected = np.asarray((1, 1, 1, 1), dtype=bool)
+        component = np.asarray((0, 0, 1, 2), dtype=np.int32)
+        self.assertTrue(
+            _preserves_prior_component_anchors(
+                frozenset(),
+                frozenset((0,)),
+                baseline_selected=selected,
+                baseline_component=component,
+            )
+        )
+        self.assertFalse(
+            _preserves_prior_component_anchors(
+                frozenset(),
+                frozenset((2,)),
+                baseline_selected=selected,
+                baseline_component=component,
+            )
+        )
+        self.assertTrue(
+            _preserves_prior_component_anchors(
+                frozenset((2,)),
+                frozenset((2,)),
+                baseline_selected=selected,
+                baseline_component=component,
+            )
+        )
+
+    def test_new_corridor_catalog_does_not_reuse_prior_success_rows(self) -> None:
+        prior_manifest = {
+            "identity": {"corridors": {"dataSha256": "old"}},
+            "data": {"sha256": "replay"},
+        }
+        current_manifest = {"data": {"sha256": "new"}}
+        result = _successful_corridor_mask(
+            Path("/tmp/prior.json"),
+            prior_manifest,
+            {},
+            Path("/tmp/current.json"),
+            current_manifest,
+            3,
+        )
+        np.testing.assert_array_equal(result, (False, False, False))
+
+    def test_same_corridor_catalog_preserves_prior_success_rows(self) -> None:
+        prior_manifest = {
+            "identity": {"corridors": {"dataSha256": "same"}},
+            "data": {"sha256": "replay"},
+        }
+        current_manifest = {"data": {"sha256": "same"}}
+        result = _successful_corridor_mask(
+            Path("/tmp/prior.json"),
+            prior_manifest,
+            {"corridorReplayProposalSuccessful": np.asarray((1, 0, 1))},
+            Path("/tmp/current.json"),
+            current_manifest,
+            3,
+        )
+        np.testing.assert_array_equal(result, (True, False, True))
+
     def test_one_sided_variant_count_uses_bank_identity(self) -> None:
         variants = {
             "corridorVariantAddedOffset": np.asarray(
@@ -1167,6 +1514,20 @@ class PhysicalRibbonPatchCorridorTests(unittest.TestCase):
                 variants, frontier, one_sided
             ),
             (2, 0),
+        )
+
+    def test_exact_screen_array_fingerprint_is_order_independent(self) -> None:
+        first = {
+            "b": np.asarray((3.0, 4.0), dtype=np.float32),
+            "a": np.asarray(((1, 2),), dtype=np.int32),
+        }
+        second = {"a": first["a"].copy(), "b": first["b"].copy()}
+        self.assertEqual(
+            _array_mapping_sha256(first), _array_mapping_sha256(second)
+        )
+        second["a"][0, 1] = 7
+        self.assertNotEqual(
+            _array_mapping_sha256(first), _array_mapping_sha256(second)
         )
 
     def test_crossing_screen_unions_strict_and_support_edges(self) -> None:

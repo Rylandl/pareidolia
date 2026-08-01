@@ -31,6 +31,10 @@ _REPLAY_MANIFEST_STEMS = (
     "physical-ribbon-one-sided-corridors-v1",
     "physical-ribbon-dormant-corridors-v1",
     "physical-ribbon-patch-corridors-v1",
+    "physical-ribbon-complete-strip-replay-v1",
+    "physical-ribbon-lineage-strip-replay-v1",
+    "physical-ribbon-cumulative-corridor-replay-v1",
+    "physical-ribbon-cumulative-hole-replay-v1",
 )
 _TOPOLOGY_FIELDS = (
     "frontierRibbonCandidate",
@@ -86,6 +90,19 @@ def _load_replay_artifact(
     data_path = manifest_path.parent / str(manifest["data"]["path"])
     arrays = _load_npz(data_path, manifest["data"]["sha256"])
     required = {"corridorReplaySelected", "corridorReplayComponent"}
+    if not required.issubset(arrays) and {"selected", "component"}.issubset(
+        arrays
+    ):
+        # Exact strip replays expose the cumulative state under the ordinary
+        # surface field names.  Normalize that newer contract here so the
+        # materializer remains the single entry point for every exact replay.
+        arrays = dict(arrays)
+        arrays["corridorReplaySelected"] = np.asarray(
+            arrays["selected"], dtype=np.uint8
+        )
+        arrays["corridorReplayComponent"] = np.asarray(
+            arrays["component"], dtype=np.int32
+        )
     if not required.issubset(arrays):
         raise ValueError("artifact does not contain a cumulative corridor replay")
     return manifest_path, manifest, arrays
@@ -178,6 +195,7 @@ def _materialize_replay_arrays(
     topology: Mapping[str, np.ndarray],
     ribbon: Mapping[str, np.ndarray],
     support_topology: Mapping[str, np.ndarray] | None = None,
+    constraint_configuration: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
     missing = [name for name in _TOPOLOGY_FIELDS if name not in topology]
     if missing:
@@ -215,11 +233,22 @@ def _materialize_replay_arrays(
     interface_conflict_count = int(
         len(selected_interfaces) - len(np.unique(selected_interfaces))
     )
+    # A materialized continuity artifact deliberately contains only the
+    # immutable continuation graph.  Its paired configuration owns the hard
+    # crossing constraints and conditioned unary scores.  The first replay in
+    # a chain may still reference an older topology that carries those fields,
+    # so support both contracts without weakening either audit.
+    constraint_source = (
+        topology
+        if constraint_configuration is None
+        else constraint_configuration
+    )
     crossing_arrays: dict[str, np.ndarray] = {}
     for name in _CROSSING_FIELDS:
-        if name not in topology:
+        source_arrays = topology if name in topology else constraint_source
+        if name not in source_arrays:
             raise ValueError(f"replay topology is missing {name}")
-        crossing_arrays[name] = np.asarray(topology[name])
+        crossing_arrays[name] = np.asarray(source_arrays[name])
     crossing_first = np.asarray(
         crossing_arrays["crossingFirstFrontierIndex"], dtype=np.int32
     )
@@ -239,11 +268,14 @@ def _materialize_replay_arrays(
     materialized_topology["selected"] = selected.astype(np.uint8)
     materialized_topology["component"] = component.copy()
     materialized_topology["edgeSelected"] = edge_selected.astype(np.uint8)
-    if "nodeUnaryScore" not in topology:
+    unary_source = (
+        topology if "nodeUnaryScore" in topology else constraint_source
+    )
+    if "nodeUnaryScore" not in unary_source:
         raise ValueError("replay topology is missing conditioned unary scores")
     configuration = {
         **crossing_arrays,
-        "nodeUnaryScore": np.asarray(topology["nodeUnaryScore"]).copy(),
+        "nodeUnaryScore": np.asarray(unary_source["nodeUnaryScore"]).copy(),
         "initialSelected": selected.astype(np.uint8),
         "selected": selected.astype(np.uint8),
         "component": component.copy(),
@@ -298,7 +330,7 @@ def run_physical_ribbon_replay_configuration(
     (
         configuration_path,
         configuration_manifest,
-        _,
+        source_configuration,
         _,
         _,
         _,
@@ -385,7 +417,11 @@ def run_physical_ribbon_replay_configuration(
     started = time.monotonic()
     materialized_topology, configuration, statistics = (
         _materialize_replay_arrays(
-            replay, topology, ribbon, support_topology=support_topology
+            replay,
+            topology,
+            ribbon,
+            support_topology=support_topology,
+            constraint_configuration=source_configuration,
         )
     )
     materialized_at = time.monotonic()

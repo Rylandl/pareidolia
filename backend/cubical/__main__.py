@@ -176,6 +176,14 @@ from .physical_ribbon_lineage_strip_replay import (
     PhysicalRibbonLineageStripReplaySettings,
     run_physical_ribbon_lineage_strip_replay,
 )
+from .physical_ribbon_cumulative_corridor_replay import (
+    PhysicalRibbonCumulativeCorridorReplaySettings,
+    run_physical_ribbon_cumulative_corridor_replay,
+)
+from .physical_ribbon_cumulative_hole_replay import (
+    PhysicalRibbonCumulativeHoleReplaySettings,
+    run_physical_ribbon_cumulative_hole_replay,
+)
 from .reselection import SelectionVariantSettings, run_selection_variant
 from .repair import evaluate_single_cell_gap_repairs, write_gap_repair_search
 from .repair_variant import run_gap_repair_variant
@@ -863,6 +871,7 @@ def _physical_ribbon_patch_holes(args: argparse.Namespace) -> None:
     summary = run_physical_ribbon_patch_holes(
         args.configuration,
         args.output,
+        surface_replay_root=args.surface_replay,
         settings=PhysicalRibbonPatchHoleSettings(**settings_values),
         force=args.force,
     )
@@ -878,6 +887,7 @@ def _physical_ribbon_patch_corridors(args: argparse.Namespace) -> None:
     summary = run_physical_ribbon_patch_corridors(
         args.configuration,
         args.output,
+        surface_replay_root=args.surface_replay,
         settings=PhysicalRibbonPatchCorridorSettings(**settings_values),
         force=args.force,
     )
@@ -1113,6 +1123,44 @@ def _physical_ribbon_lineage_strip_replay(args: argparse.Namespace) -> None:
         args.lineage_strips,
         args.output,
         settings=PhysicalRibbonLineageStripReplaySettings(**settings_values),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_cumulative_corridor_replay(
+    args: argparse.Namespace,
+) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_cumulative_corridor_replay(
+        args.prior_replay,
+        args.candidate_replay,
+        args.output,
+        settings=PhysicalRibbonCumulativeCorridorReplaySettings(
+            **settings_values
+        ),
+        force=args.force,
+        progress=print,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_ribbon_cumulative_hole_replay(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_ribbon_cumulative_hole_replay(
+        args.prior_replay,
+        args.holes,
+        args.output,
+        settings=PhysicalRibbonCumulativeHoleReplaySettings(**settings_values),
         force=args.force,
         progress=print,
     )
@@ -2713,6 +2761,15 @@ def main() -> None:
         "--configuration", type=Path, required=True
     )
     physical_ribbon_patch_holes.add_argument(
+        "--surface-replay",
+        type=Path,
+        help=(
+            "Exact cumulative replay whose strict-plus-native-CT surface is "
+            "used for the hole census. The configuration must be its "
+            "materialized state."
+        ),
+    )
+    physical_ribbon_patch_holes.add_argument(
         "--output", type=Path, required=True
     )
     physical_ribbon_patch_holes.add_argument("--settings-json", type=Path)
@@ -2730,6 +2787,15 @@ def main() -> None:
     )
     physical_ribbon_patch_corridors.add_argument(
         "--configuration", type=Path, required=True
+    )
+    physical_ribbon_patch_corridors.add_argument(
+        "--surface-replay",
+        type=Path,
+        help=(
+            "Exact cumulative strip replay whose strict-plus-native-CT surface "
+            "is preserved during the refreshed corridor census. The "
+            "configuration must have been materialized from this replay."
+        ),
     )
     physical_ribbon_patch_corridors.add_argument(
         "--output", type=Path, required=True
@@ -3112,6 +3178,58 @@ def main() -> None:
     )
     physical_ribbon_lineage_strip_replay.set_defaults(
         handler=_physical_ribbon_lineage_strip_replay
+    )
+    physical_ribbon_cumulative_corridor_replay = subparsers.add_parser(
+        "replay-physical-ribbon-cumulative-corridors",
+        description=(
+            "Commit exact complete-strip candidates from a refreshed corridor "
+            "catalog while rebuilding every inherited native-CT connection "
+            "in the final shared sheet charts."
+        ),
+    )
+    physical_ribbon_cumulative_corridor_replay.add_argument(
+        "--prior-replay", type=Path, required=True
+    )
+    physical_ribbon_cumulative_corridor_replay.add_argument(
+        "--candidate-replay", type=Path, required=True
+    )
+    physical_ribbon_cumulative_corridor_replay.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_cumulative_corridor_replay.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_cumulative_corridor_replay.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_cumulative_corridor_replay.set_defaults(
+        handler=_physical_ribbon_cumulative_corridor_replay
+    )
+    physical_ribbon_cumulative_hole_replay = subparsers.add_parser(
+        "replay-physical-ribbon-cumulative-holes",
+        description=(
+            "Commit dense CT-supported whole-hole assignments while "
+            "rebuilding every inherited corridor connection and preserving "
+            "sheet lineage."
+        ),
+    )
+    physical_ribbon_cumulative_hole_replay.add_argument(
+        "--prior-replay", type=Path, required=True
+    )
+    physical_ribbon_cumulative_hole_replay.add_argument(
+        "--holes", type=Path, required=True
+    )
+    physical_ribbon_cumulative_hole_replay.add_argument(
+        "--output", type=Path, required=True
+    )
+    physical_ribbon_cumulative_hole_replay.add_argument(
+        "--settings-json", type=Path
+    )
+    physical_ribbon_cumulative_hole_replay.add_argument(
+        "--force", action="store_true"
+    )
+    physical_ribbon_cumulative_hole_replay.set_defaults(
+        handler=_physical_ribbon_cumulative_hole_replay
     )
     gap_census = subparsers.add_parser(
         "gap-census",
