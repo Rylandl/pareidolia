@@ -956,6 +956,51 @@ python3 scripts/fetch-zarr-cuboid.py \
 
 ## Run locally
 
+### Signed physical-boundary surfaces
+
+The current sheeting path distinguishes two physical statements that earlier
+experiments conflated:
+
+- a signed air--material boundary continues as one collision-safe surface; and
+- three local profiles agree on the same opposite boundary and therefore
+  certify a complete air--papyrus--air interior prism.
+
+The first statement defines the surface that can be flattened. The second is
+preserved as stronger local thickness evidence, but a weak or changing exit
+crossing cannot fragment an otherwise observed papyrus face. Boundary tracks
+are integrated into intrinsic charts and triangulated with locally supported
+Delaunay closure:
+
+```bash
+.venv/bin/python -m backend.cubical mesh-paired-boundary-surfaces \
+  --direct-surfaces work/multiseam-2x2-b00c03c/direct-boundary-tracks-v1 \
+  --settings-json examples/paired-boundary-surface.json \
+  --output work/multiseam-2x2-b00c03c/paired-boundary-surface-v1
+```
+
+On the 384 × 384 × 320 owned PHerc. 358 block (with its processing halo), the
+stage emits 158,265 certified face triangles over the 256 largest signed
+surfaces in 35.5 seconds. It retains 46,501 stricter two-face interior
+triangles separately and reports zero nonmanifold edges.
+
+The representation is controlled against one independently unrolled PHerc.
+1667 TIFXYZ face without using its labels during reconstruction:
+
+```bash
+.venv/bin/python -m backend.cubical audit-tifxyz-surface-control \
+  --tifxyz /path/to/known/segment.tifxyz \
+  --mid-surfaces /path/to/paired-boundary-surface-v1 \
+  --source-metadata /path/to/control-volume.json \
+  --settings-json examples/tifxyz-certified-boundary-face-audit.json \
+  --output /path/to/truth-audit-certified-boundary-faces-v1
+```
+
+The leading signed face covers 34.32% of the known surface in one component;
+77.00% of its vertices match the truth chart and its control score is 0.3011.
+The stricter opposite-track identity partition covered 10.95% with a 0.0874
+score. This truth result is the reason surface identity now follows the
+observed signed boundary rather than the sometimes ambiguous opposite exit.
+
 Requirements are Python 3.12 with NumPy and Node.js 22.13 or newer.
 
 ```bash
@@ -966,17 +1011,17 @@ npm run dev
 
 Open `http://127.0.0.1:3000/`.
 
-The solved owned-core block is available at `/block-volume`. It registers the
-current collision-safe physical boundary tracks against a stride-2 texture of
-the corresponding 384 × 384 × 320 native CT block. Boundary observations are
-colored by physical-face identity rather than by their paired-profile
-midpoint, so a clear air--papyrus interface remains continuous when the
-opposite exit crossing is ambiguous. The viewer can orbit and trackpad-zoom
-the combined scene, select or isolate a boundary track, filter by component
-size, and cut the volume and observations with the same X, Y, or Z plane. It
-also reports the number of transitive layer-crossing joins rejected by the
-macro-tangent depth guard. The default artifacts can be overridden without
-changing the webpage:
+The solved block is available at `/block-volume`. It registers filled,
+certified physical-boundary triangles against a stride-2 texture of the
+corresponding 496 × 496 × 432 processing-halo CT block. Surfaces are colored by
+signed physical-face identity rather than by paired-profile midpoint, so a
+clear air--papyrus interface remains continuous when the opposite exit
+crossing is ambiguous. The viewer can orbit and trackpad-zoom the combined
+scene, select or isolate a surface, filter by triangle count, toggle mesh
+edges, and cut the volume and surfaces with the same X, Y, or Z plane. To keep
+orbiting responsive it loads the largest 32 of the 256 reconstructed surfaces
+without subsampling any displayed mesh. The default artifacts can be
+overridden without changing the webpage:
 
 ```bash
 PAREIDOLIA_BLOCK_SHEET_ROOT=/path/to/retained-graph \

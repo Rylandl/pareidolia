@@ -63,7 +63,8 @@ type BlockSurfaceResult = {
   representation?:
     | "material-interface-graph"
     | "physical-mid-surface-graph"
-    | "physical-boundary-track-graph";
+    | "physical-boundary-track-graph"
+    | "physical-boundary-surface-mesh";
   variant: string;
   artifact: {
     manifestPath: string;
@@ -90,6 +91,7 @@ type BlockSurfaceResult = {
   };
   stats: {
     triangleCount: number;
+    totalTriangleCount?: number;
     nodeCount: number;
     displayedNodeCount?: number;
     componentCount: number;
@@ -477,7 +479,7 @@ export function BlockVolumeExplorer() {
   const [volume, setVolume] = useState<VolumePayload | null>(null);
   const [rendererReady, setRendererReady] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [message, setMessage] = useState("Loading physical boundary tracks and source voxels…");
+  const [message, setMessage] = useState("Loading physical boundary surfaces and source voxels…");
   const [retry, setRetry] = useState(0);
   const [orbit, setOrbit] = useState(DEFAULT_ORBIT);
   const [threshold, setThreshold] = useState(0.38);
@@ -488,7 +490,7 @@ export function BlockVolumeExplorer() {
   const [clipFraction, setClipFraction] = useState(1);
   const [showVolume, setShowVolume] = useState(true);
   const [showSheets, setShowSheets] = useState(true);
-  const [showEdges, setShowEdges] = useState(true);
+  const [showEdges, setShowEdges] = useState(false);
   const [showExperimental, setShowExperimental] = useState(true);
   const [selectedComponent, setSelectedComponent] = useState<number | null>(null);
   const [isolateSelected, setIsolateSelected] = useState(false);
@@ -500,13 +502,14 @@ export function BlockVolumeExplorer() {
 
   const isInterfaceGraph = result?.representation === "material-interface-graph";
   const isMidSurfaceGraph = result?.representation === "physical-mid-surface-graph";
-  const isBoundaryTrackGraph =
-    result?.representation === "physical-boundary-track-graph" || result === null;
+  const isBoundaryTrackGraph = result?.representation === "physical-boundary-track-graph";
+  const isBoundarySurfaceMesh =
+    result?.representation === "physical-boundary-surface-mesh" || result === null;
   const isPointGraph = isInterfaceGraph || isMidSurfaceGraph || isBoundaryTrackGraph;
 
   const visiblePrimitiveCount = useMemo(() => {
     if (!result || !showSheets) return 0;
-    if (result.representation) {
+    if (isPointGraph) {
       return (result.interfaceNodes ?? []).reduce((count, node) => {
         const component = result.components[node[3] - 1];
         return count +
@@ -529,6 +532,7 @@ export function BlockVolumeExplorer() {
     );
   }, [
     isolateSelected,
+    isPointGraph,
     minimumComponentSize,
     result,
     selectedComponent,
@@ -577,7 +581,7 @@ export function BlockVolumeExplorer() {
     const cutoff = axis === -1 ? Infinity : extent[axis] * clipFraction;
     const projected: ProjectedTriangle[] = [];
     const projectedInterfaceNodes: ProjectedInterfaceNode[] = [];
-    if (showSheets && result.representation) {
+    if (showSheets && isPointGraph) {
       const groups = Array.from(
         { length: result.components.length + 1 },
         () => [] as ProjectedInterfaceNode[],
@@ -732,6 +736,7 @@ export function BlockVolumeExplorer() {
     clipAxis,
     clipFraction,
     isolateSelected,
+    isPointGraph,
     minimumComponentSize,
     orbit,
     result,
@@ -770,7 +775,7 @@ export function BlockVolumeExplorer() {
   useEffect(() => {
     const controller = new AbortController();
     setState("loading");
-    setMessage("Loading physical boundary tracks and their aligned CT block…");
+    setMessage("Loading physical boundary surfaces and their aligned CT block…");
     Promise.all([
       fetch("/api/block/sheets", { signal: controller.signal }).then(async (response) => {
         if (!response.ok) {
@@ -904,7 +909,7 @@ export function BlockVolumeExplorer() {
     if (!drag || drag.moved) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const point = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-    if (result?.representation) {
+    if (isPointGraph) {
       let hitComponent: number | null = null;
       let bestDistanceSquared = 36;
       for (const entry of hitInterfaceNodesRef.current) {
@@ -944,7 +949,9 @@ export function BlockVolumeExplorer() {
         </nav>
         <div>
           <p className="eyebrow">
-            {isBoundaryTrackGraph
+            {isBoundarySurfaceMesh
+              ? "Signed papyrus faces · collision-safe intrinsic surface meshes"
+              : isBoundaryTrackGraph
               ? "Physical air–papyrus boundaries · macro-ordered endpoint tracks"
               : isMidSurfaceGraph
               ? "Direct air–papyrus–air profiles · macro-gated geometry"
@@ -952,11 +959,13 @@ export function BlockVolumeExplorer() {
               ? "Physical slab modes · dense signed CT faces"
               : "Acus · current cubical reconstruction"}
           </p>
-          <h1>{isBoundaryTrackGraph ? "Papyrus boundary tracks in CT" : isMidSurfaceGraph ? "Papyrus mid-surfaces in CT" : isInterfaceGraph ? "Material interfaces in CT" : "Surface components in CT"}</h1>
+          <h1>{isBoundarySurfaceMesh ? "Papyrus boundary surfaces in CT" : isBoundaryTrackGraph ? "Papyrus boundary tracks in CT" : isMidSurfaceGraph ? "Papyrus mid-surfaces in CT" : isInterfaceGraph ? "Material interfaces in CT" : "Surface components in CT"}</h1>
         </div>
         <p className="block-volume-summary">
           {result
-            ? isBoundaryTrackGraph
+            ? isBoundarySurfaceMesh
+              ? `${result.grid.extentXYZ.join(" × ")} vox · ${(result.stats.totalTriangleCount ?? result.stats.triangleCount).toLocaleString()} certified physical-face triangles · ${result.stats.componentCount.toLocaleString()} collision-safe surfaces · displaying the largest ${(result.stats.displayedComponentCount ?? result.components.length).toLocaleString()}`
+              : isBoundaryTrackGraph
               ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} physical face observations · ${result.stats.componentCount.toLocaleString()} collision-safe boundary tracks · ${(result.stats.columnConflictRejectedEdgeCount ?? 0).toLocaleString()} layer-crossing joins rejected`
               : isMidSurfaceGraph
               ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} direct physical profiles · ${result.stats.componentCount.toLocaleString()} two-boundary continuity fragments`
@@ -1054,13 +1063,14 @@ export function BlockVolumeExplorer() {
             Volume
           </button>
           <button type="button" aria-pressed={showSheets} onClick={() => setShowSheets((value) => !value)}>
-            {isBoundaryTrackGraph ? "Boundary tracks" : isMidSurfaceGraph ? "Mid-surfaces" : isInterfaceGraph ? "Interfaces" : "Surfaces"}
+            {isBoundarySurfaceMesh ? "Boundary surfaces" : isBoundaryTrackGraph ? "Boundary tracks" : isMidSurfaceGraph ? "Mid-surfaces" : isInterfaceGraph ? "Interfaces" : "Surfaces"}
           </button>
           {!isPointGraph ? (
-            <>
-              <button type="button" aria-pressed={showEdges} onClick={() => setShowEdges((value) => !value)}>
-                Edges
-              </button>
+            <button type="button" aria-pressed={showEdges} onClick={() => setShowEdges((value) => !value)}>
+              Edges
+            </button>
+          ) : null}
+          {!isPointGraph && !isBoundarySurfaceMesh ? (
               <button
                 type="button"
                 aria-pressed={showExperimental}
@@ -1068,7 +1078,6 @@ export function BlockVolumeExplorer() {
               >
                 New joins
               </button>
-            </>
           ) : null}
           <button type="button" onClick={() => setOrbit(DEFAULT_ORBIT)}>
             Reset view
@@ -1084,7 +1093,9 @@ export function BlockVolumeExplorer() {
             className="block-sheet-overlay"
             tabIndex={0}
             role="img"
-            aria-label={isBoundaryTrackGraph
+            aria-label={isBoundarySurfaceMesh
+              ? "Orbitable CT volume containing signed papyrus boundary surface meshes. Drag to orbit, pinch or scroll to zoom, and click a surface to inspect it."
+              : isBoundaryTrackGraph
               ? "Orbitable CT volume containing physical papyrus boundary tracks. Drag to orbit, pinch or scroll to zoom, and click a track to inspect it."
               : isMidSurfaceGraph
               ? "Orbitable CT volume containing paired physical papyrus mid-surface fragments. Drag to orbit, pinch or scroll to zoom, and click a fragment to inspect it."
@@ -1104,15 +1115,15 @@ export function BlockVolumeExplorer() {
 
           <div className="block-volume-legend" aria-hidden="true">
             <span><i data-kind="volume" />CT material</span>
-            <span><i data-kind="sheet" />{isBoundaryTrackGraph ? "physical boundary track" : isMidSurfaceGraph ? "physical mid-surface fragment" : isInterfaceGraph ? "signed face component" : "pre-join component"}</span>
+            <span><i data-kind="sheet" />{isBoundarySurfaceMesh ? "certified physical boundary surface" : isBoundaryTrackGraph ? "physical boundary track" : isMidSurfaceGraph ? "physical mid-surface fragment" : isInterfaceGraph ? "signed face component" : "pre-join component"}</span>
             {isMidSurfaceGraph || isInterfaceGraph ? <span><i data-kind="anchor" />{isMidSurfaceGraph ? "dense two-face confirmation" : "exact paired-profile anchor"}</span> : null}
-            {isInterfaceGraph ? <span><i data-kind="experimental" />repeated-evidence bridge</span> : !isPointGraph ? <span><i data-kind="experimental" />experimental completion</span> : null}
+            {isInterfaceGraph ? <span><i data-kind="experimental" />repeated-evidence bridge</span> : !isPointGraph && !isBoundarySurfaceMesh ? <span><i data-kind="experimental" />experimental completion</span> : null}
             <span>drag orbit · pinch zoom · click {isPointGraph ? "fragment" : "surface"}</span>
           </div>
 
           <div className="block-volume-count">
             {state === "ready"
-              ? `${visiblePrimitiveCount.toLocaleString()} / ${isPointGraph ? (result?.stats.displayedNodeCount ?? 0).toLocaleString() : result?.stats.triangleCount.toLocaleString()} ${isBoundaryTrackGraph ? "loaded boundary observations" : isMidSurfaceGraph ? "loaded center samples" : isInterfaceGraph ? "loaded face samples" : "triangles"} visible`
+              ? `${visiblePrimitiveCount.toLocaleString()} / ${isPointGraph ? (result?.stats.displayedNodeCount ?? 0).toLocaleString() : result?.stats.triangleCount.toLocaleString()} ${isBoundarySurfaceMesh ? "loaded physical-face triangles" : isBoundaryTrackGraph ? "loaded boundary observations" : isMidSurfaceGraph ? "loaded center samples" : isInterfaceGraph ? "loaded face samples" : "triangles"} visible`
               : message}
           </div>
 
@@ -1134,9 +1145,9 @@ export function BlockVolumeExplorer() {
           {selected ? (
             <div className="block-volume-selection">
               <div>
-                <span>Selected {isBoundaryTrackGraph ? "physical boundary track" : isMidSurfaceGraph ? "mid-surface fragment" : isInterfaceGraph ? "interface" : "surface"} component</span>
+                <span>Selected {isBoundarySurfaceMesh ? "physical boundary surface" : isBoundaryTrackGraph ? "physical boundary track" : isMidSurfaceGraph ? "mid-surface fragment" : isInterfaceGraph ? "interface" : "surface"} component</span>
                 <strong>
-                  #{selected.rank} · stable {selected.stableId} · {isBoundaryTrackGraph ? `${selected.nodeCount.toLocaleString()} boundary observations` : isMidSurfaceGraph ? `${selected.nodeCount.toLocaleString()} center samples` : isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
+                  #{selected.rank} · stable {selected.stableId} · {isBoundarySurfaceMesh ? `${selected.triangleCount.toLocaleString()} physical-face triangles` : isBoundaryTrackGraph ? `${selected.nodeCount.toLocaleString()} boundary observations` : isMidSurfaceGraph ? `${selected.nodeCount.toLocaleString()} center samples` : isInterfaceGraph ? `${selected.nodeCount.toLocaleString()} face samples` : `${selected.triangleCount.toLocaleString()} triangles`}
                 </strong>
                 <small>
                   {isPointGraph ? "span" : `${selected.nodeCount.toLocaleString()} mesh nodes · ${Math.round(selected.surfaceAreaVoxelsSquared).toLocaleString()} vox² · span`} {selected.boundsMaximumXYZ
@@ -1149,9 +1160,18 @@ export function BlockVolumeExplorer() {
                   </small>
                 ) : null}
                 <small>
-                  {isBoundaryTrackGraph ? "profile-to-macro normal residual" : isMidSurfaceGraph ? "paired-face normal disagreement" : isInterfaceGraph ? "raw-to-macro normal residual" : "triangle normal residual"} median/p90/max {selected.normalResidualDegrees.median.toFixed(1)}°/{selected.normalResidualDegrees.p90.toFixed(1)}°/{selected.normalResidualDegrees.maximum.toFixed(1)}°
+                  {isBoundarySurfaceMesh ? "triangle-to-signed-face normal residual" : isBoundaryTrackGraph ? "profile-to-macro normal residual" : isMidSurfaceGraph ? "paired-face normal disagreement" : isInterfaceGraph ? "raw-to-macro normal residual" : "triangle normal residual"} median/p90/max {selected.normalResidualDegrees.median.toFixed(1)}°/{selected.normalResidualDegrees.p90.toFixed(1)}°/{selected.normalResidualDegrees.maximum.toFixed(1)}°
                 </small>
-                {isBoundaryTrackGraph ? (
+                {isBoundarySurfaceMesh ? (
+                  <>
+                    <small>
+                      {selected.nodeCount.toLocaleString()} measured boundary vertices · {Math.round(selected.surfaceAreaVoxelsSquared).toLocaleString()} vox² · median local paired thickness {(selected.medianThicknessVoxels ?? 0).toFixed(1)} vox
+                    </small>
+                    <small>
+                      signed collision-safe boundary track {selected.stableId} · opposite-face identity is evidence, not surface identity
+                    </small>
+                  </>
+                ) : isBoundaryTrackGraph ? (
                   <>
                     <small>
                       {(selected.physicalAnchorNodeCount ?? 0).toLocaleString()} measured air–papyrus face observations · median paired thickness {(selected.medianThicknessVoxels ?? 0).toFixed(1)} vox

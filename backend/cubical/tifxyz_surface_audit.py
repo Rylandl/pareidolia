@@ -19,6 +19,10 @@ from .paired_surface_growth import (
     PAIRED_SURFACE_GROWTH_SCHEMA,
     PAIRED_SURFACE_GROWTH_STEM,
 )
+from .paired_boundary_surface import (
+    PAIRED_BOUNDARY_SURFACE_SCHEMA,
+    PAIRED_BOUNDARY_SURFACE_STEM,
+)
 from .physical_mid_surface import (
     PHYSICAL_MID_SURFACE_SCHEMA,
     PHYSICAL_MID_SURFACE_STEM,
@@ -55,10 +59,12 @@ class TifxyzSurfaceAuditSettings:
         if self.component_representation not in (
             "paired-profiles",
             "boundary-tracks",
+            "certified-patches",
+            "certified-boundary-faces",
         ):
             raise ValueError(
                 "truth-audit component representation must be paired-profiles "
-                "or boundary-tracks"
+                "boundary-tracks, certified-patches, or certified-boundary-faces"
             )
         integers = (
             self.chart_window_radius_pixels,
@@ -93,6 +99,7 @@ def _resolve_mid_surface(root: str | Path) -> Path:
         value / f"{PAIRED_SURFACE_GROWTH_STEM}.json",
         value / f"{ISOLATED_SLAB_STEM}.json",
         value / f"{MATERIAL_INTERFACE_STEM}.json",
+        value / f"{PAIRED_BOUNDARY_SURFACE_STEM}.json",
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -107,6 +114,8 @@ def _normalized(values: np.ndarray) -> np.ndarray:
 
 def _load_mid_surface(
     root: str | Path,
+    *,
+    component_representation: str = "paired-profiles",
 ) -> tuple[Path, dict[str, Any], dict[str, np.ndarray]]:
     manifest_path = _resolve_mid_surface(root)
     manifest = json.loads(manifest_path.read_text())
@@ -160,6 +169,55 @@ def _load_mid_surface(
             "boundaryUpperXYZ": arrays["positionXYZ"],
             "normalXYZ": arrays["signedNormalXYZ"],
             "componentId": np.arange(len(arrays["positionXYZ"]), dtype=np.int32),
+        }
+    elif schema == PAIRED_BOUNDARY_SURFACE_SCHEMA:
+        direct_record = manifest["identity"]["directSurface"]
+        direct_path = Path(str(direct_record["manifestPath"])).resolve()
+        if sha256_file(direct_path) != direct_record["manifestSha256"]:
+            raise ValueError("paired-boundary audit source manifest has changed")
+        direct_manifest = json.loads(direct_path.read_text())
+        direct_data_path = direct_path.parent / str(direct_manifest["data"]["path"])
+        if (
+            direct_manifest.get("schema") != PHYSICAL_MID_SURFACE_SCHEMA
+            or direct_manifest.get("state") != "complete"
+            or direct_manifest["data"]["sha256"] != direct_record["dataSha256"]
+            or sha256_file(direct_data_path) != direct_record["dataSha256"]
+        ):
+            raise ValueError("paired-boundary audit source geometry has changed")
+        with np.load(direct_data_path, allow_pickle=False) as stored:
+            direct = {name: np.asarray(stored[name]) for name in stored.files}
+        if component_representation == "certified-boundary-faces":
+            component = np.asarray(
+                arrays["endpointCertifiedFaceComponentId"], dtype=np.int32
+            )
+            retained = component >= 0
+            endpoint = np.asarray(arrays["endpointXYZ"])[retained]
+            standardized = {
+                "midpointXYZ": endpoint,
+                "boundaryLowerXYZ": endpoint,
+                "boundaryUpperXYZ": endpoint,
+                "normalXYZ": np.asarray(arrays["endpointInwardNormalXYZ"])[
+                    retained
+                ],
+                "componentId": component[retained],
+            }
+        else:
+            component = np.asarray(
+                arrays["profileAssemblyComponentId"], dtype=np.int32
+            )
+            if len(component) != len(direct["midpointXYZ"]):
+                raise ValueError("paired-boundary patches are not profile aligned")
+            standardized = {
+                "midpointXYZ": direct["midpointXYZ"],
+                "boundaryLowerXYZ": direct["boundaryLowerXYZ"],
+                "boundaryUpperXYZ": direct["boundaryUpperXYZ"],
+                "normalXYZ": direct["normalXYZ"],
+                "componentId": component,
+            }
+        manifest = {
+            **manifest,
+            "source": direct_manifest["source"],
+            "geometry": direct_manifest["geometry"],
         }
     else:
         raise ValueError(f"unsupported TIFXYZ audit geometry schema: {schema}")
@@ -631,7 +689,10 @@ def run_tifxyz_surface_audit(
 
     started = time.monotonic()
     resolved = settings or TifxyzSurfaceAuditSettings()
-    manifest_path, manifest, arrays = _load_mid_surface(mid_surface_root)
+    manifest_path, manifest, arrays = _load_mid_surface(
+        mid_surface_root,
+        component_representation=resolved.component_representation,
+    )
     metadata_path = Path(source_metadata_path).resolve()
     metadata = json.loads(metadata_path.read_text())
     known = metadata.get("knownSurface", {})
@@ -781,9 +842,16 @@ def run_tifxyz_surface_audit(
             "match": (
                 "one reconstructed physical boundary track must agree with truth "
                 "in tangent position, normal height, and unsigned normal"
-                if resolved.component_representation == "boundary-tracks"
-                else "either reconstructed physical boundary must agree with truth "
-                "in tangent position, normal height, and unsigned normal"
+                if resolved.component_representation
+                in ("boundary-tracks", "certified-boundary-faces")
+                else (
+                    "one locally two-face-certified papyrus patch must place either "
+                    "physical boundary on truth with tangent, height, and unsigned-"
+                    "normal agreement"
+                    if resolved.component_representation == "certified-patches"
+                    else "either reconstructed physical boundary must agree with "
+                    "truth in tangent position, normal height, and unsigned normal"
+                )
             ),
             "labelsUsed": False,
             "fittedOffsetUsed": False,

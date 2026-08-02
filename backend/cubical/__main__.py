@@ -151,6 +151,10 @@ from .paired_profile_surface import (
     PairedProfileSurfaceSettings,
     run_direct_paired_profile_surface,
 )
+from .paired_boundary_surface import (
+    PairedBoundarySurfaceSettings,
+    run_paired_boundary_surface,
+)
 from .physical_ribbon_bank import (
     PhysicalRibbonBankSettings,
     run_physical_ribbon_bank,
@@ -1097,6 +1101,21 @@ def _direct_paired_profile_surface(args: argparse.Namespace) -> None:
         args.macro_orientation,
         args.output,
         settings=PairedProfileSurfaceSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _paired_boundary_surface(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_paired_boundary_surface(
+        args.direct_surfaces,
+        args.output,
+        settings=PairedBoundarySurfaceSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -3569,6 +3588,25 @@ def main() -> None:
     direct_paired_profile_surface.set_defaults(
         handler=_direct_paired_profile_surface
     )
+    paired_boundary_surface = subparsers.add_parser(
+        "mesh-paired-boundary-surfaces",
+        description=(
+            "Mesh collision-safe physical boundary tracks and retain only "
+            "local triangular papyrus interiors whose same three profiles "
+            "form one compatible companion boundary face."
+        ),
+    )
+    paired_boundary_surface.add_argument(
+        "--direct-surfaces", type=Path, required=True
+    )
+    paired_boundary_surface.add_argument("--output", type=Path, required=True)
+    paired_boundary_surface.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PairedBoundarySurfaceSettings keyword object",
+    )
+    paired_boundary_surface.add_argument("--force", action="store_true")
+    paired_boundary_surface.set_defaults(handler=_paired_boundary_surface)
     one_sided_interface = subparsers.add_parser(
         "build-one-sided-interface-bank",
         description=(

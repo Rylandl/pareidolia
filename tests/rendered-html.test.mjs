@@ -54,15 +54,15 @@ test("server-renders the dedicated cross-scroll explorer", async () => {
   assert.match(html, /Running rematched independence controls/);
 });
 
-test("server-renders the physical boundary-track explorer", async () => {
+test("server-renders the physical boundary-surface explorer", async () => {
   const response = await render("/block-volume");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Papyrus boundary tracks in CT/);
+  assert.match(html, /Papyrus boundary surfaces in CT/);
   assert.match(html, /Volume threshold/);
   assert.match(html, /Minimum component size/);
   assert.match(html, /Cutaway axis/);
-  assert.match(html, /Loading physical boundary tracks and source voxels/);
+  assert.match(html, /Loading physical boundary surfaces and source voxels/);
 });
 
 test("keeps the API contract and coordinate mapping explicit", async () => {

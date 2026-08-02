@@ -996,11 +996,38 @@ def _circumcircle_contains(
 
 
 def _delaunay_triangles(points_uv: np.ndarray) -> np.ndarray:
-    """Return deterministic Bowyer-Watson triangles for unique 2D points."""
+    """Return deterministic Delaunay triangles for unique 2D points."""
 
     points = np.asarray(points_uv, dtype=np.float64)
     if len(points) < 3:
         return np.empty((0, 3), dtype=np.int32)
+    # Qhull is orders of magnitude faster on the dense intrinsic charts used
+    # by boundary-track reconstruction.  It is an optimization dependency,
+    # not a semantic dependency: minimal installations retain the exact
+    # deterministic Bowyer-Watson implementation below.
+    try:
+        from scipy.spatial import Delaunay, QhullError  # type: ignore[import-not-found]
+    except ImportError:
+        Delaunay = None
+        QhullError = RuntimeError
+    if Delaunay is not None:
+        try:
+            simplices = np.asarray(
+                Delaunay(points, qhull_options="Qbb Qc Qz Q12").simplices,
+                dtype=np.int32,
+            )
+        except QhullError:
+            # Degenerate charts still receive the deterministic fallback.
+            pass
+        else:
+            result = {
+                tuple(sorted(int(value) for value in triangle))
+                for triangle in simplices
+                if np.all(triangle >= 0)
+                and np.all(triangle < len(points))
+                and len(set(int(value) for value in triangle)) == 3
+            }
+            return np.asarray(sorted(result), dtype=np.int32).reshape((-1, 3))
     low = np.min(points, axis=0)
     high = np.max(points, axis=0)
     span = max(float(np.max(high - low)), 1.0)
@@ -1069,6 +1096,9 @@ def triangulate_intrinsic_surface_charts(
     maximum_edge_voxels: float,
     maximum_normal_residual_degrees: float,
     minimum_area_voxels_squared: float,
+    maximum_local_closure_edge_voxels: float | None = None,
+    maximum_local_closure_height_voxels: float | None = None,
+    maximum_local_closure_normal_degrees: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Triangulate each integrated carrier chart and map it back to 3D."""
 
@@ -1092,6 +1122,20 @@ def triangulate_intrinsic_surface_charts(
     rejected_unsupported_edge = 0
     rejected_without_selected_edge = 0
     rejected_geometry = 0
+    local_closure_edges: set[tuple[int, int]] = set()
+    closure_enabled = maximum_local_closure_edge_voxels is not None
+    if closure_enabled and (
+        maximum_local_closure_height_voxels is None
+        or maximum_local_closure_normal_degrees is None
+    ):
+        raise ValueError(
+            "intrinsic Delaunay local closures require edge, height, and normal caps"
+        )
+    closure_cosine = (
+        math.cos(math.radians(float(maximum_local_closure_normal_degrees)))
+        if closure_enabled
+        else 1.0
+    )
     component_values = np.unique(
         topology_component_id[topology_component_size >= minimum_component_needles]
     )
@@ -1126,12 +1170,41 @@ def triangulate_intrinsic_surface_charts(
                 high = max(left, right)
                 value = edge_by_key.get(low * count + high)
                 if value is None:
-                    break
+                    if not closure_enabled:
+                        break
+                    chart_distance = float(
+                        np.linalg.norm(chart_uv[high] - chart_uv[low])
+                    )
+                    delta = center_xyz[high] - center_xyz[low]
+                    physical_distance = float(np.linalg.norm(delta))
+                    normal_cosine = float(
+                        np.dot(signed_normal_xyz[low], signed_normal_xyz[high])
+                    )
+                    common_normal = (
+                        signed_normal_xyz[low] + signed_normal_xyz[high]
+                    )
+                    common_normal /= max(float(np.linalg.norm(common_normal)), 1.0e-12)
+                    height = abs(float(np.dot(delta, common_normal)))
+                    if (
+                        chart_distance
+                        > float(maximum_local_closure_edge_voxels)
+                        or physical_distance
+                        > float(maximum_local_closure_edge_voxels)
+                        or normal_cosine < closure_cosine
+                        or height
+                        > float(maximum_local_closure_height_voxels)
+                    ):
+                        break
+                    local_closure_edges.add((low, high))
+                    edge_indices.append(-1)
+                    continue
                 edge_indices.append(value)
             if len(edge_indices) != 3:
                 rejected_unsupported_edge += 1
                 continue
-            if not any(selected_edge[value] for value in edge_indices):
+            if not any(
+                value >= 0 and selected_edge[value] for value in edge_indices
+            ):
                 rejected_without_selected_edge += 1
                 continue
             oriented, area, residual, maximum_edge = _triangle_geometry(
@@ -1159,6 +1232,7 @@ def triangulate_intrinsic_surface_charts(
             "rejectedUnsupportedEdges": rejected_unsupported_edge,
             "rejectedWithoutSelectedEdge": rejected_without_selected_edge,
             "rejectedTriangleGeometry": rejected_geometry,
+            "localClosureEdgeCount": len(local_closure_edges),
         },
     )
 

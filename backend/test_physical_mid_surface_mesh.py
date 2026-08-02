@@ -99,6 +99,74 @@ class PhysicalMidSurfaceMeshTests(unittest.TestCase):
             0.1,
         )
 
+    def test_chart_delaunay_forms_one_manifold_mesh(self) -> None:
+        center, normal, first, second = _curved_grid()
+        summary, arrays = build_physical_mid_surface_mesh(
+            center,
+            normal,
+            np.full(len(center), 7, dtype=np.int32),
+            np.zeros(len(center), dtype=np.int32),
+            first,
+            second,
+            np.ones(len(first), dtype=np.float32),
+            settings=PhysicalMidSurfaceMeshSettings(
+                minimum_source_component_nodes=8,
+                maximum_source_components=1,
+                minimum_mesh_component_nodes=4,
+                maximum_mesh_components=2,
+                maximum_oriented_neighbor_normal_degrees=15.0,
+                robust_chart_iterations=1,
+                chart_huber_delta_voxels=0.5,
+                maximum_mesh_edge_residual_voxels=0.5,
+                minimum_chart_separation_voxels=0.01,
+                maximum_triangle_edge_voxels=2.0,
+                maximum_triangle_normal_residual_degrees=15.0,
+                minimum_triangle_area_voxels_squared=0.1,
+                triangulation_mode="chart-delaunay",
+            ),
+        )
+        self.assertGreater(summary["counts"]["triangleCount"], 100)
+        self.assertEqual(summary["counts"]["triangleMeshComponentCount"], 1)
+        self.assertEqual(summary["counts"]["nonmanifoldEdgeCount"], 0)
+        self.assertEqual(summary["triangulationMode"], "chart-delaunay")
+        self.assertTrue(
+            np.all(np.asarray(arrays["trianglePhysicalSheetLabel"]) == 7)
+        )
+
+    def test_local_fans_form_one_manifold_mesh(self) -> None:
+        center, normal, first, second = _curved_grid()
+        summary, arrays = build_physical_mid_surface_mesh(
+            center,
+            normal,
+            np.full(len(center), 7, dtype=np.int32),
+            np.zeros(len(center), dtype=np.int32),
+            first,
+            second,
+            np.ones(len(first), dtype=np.float32),
+            settings=PhysicalMidSurfaceMeshSettings(
+                minimum_source_component_nodes=8,
+                maximum_source_components=1,
+                minimum_mesh_component_nodes=4,
+                maximum_mesh_components=2,
+                maximum_oriented_neighbor_normal_degrees=15.0,
+                robust_chart_iterations=1,
+                chart_huber_delta_voxels=0.5,
+                maximum_mesh_edge_residual_voxels=0.5,
+                minimum_chart_separation_voxels=0.01,
+                maximum_triangle_edge_voxels=2.0,
+                maximum_triangle_normal_residual_degrees=15.0,
+                minimum_triangle_area_voxels_squared=0.1,
+                triangulation_mode="local-fans",
+            ),
+        )
+        self.assertGreater(summary["counts"]["triangleCount"], 100)
+        self.assertEqual(summary["counts"]["triangleMeshComponentCount"], 1)
+        self.assertEqual(summary["counts"]["nonmanifoldEdgeCount"], 0)
+        self.assertEqual(summary["triangulationMode"], "local-fans")
+        self.assertTrue(
+            np.all(np.asarray(arrays["trianglePhysicalSheetLabel"]) == 7)
+        )
+
     def test_independent_components_may_overlap_in_chart_coordinates(self) -> None:
         center, normal, first, second = _curved_grid()
         count = len(center)

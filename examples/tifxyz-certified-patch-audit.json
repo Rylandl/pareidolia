@@ -1,0 +1,12 @@
+{
+  "component_representation": "certified-patches",
+  "chart_window_radius_pixels": 96,
+  "truth_support_margin_voxels": 12.0,
+  "maximum_tangent_residual_voxels": 6.0,
+  "maximum_boundary_height_residual_voxels": 3.0,
+  "maximum_normal_residual_degrees": 25.0,
+  "minimum_component_nodes": 8,
+  "maximum_reported_components": 32,
+  "nearest_batch_size": 64,
+  "projection_size": 384
+}

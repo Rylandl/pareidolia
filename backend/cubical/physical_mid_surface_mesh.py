@@ -10,7 +10,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from .contracts import atomic_json, canonical_json_hash, sha256_file
-from .needle_surface import integrate_intrinsic_surface_charts
+from .needle_surface import (
+    integrate_intrinsic_surface_charts,
+    triangulate_intrinsic_surface_charts,
+)
 from .physical_mid_surface import (
     PHYSICAL_MID_SURFACE_SCHEMA,
     PHYSICAL_MID_SURFACE_STEM,
@@ -46,8 +49,18 @@ class PhysicalMidSurfaceMeshSettings:
     minimum_triangle_area_voxels_squared: float = 0.25
     chart_solver_relative_tolerance: float = 1.0e-7
     chart_solver_maximum_iterations: int = 2048
+    triangulation_mode: str = "graph-cliques"
 
     def __post_init__(self) -> None:
+        if self.triangulation_mode not in (
+            "graph-cliques",
+            "chart-delaunay",
+            "local-fans",
+        ):
+            raise ValueError(
+                "mid-surface triangulation mode must be graph-cliques, "
+                "chart-delaunay, or local-fans"
+            )
         integer_values = (
             self.minimum_source_component_nodes,
             self.maximum_source_components,
@@ -831,6 +844,253 @@ def triangulate_graph_supported_charts(
     )
 
 
+def triangulate_local_chart_fans(
+    center_xyz: np.ndarray,
+    signed_normal_xyz: np.ndarray,
+    chart_uv: np.ndarray,
+    first: np.ndarray,
+    second: np.ndarray,
+    edge_score: np.ndarray,
+    edge_mask: np.ndarray,
+    component_id: np.ndarray,
+    component_size: np.ndarray,
+    *,
+    minimum_component_nodes: int,
+    minimum_chart_separation_voxels: float,
+    maximum_edge_voxels: float,
+    maximum_normal_residual_degrees: float,
+    minimum_area_voxels_squared: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Triangulate dense local graphs from consecutive chart-space neighbors.
+
+    Boundary-track graphs have many redundant short chords. Enumerating every
+    three-edge clique is unnecessarily cubic in local degree, while a generic
+    incremental Delaunay solve ignores the acquisition lattice and scales
+    poorly in pure Python. Around a sampled surface point, only consecutive
+    neighbors in angular chart order can bound a local face. Requiring the
+    closing graph edge retains the measured topology; a final planar/manifold
+    selection removes chords that are inconsistent with that embedding.
+    """
+
+    center = np.asarray(center_xyz, dtype=np.float64)
+    normal = np.asarray(signed_normal_xyz, dtype=np.float64)
+    uv = np.asarray(chart_uv, dtype=np.float64)
+    edge_first = np.asarray(first, dtype=np.int32)
+    edge_second = np.asarray(second, dtype=np.int32)
+    score = np.asarray(edge_score, dtype=np.float64)
+    selected_edge = np.asarray(edge_mask, dtype=bool)
+    component = np.asarray(component_id, dtype=np.int32)
+    size = np.asarray(component_size, dtype=np.int32)
+    retained_node, rejected_duplicate = _separated_chart_nodes(
+        uv,
+        component,
+        size,
+        edge_first,
+        edge_second,
+        score,
+        selected_edge,
+        minimum_component_nodes=minimum_component_nodes,
+        minimum_separation_voxels=minimum_chart_separation_voxels,
+    )
+    selected_edge &= retained_node[edge_first] & retained_node[edge_second]
+    score_by_pair: dict[tuple[int, int], float] = {}
+    neighbor: dict[int, set[int]] = {}
+    for edge_index in np.flatnonzero(selected_edge):
+        left = int(edge_first[edge_index])
+        right = int(edge_second[edge_index])
+        if left > right:
+            left, right = right, left
+        pair = (left, right)
+        prior = score_by_pair.get(pair)
+        if prior is not None and prior >= score[edge_index]:
+            continue
+        score_by_pair[pair] = float(score[edge_index])
+        neighbor.setdefault(left, set()).add(right)
+        neighbor.setdefault(right, set()).add(left)
+
+    triangle_keys: set[tuple[int, int, int]] = set()
+    angular_wedge_count = 0
+    rejected_missing_closure = 0
+    rejected_wide_wedge = 0
+    for middle, adjacent_set in neighbor.items():
+        adjacent = np.asarray(sorted(adjacent_set), dtype=np.int32)
+        if len(adjacent) < 2:
+            continue
+        delta = uv[adjacent] - uv[middle]
+        angle = np.arctan2(delta[:, 1], delta[:, 0])
+        order = np.lexsort((adjacent, angle))
+        adjacent = adjacent[order]
+        angle = angle[order]
+        for index, left_value in enumerate(adjacent):
+            right_value = int(adjacent[(index + 1) % len(adjacent)])
+            left = int(left_value)
+            gap = float(
+                (angle[(index + 1) % len(angle)] - angle[index])
+                % (2.0 * math.pi)
+            )
+            angular_wedge_count += 1
+            if gap >= math.pi - 1.0e-9:
+                rejected_wide_wedge += 1
+                continue
+            closing = (min(left, right_value), max(left, right_value))
+            if closing not in score_by_pair:
+                rejected_missing_closure += 1
+                continue
+            triangle_keys.add(tuple(sorted((middle, left, right_value))))
+
+    candidate: list[dict[str, Any]] = []
+    rejected_geometry = 0
+    for nodes_key in sorted(triangle_keys):
+        nodes, area, residual, maximum_edge = _triangle_geometry(
+            nodes_key, center, normal
+        )
+        if (
+            area < minimum_area_voxels_squared
+            or residual > maximum_normal_residual_degrees
+            or maximum_edge > maximum_edge_voxels
+        ):
+            rejected_geometry += 1
+            continue
+        points_uv = uv[np.asarray(nodes)]
+        signed_chart_area = 0.5 * _orientation(
+            points_uv[0], points_uv[1], points_uv[2]
+        )
+        if abs(signed_chart_area) <= 1.0e-8:
+            rejected_geometry += 1
+            continue
+        edge_lengths = (
+            float(np.linalg.norm(center[nodes[1]] - center[nodes[0]])),
+            float(np.linalg.norm(center[nodes[2]] - center[nodes[1]])),
+            float(np.linalg.norm(center[nodes[0]] - center[nodes[2]])),
+        )
+        circumradius = (
+            edge_lengths[0]
+            * edge_lengths[1]
+            * edge_lengths[2]
+            / max(4.0 * area, 1.0e-12)
+        )
+        minimum_score = min(
+            score_by_pair[(min(nodes[0], nodes[1]), max(nodes[0], nodes[1]))],
+            score_by_pair[(min(nodes[1], nodes[2]), max(nodes[1], nodes[2]))],
+            score_by_pair[(min(nodes[2], nodes[0]), max(nodes[2], nodes[0]))],
+        )
+        candidate.append(
+            {
+                "nodes": nodes,
+                "area": area,
+                "normalResidual": residual,
+                "chartSignedArea": signed_chart_area,
+                "component": int(component[nodes[0]]),
+                "circumradius": circumradius,
+                "minimumEdgeScore": minimum_score,
+            }
+        )
+
+    orientation_by_component: dict[int, float] = {}
+    for value in {int(item["component"]) for item in candidate}:
+        signed_area = sum(
+            float(item["chartSignedArea"])
+            for item in candidate
+            if int(item["component"]) == value
+        )
+        orientation_by_component[value] = 1.0 if signed_area >= 0.0 else -1.0
+    oriented = [
+        item
+        for item in candidate
+        if orientation_by_component[int(item["component"])]
+        * float(item["chartSignedArea"])
+        > 0.0
+    ]
+    rejected_orientation = len(candidate) - len(oriented)
+    ordered = sorted(
+        oriented,
+        key=lambda item: (
+            float(item["circumradius"]),
+            -float(item["minimumEdgeScore"]),
+            -float(item["area"]),
+            tuple(int(value) for value in item["nodes"]),
+        ),
+    )
+
+    accepted: list[dict[str, Any]] = []
+    accepted_by_bin: dict[tuple[int, int, int], list[int]] = {}
+    edge_incidence: dict[tuple[int, int], int] = {}
+    bin_size = max(float(maximum_edge_voxels), 1.0)
+    rejected_overlap = 0
+    rejected_manifold = 0
+    for item in ordered:
+        nodes = tuple(int(value) for value in item["nodes"])
+        component_value = int(item["component"])
+        edges = [
+            (
+                min(nodes[index], nodes[(index + 1) % 3]),
+                max(nodes[index], nodes[(index + 1) % 3]),
+            )
+            for index in range(3)
+        ]
+        if any(edge_incidence.get(edge, 0) >= 2 for edge in edges):
+            rejected_manifold += 1
+            continue
+        points = uv[np.asarray(nodes)]
+        low = np.floor(np.min(points, axis=0) / bin_size).astype(int)
+        high = np.floor(np.max(points, axis=0) / bin_size).astype(int)
+        nearby: set[int] = set()
+        for x_value in range(int(low[0]), int(high[0]) + 1):
+            for y_value in range(int(low[1]), int(high[1]) + 1):
+                nearby.update(
+                    accepted_by_bin.get(
+                        (component_value, x_value, y_value), ()
+                    )
+                )
+        if any(
+            _positive_area_overlap(nodes, accepted[index]["nodes"], uv)
+            for index in nearby
+        ):
+            rejected_overlap += 1
+            continue
+        accepted_index = len(accepted)
+        accepted.append(item)
+        for edge in edges:
+            edge_incidence[edge] = edge_incidence.get(edge, 0) + 1
+        for x_value in range(int(low[0]), int(high[0]) + 1):
+            for y_value in range(int(low[1]), int(high[1]) + 1):
+                accepted_by_bin.setdefault(
+                    (component_value, x_value, y_value), []
+                ).append(accepted_index)
+
+    triangles = np.asarray(
+        [item["nodes"] for item in accepted], dtype=np.int32
+    ).reshape((-1, 3))
+    return (
+        triangles,
+        np.asarray([item["area"] for item in accepted], dtype=np.float32),
+        np.asarray(
+            [item["normalResidual"] for item in accepted], dtype=np.float32
+        ),
+        np.asarray(
+            [item["chartSignedArea"] for item in accepted], dtype=np.float32
+        ),
+        {
+            "components": int(
+                len(np.unique(component[retained_node]))
+                if np.any(retained_node)
+                else 0
+            ),
+            "retainedChartNodes": int(np.count_nonzero(retained_node)),
+            "rejectedNearDuplicateChartNodes": rejected_duplicate,
+            "angularWedgeCount": angular_wedge_count,
+            "uniqueLocalFanTriangles": len(triangle_keys),
+            "rejectedWideAngularWedge": rejected_wide_wedge,
+            "rejectedMissingClosingGraphEdge": rejected_missing_closure,
+            "rejectedTriangleGeometry": rejected_geometry,
+            "rejectedChartOrientation": rejected_orientation,
+            "rejectedPlanarOverlap": rejected_overlap,
+            "rejectedManifoldIncidence": rejected_manifold,
+            "retainedTriangles": len(accepted),
+        },
+    )
+
+
 def build_physical_mid_surface_mesh(
     center_xyz: np.ndarray,
     normal_xyz: np.ndarray,
@@ -959,45 +1219,137 @@ def build_physical_mid_surface_mesh(
         & mesh_component_eligible[edge_second]
         & (mesh_component[edge_first] == mesh_component[edge_second])
     )
-    (
-        triangles,
-        triangle_area,
-        triangle_normal_residual,
-        triangle_chart_signed_area,
-        triangle_summary,
-    ) = triangulate_graph_supported_charts(
-        center,
-        signed_normal,
-        chart_uv,
-        edge_first,
-        edge_second,
-        score,
-        triangulation_edge,
-        mesh_component,
-        triangulation_size,
-        minimum_component_nodes=resolved.minimum_mesh_component_nodes,
-        minimum_chart_separation_voxels=(
-            resolved.minimum_chart_separation_voxels * linear_scale
-        ),
-        maximum_local_closure_edge_voxels=(
-            resolved.maximum_local_closure_edge_voxels * linear_scale
-        ),
-        maximum_local_closure_height_voxels=(
-            resolved.maximum_local_closure_height_voxels * linear_scale
-        ),
-        maximum_local_closure_normal_degrees=(
-            resolved.maximum_local_closure_normal_degrees
-        ),
-        maximum_edge_voxels=(
-            resolved.maximum_triangle_edge_voxels * linear_scale
-        ),
-        maximum_normal_residual_degrees=(
-            resolved.maximum_triangle_normal_residual_degrees
-        ),
-        minimum_area_voxels_squared=(
-            resolved.minimum_triangle_area_voxels_squared * area_scale
-        ),
-    )
+    if resolved.triangulation_mode == "chart-delaunay":
+        (
+            triangles,
+            triangle_area,
+            triangle_normal_residual,
+            triangle_summary,
+        ) = triangulate_intrinsic_surface_charts(
+            center,
+            signed_normal,
+            chart_uv,
+            edge_first,
+            edge_second,
+            score,
+            triangulation_edge,
+            triangulation_edge,
+            mesh_component,
+            triangulation_size,
+            minimum_component_needles=resolved.minimum_mesh_component_nodes,
+            minimum_chart_separation_voxels=(
+                resolved.minimum_chart_separation_voxels * linear_scale
+            ),
+            maximum_edge_voxels=(
+                resolved.maximum_triangle_edge_voxels * linear_scale
+            ),
+            maximum_normal_residual_degrees=(
+                resolved.maximum_triangle_normal_residual_degrees
+            ),
+            minimum_area_voxels_squared=(
+                resolved.minimum_triangle_area_voxels_squared * area_scale
+            ),
+            maximum_local_closure_edge_voxels=(
+                resolved.maximum_local_closure_edge_voxels * linear_scale
+            ),
+            maximum_local_closure_height_voxels=(
+                resolved.maximum_local_closure_height_voxels * linear_scale
+            ),
+            maximum_local_closure_normal_degrees=(
+                resolved.maximum_local_closure_normal_degrees
+            ),
+        )
+        triangle_source = (
+            mesh_component[triangles[:, 0]]
+            if len(triangles)
+            else np.empty(0, dtype=np.int32)
+        )
+        oriented, triangle_chart_signed_area = _chart_orientation_filter(
+            triangles,
+            chart_uv,
+            triangle_source,
+        )
+        rejected_orientation = int(np.count_nonzero(~oriented))
+        triangles = triangles[oriented]
+        triangle_area = triangle_area[oriented]
+        triangle_normal_residual = triangle_normal_residual[oriented]
+        triangle_chart_signed_area = triangle_chart_signed_area[oriented]
+        triangle_summary = {
+            **triangle_summary,
+            "rejectedChartOrientation": rejected_orientation,
+            "retainedTriangles": int(len(triangles)),
+        }
+    elif resolved.triangulation_mode == "local-fans":
+        (
+            triangles,
+            triangle_area,
+            triangle_normal_residual,
+            triangle_chart_signed_area,
+            triangle_summary,
+        ) = triangulate_local_chart_fans(
+            center,
+            signed_normal,
+            chart_uv,
+            edge_first,
+            edge_second,
+            score,
+            triangulation_edge,
+            mesh_component,
+            triangulation_size,
+            minimum_component_nodes=resolved.minimum_mesh_component_nodes,
+            minimum_chart_separation_voxels=(
+                resolved.minimum_chart_separation_voxels * linear_scale
+            ),
+            maximum_edge_voxels=(
+                resolved.maximum_triangle_edge_voxels * linear_scale
+            ),
+            maximum_normal_residual_degrees=(
+                resolved.maximum_triangle_normal_residual_degrees
+            ),
+            minimum_area_voxels_squared=(
+                resolved.minimum_triangle_area_voxels_squared * area_scale
+            ),
+        )
+    else:
+        (
+            triangles,
+            triangle_area,
+            triangle_normal_residual,
+            triangle_chart_signed_area,
+            triangle_summary,
+        ) = triangulate_graph_supported_charts(
+            center,
+            signed_normal,
+            chart_uv,
+            edge_first,
+            edge_second,
+            score,
+            triangulation_edge,
+            mesh_component,
+            triangulation_size,
+            minimum_component_nodes=resolved.minimum_mesh_component_nodes,
+            minimum_chart_separation_voxels=(
+                resolved.minimum_chart_separation_voxels * linear_scale
+            ),
+            maximum_local_closure_edge_voxels=(
+                resolved.maximum_local_closure_edge_voxels * linear_scale
+            ),
+            maximum_local_closure_height_voxels=(
+                resolved.maximum_local_closure_height_voxels * linear_scale
+            ),
+            maximum_local_closure_normal_degrees=(
+                resolved.maximum_local_closure_normal_degrees
+            ),
+            maximum_edge_voxels=(
+                resolved.maximum_triangle_edge_voxels * linear_scale
+            ),
+            maximum_normal_residual_degrees=(
+                resolved.maximum_triangle_normal_residual_degrees
+            ),
+            minimum_area_voxels_squared=(
+                resolved.minimum_triangle_area_voxels_squared * area_scale
+            ),
+        )
     triangle_source_component = (
         mesh_component[triangles[:, 0]]
         if len(triangles)
@@ -1134,6 +1486,7 @@ def build_physical_mid_surface_mesh(
         },
         "chartIntegrationPasses": integration_passes,
         "triangulation": triangle_summary,
+        "triangulationMode": resolved.triangulation_mode,
     }
     return summary, arrays
 

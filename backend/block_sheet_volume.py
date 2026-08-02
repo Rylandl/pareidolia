@@ -9,6 +9,10 @@ from typing import Any
 import numpy as np
 
 from .cubical.contracts import sha256_file
+from .cubical.paired_boundary_surface import (
+    PAIRED_BOUNDARY_SURFACE_SCHEMA,
+    PAIRED_BOUNDARY_SURFACE_STEM,
+)
 from .cubical.physical_mid_surface import PHYSICAL_MID_SURFACE_STEM
 
 
@@ -16,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c"
-    / "direct-boundary-tracks-v1"
+    / "paired-boundary-surface-v1"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -979,6 +983,279 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
     }
 
 
+def _load_paired_boundary_surface_payload(root: Path) -> dict[str, Any]:
+    """Load signed physical boundary triangles for the CT explorer.
+
+    The browser receives the largest face components only; the manifest still
+    reports the full reconstruction.  This keeps orbiting responsive without
+    changing component identity or subsampling any displayed surface.
+    """
+
+    manifest_path = root / f"{PAIRED_BOUNDARY_SURFACE_STEM}.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"paired boundary surface is unavailable at {root}"
+        )
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("schema") != PAIRED_BOUNDARY_SURFACE_SCHEMA
+        or manifest.get("state") != "complete"
+    ):
+        raise ValueError(f"unsupported paired boundary surface in {manifest_path}")
+    data_path = root / str(manifest["data"]["path"])
+    if not data_path.is_file() or sha256_file(data_path) != manifest["data"]["sha256"]:
+        raise ValueError("paired boundary surface data is unavailable or changed")
+    with np.load(data_path, allow_pickle=False) as stored:
+        endpoint_world = _required(stored, "endpointXYZ").astype(
+            np.float64, copy=False
+        )
+        endpoint_companion = _required(stored, "endpointCompanion").astype(
+            np.int64, copy=False
+        )
+        triangle_endpoint = _required(
+            stored, "certifiedFaceTriangleEndpoint"
+        ).astype(np.int64, copy=False)
+        triangle_component = _required(
+            stored, "certifiedFaceTriangleComponentId"
+        ).astype(np.int64, copy=False)
+        triangle_source_track = _required(
+            stored, "certifiedFaceTriangleSourceBoundaryTrack"
+        ).astype(np.int64, copy=False)
+        boundary_triangle_index = _required(
+            stored, "certifiedFaceBoundaryTriangleIndex"
+        ).astype(np.int64, copy=False)
+        mesh_area = _required(stored, "meshTriangleAreaVoxelsSquared").astype(
+            np.float64, copy=False
+        )
+        mesh_normal_residual = _required(
+            stored, "meshTriangleNormalResidualDegrees"
+        ).astype(np.float64, copy=False)
+    if endpoint_world.ndim != 2 or endpoint_world.shape[1] != 3:
+        raise ValueError("paired boundary endpoints must have shape (node, 3)")
+    if triangle_endpoint.ndim != 2 or triangle_endpoint.shape[1] != 3:
+        raise ValueError("paired boundary triangles must have shape (triangle, 3)")
+    if any(
+        len(value) != len(triangle_endpoint)
+        for value in (
+            triangle_component,
+            triangle_source_track,
+            boundary_triangle_index,
+        )
+    ):
+        raise ValueError("paired boundary triangle arrays are not aligned")
+    if len(triangle_endpoint) and (
+        int(np.min(triangle_endpoint)) < 0
+        or int(np.max(triangle_endpoint)) >= len(endpoint_world)
+    ):
+        raise ValueError("paired boundary triangle references an invalid endpoint")
+    if len(boundary_triangle_index) and (
+        int(np.min(boundary_triangle_index)) < 0
+        or int(np.max(boundary_triangle_index)) >= len(mesh_area)
+    ):
+        raise ValueError("paired boundary triangle references invalid mesh diagnostics")
+
+    geometry = manifest.get("geometry", {})
+    source = manifest.get("source", {})
+    processing_bounds = geometry.get("processingVoxelBounds", {})
+    source_origin = np.asarray(source.get("sourceOriginXYZ", ()), dtype=np.float64)
+    processing_start = np.asarray(
+        processing_bounds.get("startXYZ", ()), dtype=np.float64
+    )
+    processing_stop = np.asarray(
+        processing_bounds.get("stopXYZExclusive", ()), dtype=np.float64
+    )
+    if (
+        source_origin.shape == (3,)
+        and processing_start.shape == (3,)
+        and processing_stop.shape == (3,)
+    ):
+        # Boundary faces can legitimately leave the midpoint-owned cuboid by
+        # half a papyrus thickness.  The declared processing halo is the
+        # physical CT domain that supported those observations.
+        origin = source_origin + processing_start
+        stop = source_origin + processing_stop
+    else:
+        owned_bounds = geometry.get("ownedWorldBounds", {})
+        origin = np.asarray(owned_bounds.get("startXYZ", ()), dtype=np.float64)
+        stop = np.asarray(
+            owned_bounds.get("stopXYZExclusive", ()), dtype=np.float64
+        )
+    if origin.shape != (3,) or stop.shape != (3,) or np.any(stop <= origin):
+        raise ValueError("paired boundary surface has invalid owned bounds")
+    extent = stop - origin
+
+    total_component_count = int(np.max(triangle_component, initial=-1)) + 1
+    maximum_display_components = 32
+    displayed_component_count = min(
+        total_component_count, maximum_display_components
+    )
+    displayed_triangle = triangle_component < displayed_component_count
+    displayed_triangle_endpoint = triangle_endpoint[displayed_triangle]
+    displayed_component = triangle_component[displayed_triangle]
+    displayed_source_track = triangle_source_track[displayed_triangle]
+    displayed_mesh_index = boundary_triangle_index[displayed_triangle]
+    displayed_area = mesh_area[displayed_mesh_index]
+    displayed_residual = mesh_normal_residual[displayed_mesh_index]
+    used_endpoint, compact_inverse = np.unique(
+        displayed_triangle_endpoint.reshape(-1), return_inverse=True
+    )
+    compact_triangle_endpoint = compact_inverse.reshape(-1, 3).astype(np.int32)
+    compact_vertices = endpoint_world[used_endpoint] - origin[None, :]
+    if len(compact_vertices) and (
+        np.any(compact_vertices < -1.0e-3)
+        or np.any(compact_vertices > extent[None, :] + 1.0e-3)
+    ):
+        raise ValueError("paired boundary mesh lies outside the owned CT block")
+
+    component_triangle_count = np.bincount(
+        displayed_component, minlength=displayed_component_count
+    )
+    components: list[dict[str, Any]] = []
+    for component_id in range(displayed_component_count):
+        member = displayed_component == component_id
+        member_triangle = compact_triangle_endpoint[member]
+        member_node = np.unique(member_triangle.reshape(-1))
+        point = compact_vertices[member_node]
+        source_track = np.unique(displayed_source_track[member])
+        if len(source_track) != 1:
+            raise ValueError(
+                f"certified face component {component_id} crosses boundary tracks"
+            )
+        original_endpoint = used_endpoint[member_node]
+        thickness = np.linalg.norm(
+            endpoint_world[endpoint_companion[original_endpoint]]
+            - endpoint_world[original_endpoint],
+            axis=1,
+        )
+        residual = displayed_residual[member]
+        components.append(
+            {
+                "rank": component_id + 1,
+                "stableId": str(int(source_track[0])),
+                "triangleCount": int(component_triangle_count[component_id]),
+                "nodeCount": int(len(member_node)),
+                "surfaceAreaVoxelsSquared": round(
+                    float(np.sum(displayed_area[member])), 3
+                ),
+                "boundsMinimumXYZ": _round_list(np.min(point, axis=0)),
+                "boundsMaximumXYZ": _round_list(np.max(point, axis=0)),
+                "normalResidualDegrees": {
+                    "median": round(_percentile(residual, 50), 4),
+                    "p90": round(_percentile(residual, 90), 4),
+                    "maximum": round(_percentile(residual, 100), 4),
+                },
+                "experimentalTriangleCount": 0,
+                "experimentalCompletionRows": [],
+                "physicallyGuidedNodeCount": int(len(member_node)),
+                "physicallyGuidedNodeFraction": 1.0,
+                "physicalAnchorNodeCount": int(len(member_node)),
+                "denseBoundaryPairNodeCount": int(len(member_node)),
+                "physicallyAnchored": True,
+                "physicalSheetLabel": int(source_track[0]),
+                "physicalBoundarySide": None,
+                "medianThicknessVoxels": round(_percentile(thickness, 50), 4),
+                "medianPairCost": 0.0,
+                "splitByStratumGuard": False,
+            }
+        )
+    triangles = [
+        {
+            "id": int(index),
+            "component": int(component) + 1,
+            "componentSize": int(component_triangle_count[int(component)]),
+            "vertices": [int(value) for value in compact_triangle_endpoint[index]],
+            "areaVoxelsSquared": round(float(displayed_area[index]), 5),
+            "normalResidualDegrees": (
+                round(float(displayed_residual[index]), 4)
+                if np.isfinite(displayed_residual[index])
+                else None
+            ),
+            "experimental": False,
+            "completionRow": None,
+        }
+        for index, component in enumerate(displayed_component)
+    ]
+    counts = manifest.get("counts", {})
+    mesh_counts = manifest.get("mesh", {}).get("counts", {})
+    source = manifest.get("source", {})
+    try:
+        manifest_label = str(manifest_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        manifest_label = str(manifest_path)
+    return {
+        "schema": "pareidolia.block-surface-volume",
+        "version": 1,
+        "representation": "physical-boundary-surface-mesh",
+        "variant": root.name,
+        "artifact": {
+            "manifestPath": manifest_label,
+            "state": "complete",
+            "method": (
+                "signed collision-safe papyrus boundary charts with local "
+                "air-material profile support"
+            ),
+        },
+        "source": {
+            "path": str(source.get("path", "")),
+            "metadataPath": str(source.get("metadataPath", "")),
+            "name": Path(str(source.get("path", "source volume"))).name,
+            "voxelSizeMicrons": float(source.get("voxelSizeMicrons", 0.0)),
+        },
+        "grid": {
+            "shapeCellsXYZ": [int(round(value)) for value in extent],
+            "cellSizeXYZ": [1.0, 1.0, 1.0],
+            "originXYZ": _round_list(origin),
+            "extentXYZ": _round_list(extent),
+            "coordinateUnit": str(geometry.get("coordinateUnit", "source-voxel")),
+        },
+        "stats": {
+            "triangleCount": int(len(triangles)),
+            "totalTriangleCount": int(len(triangle_endpoint)),
+            "nodeCount": int(counts.get("certifiedBoundaryFaceEndpointCount", 0)),
+            "displayedNodeCount": int(len(compact_vertices)),
+            "componentCount": total_component_count,
+            "displayedComponentCount": displayed_component_count,
+            "largestComponentTriangleCount": int(
+                component_triangle_count[0] if len(component_triangle_count) else 0
+            ),
+            "largestComponentNodeCount": int(
+                components[0]["nodeCount"] if components else 0
+            ),
+            "baselineTriangleCount": int(len(triangles)),
+            "experimentalTriangleCount": 0,
+            "acceptedCompletionCount": 0,
+            "attemptedCompletionCount": 0,
+            "regionCountBefore": total_component_count,
+            "regionCountAfter": total_component_count,
+            "medianNormalResidualDegrees": round(
+                _percentile(displayed_residual, 50), 4
+            ),
+            "p90NormalResidualDegrees": round(
+                _percentile(displayed_residual, 90), 4
+            ),
+            "retainedEdgeCount": int(mesh_counts.get("meshEdgeCount", 0)),
+            "eligibleNodeFraction": (
+                float(counts.get("certifiedBoundaryFaceEndpointCount", 0))
+                / max(int(counts.get("boundaryEndpointCount", 0)), 1)
+            ),
+            "seedNodeCount": int(len(compact_vertices)),
+            "physicalAnchorNodeCount": int(len(compact_vertices)),
+            "denseBoundaryPairNodeCount": int(len(compact_vertices)),
+            "physicallyAnchoredNodeCount": int(len(compact_vertices)),
+            "physicallyAnchoredComponentCount": displayed_component_count,
+            "physicallyGuidedNodeCount": int(len(compact_vertices)),
+            "grownNodeCount": 0,
+            "bridgeCandidateNodeCount": 0,
+            "componentMergeCount": 0,
+            "columnConflictRejectedEdgeCount": 0,
+        },
+        "components": components,
+        "vertices": [_round_list(vertex) for vertex in compact_vertices],
+        "triangles": triangles,
+        "interfaceNodes": [],
+    }
+
+
 def _load_dense_surface_payload(root: Path) -> dict[str, Any]:
     manifest_path, data_path = _dense_completion_paths(root)
     if not manifest_path.is_file() or not data_path.is_file():
@@ -1224,6 +1501,9 @@ def _load_dense_surface_payload(root: Path) -> dict[str, Any]:
 @lru_cache(maxsize=4)
 def _load_block_sheet_payload(root_value: str) -> dict[str, Any]:
     root = Path(root_value)
+    paired_boundary_path = root / f"{PAIRED_BOUNDARY_SURFACE_STEM}.json"
+    if paired_boundary_path.is_file():
+        return _load_paired_boundary_surface_payload(root)
     mid_surface_path = root / f"{PHYSICAL_MID_SURFACE_STEM}.json"
     if mid_surface_path.is_file():
         return _load_physical_mid_surface_payload(root)

@@ -9,6 +9,20 @@ from backend.cubical.tifxyz_surface_audit import (
 
 
 class TifxyzSurfaceAuditTests(unittest.TestCase):
+    def test_certified_patch_representation_is_explicitly_supported(self) -> None:
+        settings = TifxyzSurfaceAuditSettings(
+            component_representation="certified-patches"
+        )
+        self.assertEqual(settings.component_representation, "certified-patches")
+
+    def test_certified_boundary_face_representation_is_explicitly_supported(self) -> None:
+        settings = TifxyzSurfaceAuditSettings(
+            component_representation="certified-boundary-faces"
+        )
+        self.assertEqual(
+            settings.component_representation, "certified-boundary-faces"
+        )
+
     def test_recovers_boundary_aligned_component_and_rejects_transverse_one(self) -> None:
         x, y = np.meshgrid(np.arange(0.0, 20.0, 2.0), np.arange(0.0, 20.0, 2.0))
         truth = np.column_stack((x.ravel(), y.ravel(), np.zeros(x.size)))
