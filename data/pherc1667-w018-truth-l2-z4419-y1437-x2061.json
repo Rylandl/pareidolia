@@ -1,0 +1,30 @@
+{
+  "name": "PHerc. 1667 w018 known-surface raw CT control",
+  "sourceKind": "zarr-cuboid",
+  "sourceUrl": "https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHerc1667/volumes/20251217075048-2.399um-0.2m-78keV-masked.zarr",
+  "sourceLevel": 2,
+  "sourceShapeZYX": [
+    9269,
+    3808,
+    3808
+  ],
+  "originXYZ": [
+    8244,
+    5748,
+    17676
+  ],
+  "voxelSizeMicrons": 9.596,
+  "knownSurface": {
+    "segmentId": "20240304144031-w018",
+    "volumeId": "20251217075048-2.399um",
+    "centerPixelYX": [1066, 2427],
+    "levelZeroXYZ": [8756.6074, 6260.2192, 18190.9336],
+    "localXYZ": [128.1519, 128.0548, 128.7334],
+    "normalXYZ": [0.8247338, -0.1321186, 0.5498716]
+  },
+  "suggestedSeed": {
+    "x": 128,
+    "y": 128,
+    "z": 129
+  }
+}

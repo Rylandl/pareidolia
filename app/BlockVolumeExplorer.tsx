@@ -940,7 +940,7 @@ export function BlockVolumeExplorer() {
         <div>
           <p className="eyebrow">
             {isMidSurfaceGraph
-              ? "Air–papyrus–air profiles · paired physical centers"
+              ? "Direct air–papyrus–air profiles · macro-gated geometry"
               : isInterfaceGraph
               ? "Physical slab modes · dense signed CT faces"
               : "Acus · current cubical reconstruction"}
@@ -950,7 +950,7 @@ export function BlockVolumeExplorer() {
         <p className="block-volume-summary">
           {result
             ? isMidSurfaceGraph
-              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} physical center samples · ${(result.stats.physicalAnchorNodeCount ?? 0).toLocaleString()} direct profiles + ${(result.stats.denseBoundaryPairNodeCount ?? 0).toLocaleString()} dense paired-face confirmations · ${result.stats.componentCount.toLocaleString()} fragments`
+              ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} direct physical profiles · ${result.stats.componentCount.toLocaleString()} two-boundary continuity fragments`
               : isInterfaceGraph
               ? `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.nodeCount.toLocaleString()} assigned face samples · ${(result.stats.physicalAnchorNodeCount ?? 0).toLocaleString()} exact paired-profile anchors · ${(result.stats.physicallyAnchoredComponentCount ?? 0).toLocaleString()} anchored components · ${result.stats.componentCount.toLocaleString()} total components${result.fixedPoint ? ` · fixed point in ${result.fixedPoint.completedCycles} cycles` : ` after ${(result.stats.componentMergeCount ?? 0).toLocaleString()} repeated-evidence merges`}`
               : `${result.grid.extentXYZ.join(" × ")} vox · ${result.stats.triangleCount.toLocaleString()} triangles · ${result.stats.componentCount.toLocaleString()} components · ${result.stats.baselineTriangleCount.toLocaleString()} pre-join + ${result.stats.experimentalTriangleCount.toLocaleString()} experimental · ${result.stats.regionCountBefore} → ${result.stats.regionCountAfter} regions`
@@ -1146,7 +1146,7 @@ export function BlockVolumeExplorer() {
                       {(selected.physicalAnchorNodeCount ?? 0).toLocaleString()} direct physical profiles · {(selected.denseBoundaryPairNodeCount ?? 0).toLocaleString()} dense paired-face confirmations · median thickness {(selected.medianThicknessVoxels ?? 0).toFixed(1)} vox
                     </small>
                     <small>
-                      physical sheet hypothesis {selected.physicalSheetLabel} · mean profile evidence {(selected.meanEvidence ?? 0).toFixed(2)}
+                      direct profile component {selected.physicalSheetLabel} · mean paired-boundary evidence {(selected.meanEvidence ?? 0).toFixed(2)}
                     </small>
                   </>
                 ) : isInterfaceGraph ? (

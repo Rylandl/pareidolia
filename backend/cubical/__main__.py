@@ -65,6 +65,18 @@ from .known_surface_truth import (
     run_known_surface_interface_audit,
     run_known_surface_ribbon_audit,
 )
+from .laminar_ribbon import (
+    LaminarRibbonSettings,
+    run_laminar_ribbon_catalog,
+)
+from .laminar_boundary_matching import (
+    LaminarBoundaryMatchingSettings,
+    run_laminar_boundary_matching,
+)
+from .tifxyz_surface_audit import (
+    TifxyzSurfaceAuditSettings,
+    run_tifxyz_surface_audit,
+)
 from .material_interface import run_material_interface_field
 from .macro_orientation import (
     MacroOrientationSettings,
@@ -94,6 +106,11 @@ from .physical_mid_surface import (
     PhysicalMidSurfaceSettings,
     run_physical_mid_surface_catalog,
 )
+from .physical_mid_surface_mesh import (
+    PhysicalMidSurfaceMeshSettings,
+    run_physical_mid_surface_mesh,
+)
+from .physical_mid_surface_flatten import run_physical_mid_surface_flattening
 from .mode_bank import run_mode_bank
 from .multiseam import run_multiseam_audit
 from .needle_field import (
@@ -129,6 +146,10 @@ from .paired_surface_bank import (
 from .paired_surface_growth import (
     PairedSurfaceGrowthSettings,
     run_paired_surface_growth,
+)
+from .paired_profile_surface import (
+    PairedProfileSurfaceSettings,
+    run_direct_paired_profile_surface,
 )
 from .physical_ribbon_bank import (
     PhysicalRibbonBankSettings,
@@ -777,6 +798,24 @@ def _known_surface_interface_audit(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _tifxyz_surface_audit(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_tifxyz_surface_audit(
+        args.tifxyz,
+        args.mid_surfaces,
+        args.source_metadata,
+        args.output,
+        center_pixel_yx=(tuple(args.center_pixel) if args.center_pixel else None),
+        settings=TifxyzSurfaceAuditSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _material_interfaces(args: argparse.Namespace) -> None:
     settings: IsolatedSlabSettings | None = None
     if args.settings_json is not None:
@@ -925,6 +964,81 @@ def _physical_mid_surface(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def _laminar_ribbon(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    mid_settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    if args.mid_settings_json is not None:
+        mid_settings_values = json.loads(Path(args.mid_settings_json).read_text())
+        if not isinstance(mid_settings_values, dict):
+            raise ValueError("mid-surface settings JSON must contain one object")
+    summary = run_laminar_ribbon_catalog(
+        args.paired_bank,
+        args.paired_growth,
+        args.material_surface,
+        args.macro_orientation,
+        args.output,
+        settings=LaminarRibbonSettings(**settings_values),
+        mid_surface_settings=(
+            PhysicalMidSurfaceSettings(**mid_settings_values)
+            if mid_settings_values
+            else None
+        ),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _laminar_boundary_matching(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_laminar_boundary_matching(
+        args.mid_surfaces,
+        args.output,
+        settings=LaminarBoundaryMatchingSettings(**settings_values),
+        force=args.force,
+        solver_output=args.solver_output,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_mid_surface_mesh(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_physical_mid_surface_mesh(
+        args.mid_surfaces,
+        args.output,
+        settings=PhysicalMidSurfaceMeshSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _physical_mid_surface_flatten(args: argparse.Namespace) -> None:
+    summary = run_physical_mid_surface_flattening(
+        args.mesh,
+        args.output,
+        grouping=args.grouping,
+        maximum_components=args.maximum_components,
+        pixel_step_voxels=args.pixel_step,
+        maximum_pixels=args.maximum_pixels,
+        depth_min_voxels=args.depth_min,
+        depth_max_voxels=args.depth_max,
+        depth_step_voxels=args.depth_step,
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _audit_isolated_slab_acus(args: argparse.Namespace) -> None:
     settings_values: dict[str, object] = {}
     if args.settings_json is not None:
@@ -966,6 +1080,23 @@ def _paired_surface_growth(args: argparse.Namespace) -> None:
         args.bank,
         args.output,
         settings=PairedSurfaceGrowthSettings(**settings_values),
+        force=args.force,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def _direct_paired_profile_surface(args: argparse.Namespace) -> None:
+    settings_values: dict[str, object] = {}
+    if args.settings_json is not None:
+        settings_values = json.loads(Path(args.settings_json).read_text())
+        if not isinstance(settings_values, dict):
+            raise ValueError("settings JSON must contain one object")
+    summary = run_direct_paired_profile_surface(
+        args.bank,
+        args.growth,
+        args.macro_orientation,
+        args.output,
+        settings=PairedProfileSurfaceSettings(**settings_values),
         force=args.force,
     )
     print(json.dumps(summary, indent=2))
@@ -3016,6 +3147,35 @@ def main() -> None:
     known_interface_audit.add_argument("--output", type=Path, required=True)
     known_interface_audit.add_argument("--force", action="store_true")
     known_interface_audit.set_defaults(handler=_known_surface_interface_audit)
+    tifxyz_surface_audit = subparsers.add_parser(
+        "audit-tifxyz-surface-control",
+        description=(
+            "Compare reconstructed physical boundaries to one independently "
+            "unrolled TIFXYZ surface in the same raw CT volume."
+        ),
+    )
+    tifxyz_surface_audit.add_argument("--tifxyz", type=Path, required=True)
+    tifxyz_surface_audit.add_argument(
+        "--mid-surfaces", type=Path, required=True
+    )
+    tifxyz_surface_audit.add_argument(
+        "--source-metadata", type=Path, required=True
+    )
+    tifxyz_surface_audit.add_argument(
+        "--center-pixel",
+        nargs=2,
+        type=int,
+        metavar=("Y", "X"),
+        help="TIFXYZ chart pixel near the raw CT control crop",
+    )
+    tifxyz_surface_audit.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional TifxyzSurfaceAuditSettings keyword object",
+    )
+    tifxyz_surface_audit.add_argument("--output", type=Path, required=True)
+    tifxyz_surface_audit.add_argument("--force", action="store_true")
+    tifxyz_surface_audit.set_defaults(handler=_tifxyz_surface_audit)
     material_interfaces = subparsers.add_parser(
         "detect-material-interfaces",
         description=(
@@ -3237,6 +3397,101 @@ def main() -> None:
     )
     physical_mid_surface.add_argument("--force", action="store_true")
     physical_mid_surface.set_defaults(handler=_physical_mid_surface)
+    laminar_ribbon = subparsers.add_parser(
+        "build-laminar-ribbons",
+        description=(
+            "Reconstruct physical mid-surfaces from repeated macro-aligned "
+            "air-papyrus-air correspondences between two dense signed faces."
+        ),
+    )
+    laminar_ribbon.add_argument("--paired-bank", type=Path, required=True)
+    laminar_ribbon.add_argument("--paired-growth", type=Path, required=True)
+    laminar_ribbon.add_argument("--material-surface", type=Path, required=True)
+    laminar_ribbon.add_argument("--macro-orientation", type=Path, required=True)
+    laminar_ribbon.add_argument("--output", type=Path, required=True)
+    laminar_ribbon.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional LaminarRibbonSettings keyword object",
+    )
+    laminar_ribbon.add_argument(
+        "--mid-settings-json",
+        type=Path,
+        help="optional PhysicalMidSurfaceSettings keyword object",
+    )
+    laminar_ribbon.add_argument("--force", action="store_true")
+    laminar_ribbon.set_defaults(handler=_laminar_ribbon)
+    laminar_boundary_matching = subparsers.add_parser(
+        "select-laminar-boundaries",
+        description=(
+            "Globally choose one opposing mate per physical boundary surfel, "
+            "rewarding only exact or independently verified two-face continuity."
+        ),
+    )
+    laminar_boundary_matching.add_argument(
+        "--mid-surfaces", type=Path, required=True
+    )
+    laminar_boundary_matching.add_argument(
+        "--output", type=Path, required=True
+    )
+    laminar_boundary_matching.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional LaminarBoundaryMatchingSettings keyword object",
+    )
+    laminar_boundary_matching.add_argument(
+        "--solver-output", action="store_true"
+    )
+    laminar_boundary_matching.add_argument("--force", action="store_true")
+    laminar_boundary_matching.set_defaults(handler=_laminar_boundary_matching)
+    physical_mid_surface_mesh = subparsers.add_parser(
+        "mesh-physical-mid-surfaces",
+        description=(
+            "Resolve the unsigned normal gauge of physical midpoint graphs, "
+            "integrate intrinsic charts, and form graph-supported manifold meshes."
+        ),
+    )
+    physical_mid_surface_mesh.add_argument(
+        "--mid-surfaces", type=Path, required=True
+    )
+    physical_mid_surface_mesh.add_argument("--output", type=Path, required=True)
+    physical_mid_surface_mesh.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PhysicalMidSurfaceMeshSettings keyword object",
+    )
+    physical_mid_surface_mesh.add_argument("--force", action="store_true")
+    physical_mid_surface_mesh.set_defaults(handler=_physical_mid_surface_mesh)
+    physical_mid_surface_flatten = subparsers.add_parser(
+        "flatten-physical-mid-surfaces",
+        description=(
+            "Rasterize leading physical midpoint meshes and sample native CT "
+            "at fixed depths inside the measured papyrus thickness."
+        ),
+    )
+    physical_mid_surface_flatten.add_argument("--mesh", type=Path, required=True)
+    physical_mid_surface_flatten.add_argument("--output", type=Path, required=True)
+    physical_mid_surface_flatten.add_argument(
+        "--grouping",
+        choices=("source-component", "mesh-component"),
+        default="source-component",
+    )
+    physical_mid_surface_flatten.add_argument(
+        "--maximum-components", type=int, default=12
+    )
+    physical_mid_surface_flatten.add_argument(
+        "--pixel-step", type=float, default=0.75
+    )
+    physical_mid_surface_flatten.add_argument(
+        "--maximum-pixels", type=int, default=640
+    )
+    physical_mid_surface_flatten.add_argument("--depth-min", type=float, default=-8.0)
+    physical_mid_surface_flatten.add_argument("--depth-max", type=float, default=8.0)
+    physical_mid_surface_flatten.add_argument("--depth-step", type=float, default=1.0)
+    physical_mid_surface_flatten.add_argument("--force", action="store_true")
+    physical_mid_surface_flatten.set_defaults(
+        handler=_physical_mid_surface_flatten
+    )
     isolated_slab_acus_audit = subparsers.add_parser(
         "audit-isolated-slabs-with-acus",
         description=(
@@ -3288,6 +3543,32 @@ def main() -> None:
     )
     paired_surface_growth.add_argument("--force", action="store_true")
     paired_surface_growth.set_defaults(handler=_paired_surface_growth)
+    direct_paired_profile_surface = subparsers.add_parser(
+        "build-direct-paired-profile-surfaces",
+        description=(
+            "Reconnect selected two-boundary CT profiles directly, discarding "
+            "inherited seed labels while enforcing the independent macro normal."
+        ),
+    )
+    direct_paired_profile_surface.add_argument("--bank", type=Path, required=True)
+    direct_paired_profile_surface.add_argument(
+        "--growth", type=Path, required=True
+    )
+    direct_paired_profile_surface.add_argument(
+        "--macro-orientation", type=Path, required=True
+    )
+    direct_paired_profile_surface.add_argument(
+        "--settings-json",
+        type=Path,
+        help="optional PairedProfileSurfaceSettings keyword object",
+    )
+    direct_paired_profile_surface.add_argument(
+        "--output", type=Path, required=True
+    )
+    direct_paired_profile_surface.add_argument("--force", action="store_true")
+    direct_paired_profile_surface.set_defaults(
+        handler=_direct_paired_profile_surface
+    )
     one_sided_interface = subparsers.add_parser(
         "build-one-sided-interface-bank",
         description=(

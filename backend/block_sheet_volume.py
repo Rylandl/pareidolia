@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c"
-    / "physical-mid-surface-catalog-v1"
+    / "direct-paired-profile-v3"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -823,11 +823,29 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
         for index in displayed_index
     ]
     counts = manifest.get("counts", {})
+    selection = manifest.get("selection", {})
+    direct_profile_count = int(np.count_nonzero(node_kind == 0))
+    dense_pair_count = int(np.count_nonzero(node_kind == 1))
+    selection_key_count = int(selection.get("spatialKeyCount", 0))
+    selected_candidate_count = int(
+        counts.get("selectedCandidateCount", len(position_world))
+    )
+    selected_key_fraction = (
+        selected_candidate_count / selection_key_count
+        if selection_key_count > 0
+        else 0.0
+    )
     source = manifest.get("source", {})
     try:
         manifest_label = str(manifest_path.relative_to(PROJECT_ROOT))
     except ValueError:
         manifest_label = str(manifest_path)
+    construction_schema = str(manifest.get("constructionSchema", ""))
+    method = (
+        "direct macro-gated air-papyrus-air profile reconstruction"
+        if construction_schema == "pareidolia.direct-paired-profile-surface"
+        else "paired air-papyrus-air physical mid-surfaces"
+    )
     return {
         "schema": "pareidolia.block-interface-volume",
         "version": 1,
@@ -836,7 +854,7 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
         "artifact": {
             "manifestPath": manifest_label,
             "state": "complete",
-            "method": "paired air-papyrus-air physical mid-surfaces",
+            "method": method,
         },
         "source": {
             "path": str(source.get("path", "")),
@@ -868,10 +886,18 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
             "medianNormalResidualDegrees": round(_percentile(opposing_error, 50), 4),
             "p90NormalResidualDegrees": round(_percentile(opposing_error, 90), 4),
             "retainedEdgeCount": int(len(edge_first)),
-            "eligibleNodeFraction": float(counts.get("usedBoundaryFaceNodeFraction", 0.0)),
-            "seedNodeCount": int(counts.get("directProfileNodeCount", 0)),
-            "physicalAnchorNodeCount": int(counts.get("directProfileNodeCount", 0)),
-            "denseBoundaryPairNodeCount": int(counts.get("denseBoundaryPairNodeCount", 0)),
+            "eligibleNodeFraction": float(
+                counts.get(
+                    "selectedCandidateFraction",
+                    counts.get(
+                        "usedBoundaryFaceNodeFraction",
+                        selected_key_fraction,
+                    ),
+                )
+            ),
+            "seedNodeCount": direct_profile_count,
+            "physicalAnchorNodeCount": direct_profile_count,
+            "denseBoundaryPairNodeCount": dense_pair_count,
             "physicallyAnchoredNodeCount": int(len(position_world)),
             "physicallyAnchoredComponentCount": component_count,
             "physicallyGuidedNodeCount": int(len(position_world)),

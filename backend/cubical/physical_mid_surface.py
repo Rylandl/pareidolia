@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import time
@@ -9,7 +10,9 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from . import contextual_profile_adoption
 from .contracts import VolumeSource, VoxelBounds, atomic_json, canonical_json_hash, sha256_file
+from .contextual_profile_adoption import ContextualProfileAdoptionSettings
 from .material_surface_bridging import (
     MATERIAL_SURFACE_BRIDGING_SCHEMA,
     MATERIAL_SURFACE_BRIDGING_STEM,
@@ -42,15 +45,27 @@ PHYSICAL_MID_SURFACE_STEM = "physical-mid-surface-catalog-v1"
 
 @dataclass(frozen=True, slots=True)
 class PhysicalMidSurfaceSettings:
+    adopt_contextual_profiles: bool = True
+    maximum_contextual_endpoint_position_residual_sampling_steps: float = 0.75
+    maximum_contextual_endpoint_normal_degrees: float = 15.0
+    contextual_endpoint_normal_cost_scale_degrees: float = 15.0
+    minimum_contextual_profile_evidence: float = 0.35
+    contextual_thickness_tolerance_sampling_steps: float = 0.5
     maximum_endpoint_direction_degrees: float = 35.0
     maximum_opposing_boundary_normal_degrees: float = 35.0
-    maximum_endpoint_tangent_residual_sampling_steps: float = 2.0
+    maximum_endpoint_tangent_residual_sampling_steps: float = 3.0
+    maximum_reciprocal_boundary_offset_sampling_steps: float = 3.0
+    maximum_reciprocal_boundary_normal_degrees: float = 35.0
+    maximum_lower_correspondences_per_upper_surfel: int = 4
     thickness_prior_tolerance_sampling_steps: float = 0.5
     thickness_prior_lower_percentile: float = 1.0
     thickness_prior_upper_percentile: float = 99.0
     pairing_batch_size: int = 128
     maximum_local_profile_distance_sampling_steps: float = 3.0
     maximum_local_profile_normal_degrees: float = 35.0
+    maximum_geodesic_profile_distance_sampling_steps: float = 16.0
+    maximum_geodesic_profile_normal_degrees: float = 35.0
+    maximum_one_sided_proxy_profile_distance_sampling_steps: float = 20.0
     local_thickness_tolerance_sampling_steps: float = 1.5
     require_local_profile_prior: bool = True
     maximum_neighbor_midpoint_distance_sampling_steps: float = 3.0
@@ -61,18 +76,27 @@ class PhysicalMidSurfaceSettings:
         for value in (
             self.maximum_endpoint_direction_degrees,
             self.maximum_opposing_boundary_normal_degrees,
+            self.maximum_reciprocal_boundary_normal_degrees,
             self.maximum_neighbor_normal_degrees,
             self.maximum_local_profile_normal_degrees,
+            self.maximum_geodesic_profile_normal_degrees,
+            self.maximum_contextual_endpoint_normal_degrees,
         ):
             if not math.isfinite(value) or not 0.0 < value < 90.0:
                 raise ValueError("mid-surface angular gates must lie in (0, 90)")
         for value in (
             self.maximum_endpoint_tangent_residual_sampling_steps,
+            self.maximum_reciprocal_boundary_offset_sampling_steps,
             self.thickness_prior_tolerance_sampling_steps,
             self.maximum_neighbor_midpoint_distance_sampling_steps,
             self.maximum_neighbor_midpoint_height_sampling_steps,
             self.maximum_local_profile_distance_sampling_steps,
+            self.maximum_geodesic_profile_distance_sampling_steps,
+            self.maximum_one_sided_proxy_profile_distance_sampling_steps,
             self.local_thickness_tolerance_sampling_steps,
+            self.maximum_contextual_endpoint_position_residual_sampling_steps,
+            self.contextual_endpoint_normal_cost_scale_degrees,
+            self.contextual_thickness_tolerance_sampling_steps,
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError("mid-surface distance gates must be positive")
@@ -85,6 +109,10 @@ class PhysicalMidSurfaceSettings:
             raise ValueError("mid-surface thickness percentiles are invalid")
         if self.pairing_batch_size < 1:
             raise ValueError("mid-surface pairing batch size must be positive")
+        if self.maximum_lower_correspondences_per_upper_surfel < 1:
+            raise ValueError("upper-surface correspondence capacity must be positive")
+        if not math.isfinite(self.minimum_contextual_profile_evidence):
+            raise ValueError("contextual profile evidence must be finite")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -258,6 +286,244 @@ def local_profile_thickness_prior(
     }
 
 
+def propagate_profile_thickness_prior(
+    position: np.ndarray,
+    signed_normal: np.ndarray,
+    physical_sheet_label: np.ndarray,
+    physical_boundary_side: np.ndarray,
+    edge_first: np.ndarray,
+    edge_second: np.ndarray,
+    direct_prior: Mapping[str, np.ndarray],
+    *,
+    sampling_stride_voxels: int,
+    settings: PhysicalMidSurfaceSettings,
+) -> dict[str, np.ndarray]:
+    """Transport measured thickness along one validated physical boundary.
+
+    Euclidean nearest profiles can jump between adjacent fold branches. This
+    multi-source geodesic propagation traverses only persisted graph edges with
+    the same immutable sheet and boundary-side identity. The path length is
+    bounded, and pairing still has to pass the original two-sided thickness,
+    direction, normal, tangent, and mutual-best gates.
+    """
+
+    point = np.asarray(position, dtype=np.float64)
+    normal = _normalized(signed_normal)
+    label = np.asarray(physical_sheet_label, dtype=np.int32)
+    side = np.asarray(physical_boundary_side, dtype=np.uint8)
+    first = np.asarray(edge_first, dtype=np.int32)
+    second = np.asarray(edge_second, dtype=np.int32)
+    expected_seed = np.asarray(
+        direct_prior["expectedThicknessVoxels"], dtype=np.float64
+    )
+    direct_distance = np.asarray(
+        direct_prior["profileDistanceSamplingSteps"], dtype=np.float64
+    )
+    candidate_seed = np.asarray(
+        direct_prior["profileCandidateIndex"], dtype=np.int32
+    )
+    if point.shape != normal.shape or point.ndim != 2 or point.shape[1] != 3:
+        raise ValueError("geodesic prior positions and normals must have shape (N, 3)")
+    if any(len(value) != len(point) for value in (label, side, expected_seed, direct_distance, candidate_seed)):
+        raise ValueError("geodesic profile-prior node arrays are not aligned")
+    if len(first) != len(second):
+        raise ValueError("geodesic profile-prior edge arrays are not aligned")
+    if np.any(first < 0) or np.any(second >= len(point)):
+        raise ValueError("geodesic profile-prior edge leaves the node table")
+
+    cosine_limit = math.cos(
+        math.radians(settings.maximum_geodesic_profile_normal_degrees)
+    )
+    edge_cosine = np.einsum("ij,ij->i", normal[first], normal[second])
+    valid_edge = (
+        (label[first] >= 0)
+        & (label[first] == label[second])
+        & (side[first] <= 1)
+        & (side[first] == side[second])
+        & (edge_cosine >= cosine_limit)
+    )
+    first = first[valid_edge]
+    second = second[valid_edge]
+    weight = (
+        np.linalg.norm(point[second] - point[first], axis=1)
+        / float(sampling_stride_voxels)
+    )
+    directed_source = np.concatenate((first, second))
+    directed_target = np.concatenate((second, first))
+    directed_weight = np.concatenate((weight, weight))
+    order = np.argsort(directed_source, kind="stable")
+    directed_source = directed_source[order]
+    directed_target = directed_target[order]
+    directed_weight = directed_weight[order]
+    degree = np.bincount(directed_source, minlength=len(point))
+    offset = np.zeros(len(point) + 1, dtype=np.int64)
+    np.cumsum(degree, out=offset[1:])
+
+    seed = np.flatnonzero(
+        np.isfinite(expected_seed)
+        & (expected_seed > 0.0)
+        & (candidate_seed >= 0)
+    )
+    path_distance = np.full(len(point), np.inf, dtype=np.float64)
+    source_seed = np.full(len(point), -1, dtype=np.int32)
+    path_distance[seed] = 0.0
+    source_seed[seed] = seed.astype(np.int32)
+    queue = [(0.0, int(node), int(node)) for node in seed]
+    heapq.heapify(queue)
+    maximum_distance = settings.maximum_geodesic_profile_distance_sampling_steps
+    while queue:
+        distance, node, source = heapq.heappop(queue)
+        if distance > maximum_distance:
+            break
+        if distance > path_distance[node] + 1.0e-10 or source != source_seed[node]:
+            continue
+        for edge_index in range(int(offset[node]), int(offset[node + 1])):
+            neighbor = int(directed_target[edge_index])
+            candidate_distance = distance + float(directed_weight[edge_index])
+            if candidate_distance > maximum_distance:
+                continue
+            prior_distance = path_distance[neighbor]
+            improve = candidate_distance < prior_distance - 1.0e-10
+            tie = (
+                abs(candidate_distance - prior_distance) <= 1.0e-10
+                and (
+                    source_seed[neighbor] < 0
+                    or candidate_seed[source]
+                    < candidate_seed[source_seed[neighbor]]
+                )
+            )
+            if not improve and not tie:
+                continue
+            path_distance[neighbor] = candidate_distance
+            source_seed[neighbor] = source
+            heapq.heappush(queue, (candidate_distance, neighbor, source))
+
+    reached = source_seed >= 0
+    expected = expected_seed.copy()
+    candidate = candidate_seed.copy()
+    total_distance = direct_distance.copy()
+    propagated = reached & ~np.isfinite(expected_seed)
+    expected[propagated] = expected_seed[source_seed[propagated]]
+    candidate[propagated] = candidate_seed[source_seed[propagated]]
+    total_distance[propagated] = (
+        direct_distance[source_seed[propagated]] + path_distance[propagated]
+    )
+    return {
+        "expectedThicknessVoxels": expected.astype(np.float32),
+        "profileDistanceSamplingSteps": total_distance.astype(np.float32),
+        "profileCandidateIndex": candidate.astype(np.int32),
+        "profileGeodesicDistanceSamplingSteps": path_distance.astype(np.float32),
+        "directProfilePrior": np.isfinite(expected_seed),
+        "geodesicallyPropagatedProfilePrior": propagated,
+    }
+
+
+def one_sided_mid_surface_proxies(
+    position: np.ndarray,
+    signed_normal: np.ndarray,
+    sheet_normal: np.ndarray,
+    physical_sheet_label: np.ndarray,
+    physical_boundary_side: np.ndarray,
+    expected_thickness_voxels: np.ndarray,
+    profile_distance_sampling_steps: np.ndarray,
+    used_by_dense_pair: np.ndarray,
+    *,
+    settings: PhysicalMidSurfaceSettings,
+    source_start_xyz: np.ndarray | None = None,
+    source_stop_xyz_exclusive: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Offset a measured physical face by half a locally measured thickness.
+
+    The dense material-surface graph already represents one signed physical
+    boundary. Its smoother sheet normal is sign-aligned to the air-to-material
+    normal, so the offset always points into papyrus. A face used by an actual
+    lower/upper correspondence never receives a proxy. The construction does
+    not connect opposite boundary sides; continuity remains inherited from one
+    immutable signed-face graph until direct profiles or dense pairs join it.
+    """
+
+    point = np.asarray(position, dtype=np.float64)
+    raw_normal = _normalized(signed_normal)
+    smooth_normal = _normalized(sheet_normal)
+    label = np.asarray(physical_sheet_label, dtype=np.int32)
+    side = np.asarray(physical_boundary_side, dtype=np.uint8)
+    thickness = np.asarray(expected_thickness_voxels, dtype=np.float64)
+    profile_distance = np.asarray(
+        profile_distance_sampling_steps, dtype=np.float64
+    )
+    dense = np.asarray(used_by_dense_pair, dtype=bool)
+    if point.ndim != 2 or point.shape[1] != 3:
+        raise ValueError("one-sided proxy positions must have shape (N, 3)")
+    if raw_normal.shape != point.shape or smooth_normal.shape != point.shape:
+        raise ValueError("one-sided proxy normals must match positions")
+    if any(
+        len(value) != len(point)
+        for value in (label, side, thickness, profile_distance, dense)
+    ):
+        raise ValueError("one-sided proxy arrays are not node aligned")
+    inward_sign = np.where(
+        np.einsum("ij,ij->i", smooth_normal, raw_normal) >= 0.0,
+        1.0,
+        -1.0,
+    )
+    inward = smooth_normal * inward_sign[:, None]
+    inferred_opposite_all = point + thickness[:, None] * inward
+    selected = (
+        (label >= 0)
+        & (side <= 1)
+        & ~dense
+        & np.isfinite(thickness)
+        & (thickness > 0.0)
+        & np.isfinite(profile_distance)
+        & (
+            profile_distance
+            <= settings.maximum_one_sided_proxy_profile_distance_sampling_steps
+        )
+    )
+    if (source_start_xyz is None) != (source_stop_xyz_exclusive is None):
+        raise ValueError("one-sided proxy source bounds must be supplied together")
+    if source_start_xyz is not None and source_stop_xyz_exclusive is not None:
+        source_start = np.asarray(source_start_xyz, dtype=np.float64)
+        source_stop = np.asarray(source_stop_xyz_exclusive, dtype=np.float64)
+        if (
+            source_start.shape != (3,)
+            or source_stop.shape != (3,)
+            or np.any(source_stop <= source_start)
+        ):
+            raise ValueError("one-sided proxy source bounds are invalid")
+        selected &= np.all(
+            (inferred_opposite_all >= source_start[None, :])
+            & (inferred_opposite_all < source_stop[None, :]),
+            axis=1,
+        )
+    source_node = np.flatnonzero(selected).astype(np.int32)
+    selected_point = point[selected]
+    selected_inward = inward[selected]
+    selected_thickness = thickness[selected]
+    midpoint = selected_point + 0.5 * selected_thickness[:, None] * selected_inward
+    inferred_opposite = inferred_opposite_all[selected]
+    selected_side = side[selected]
+    lower = np.where(
+        (selected_side == 0)[:, None], selected_point, inferred_opposite
+    )
+    upper = np.where(
+        (selected_side == 1)[:, None], selected_point, inferred_opposite
+    )
+    return {
+        "sourceSurfaceNode": source_node,
+        "midpointXYZ": midpoint.astype(np.float32),
+        "normalXYZ": selected_inward.astype(np.float32),
+        "boundaryLowerXYZ": lower.astype(np.float32),
+        "boundaryUpperXYZ": upper.astype(np.float32),
+        "physicalSheetLabel": label[selected].astype(np.int32),
+        "physicalBoundarySide": selected_side.astype(np.uint8),
+        "thicknessVoxels": selected_thickness.astype(np.float32),
+        "profileDistanceSamplingSteps": profile_distance[selected].astype(
+            np.float32
+        ),
+    }
+
+
 def pair_physical_boundary_faces(
     position: np.ndarray,
     signed_normal: np.ndarray,
@@ -268,13 +534,16 @@ def pair_physical_boundary_faces(
     sampling_stride_voxels: int,
     settings: PhysicalMidSurfaceSettings,
     local_thickness_prior: np.ndarray | None = None,
-) -> dict[str, np.ndarray]:
-    """Mutually pair lower/upper signed faces using physical profile thickness.
+) -> dict[str, Any]:
+    """Pair lower/upper signed faces using reciprocal local surface support.
 
     The sheet label limits correspondence to one paired air-material-air
     hypothesis. Direction, opposing normals, tangent residual, and the
     per-sheet measured thickness distribution then define the only admissible
-    lower/upper matches. Mutual best matches make the correspondence one-to-one.
+    lower/upper matches. A lower face is retained when the upper face's best
+    lower match lies on the same small surface patch. Bounded upper-face
+    capacity preserves staggered sampling without allowing broad many-to-one
+    collapses.
     """
 
     point = np.asarray(position, dtype=np.float64)
@@ -302,6 +571,12 @@ def pair_physical_boundary_faces(
         math.radians(settings.maximum_opposing_boundary_normal_degrees)
     )
     tangent_cap = settings.maximum_endpoint_tangent_residual_sampling_steps * stride
+    reciprocal_offset_cap = (
+        settings.maximum_reciprocal_boundary_offset_sampling_steps * stride
+    )
+    reciprocal_normal_cosine = math.cos(
+        math.radians(settings.maximum_reciprocal_boundary_normal_degrees)
+    )
     tolerance = settings.thickness_prior_tolerance_sampling_steps * stride
 
     lower_result: list[np.ndarray] = []
@@ -312,13 +587,35 @@ def pair_physical_boundary_faces(
     upper_angle_result: list[np.ndarray] = []
     opposition_result: list[np.ndarray] = []
     thickness_result: list[np.ndarray] = []
+    stage_names = (
+        "sameSheetHasOppositeSide",
+        "globalThicknessRange",
+        "localThicknessAgreement",
+        "endpointDirection",
+        "opposingBoundaryNormal",
+        "tangentResidual",
+        "reciprocalSurfelSupport",
+        "upperSurfelCapacity",
+    )
+    stage_count = {name: 0 for name in stage_names}
+    total_lower_nodes = 0
+    maximum_one_to_one_pairs = 0
+    labels_with_both_sides = 0
+    labels_with_thickness_prior = 0
+    exact_mutual_count = 0
     for sheet_label in np.unique(label[label >= 0]):
         lower = np.flatnonzero((label == sheet_label) & (side == 0))
         upper = np.flatnonzero((label == sheet_label) & (side == 1))
+        total_lower_nodes += len(lower)
+        maximum_one_to_one_pairs += min(len(lower), len(upper))
+        if len(lower) and len(upper):
+            labels_with_both_sides += 1
+            stage_count["sameSheetHasOppositeSide"] += len(lower)
         prior = np.asarray(thickness_by_label.get(int(sheet_label), ()), dtype=np.float64)
         prior = prior[np.isfinite(prior) & (prior > 0.0)]
         if not len(lower) or not len(upper) or not len(prior):
             continue
+        labels_with_thickness_prior += 1
         lower_thickness, center_thickness, upper_thickness = np.percentile(
             prior,
             (
@@ -336,6 +633,10 @@ def pair_physical_boundary_faces(
         best_upper_cost = np.full(len(lower), np.inf, dtype=np.float64)
         best_lower = np.full(len(upper), -1, dtype=np.int32)
         best_lower_cost = np.full(len(upper), np.inf, dtype=np.float64)
+        reached = {
+            name: np.zeros(len(lower), dtype=bool)
+            for name in stage_names[1:-2]
+        }
         upper_point = point[upper]
         upper_normal = normal[upper]
         for start in range(0, len(lower), settings.pairing_batch_size):
@@ -360,14 +661,8 @@ def pair_physical_boundary_faces(
             )
             tangent = np.maximum(lower_tangent, upper_tangent)
             opposing = normal[batch] @ upper_normal.T
-            valid = (
-                (distance >= lower_thickness)
-                & (distance <= upper_thickness)
-                & (lower_direction >= direction_cosine)
-                & (upper_direction >= direction_cosine)
-                & (opposing <= -opposition_cosine)
-                & (tangent <= tangent_cap)
-            )
+            valid = (distance >= lower_thickness) & (distance <= upper_thickness)
+            reached["globalThicknessRange"][start:stop] |= np.any(valid, axis=1)
             lower_local_thickness = local_thickness[batch]
             upper_local_thickness = local_thickness[upper]
             local_available = np.isfinite(lower_local_thickness)[:, None] & np.isfinite(
@@ -386,6 +681,20 @@ def pair_physical_boundary_faces(
             )
             if settings.require_local_profile_prior and local_thickness_prior is not None:
                 valid &= local_available & local_agreement
+            reached["localThicknessAgreement"][start:stop] |= np.any(
+                valid, axis=1
+            )
+            valid &= (
+                (lower_direction >= direction_cosine)
+                & (upper_direction >= direction_cosine)
+            )
+            reached["endpointDirection"][start:stop] |= np.any(valid, axis=1)
+            valid &= opposing <= -opposition_cosine
+            reached["opposingBoundaryNormal"][start:stop] |= np.any(
+                valid, axis=1
+            )
+            valid &= tangent <= tangent_cap
+            reached["tangentResidual"][start:stop] |= np.any(valid, axis=1)
             angular_scale = max(1.0 - direction_cosine, 1.0e-9)
             opposition_scale = max(1.0 - opposition_cosine, 1.0e-9)
             cost = (
@@ -419,9 +728,59 @@ def pair_physical_boundary_faces(
             best_lower_cost[improve] = column_cost[improve]
         lower_local = np.flatnonzero(best_upper >= 0)
         upper_local = best_upper[lower_local]
-        mutual = best_lower[upper_local] == lower_local
-        lower_local = lower_local[mutual]
-        upper_local = upper_local[mutual]
+        reciprocal_lower = best_lower[upper_local]
+        reciprocal_available = reciprocal_lower >= 0
+        exact_mutual = reciprocal_available & (reciprocal_lower == lower_local)
+        exact_mutual_count += int(np.count_nonzero(exact_mutual))
+        reciprocal_offset = np.full(len(lower_local), np.inf, dtype=np.float64)
+        reciprocal_cosine = np.full(len(lower_local), -1.0, dtype=np.float64)
+        valid_reciprocal = np.flatnonzero(reciprocal_available)
+        if len(valid_reciprocal):
+            current_lower_node = lower[lower_local[valid_reciprocal]]
+            reciprocal_lower_node = lower[
+                reciprocal_lower[valid_reciprocal]
+            ]
+            reciprocal_offset[valid_reciprocal] = np.linalg.norm(
+                point[current_lower_node] - point[reciprocal_lower_node],
+                axis=1,
+            )
+            reciprocal_cosine[valid_reciprocal] = np.einsum(
+                "ij,ij->i",
+                normal[current_lower_node],
+                normal[reciprocal_lower_node],
+            )
+        reciprocal = (
+            reciprocal_available
+            & (reciprocal_offset <= reciprocal_offset_cap)
+            & (reciprocal_cosine >= reciprocal_normal_cosine)
+        )
+        lower_local = lower_local[reciprocal]
+        upper_local = upper_local[reciprocal]
+        for name, values in reached.items():
+            stage_count[name] += int(np.count_nonzero(values))
+        stage_count["reciprocalSurfelSupport"] += len(lower_local)
+        if len(lower_local):
+            reciprocal_exact = exact_mutual[reciprocal]
+            reciprocal_cost = best_upper_cost[lower_local]
+            keep_capacity = np.zeros(len(lower_local), dtype=bool)
+            for upper_value in np.unique(upper_local):
+                member = np.flatnonzero(upper_local == upper_value)
+                ranking = np.lexsort(
+                    (
+                        lower_local[member],
+                        reciprocal_cost[member],
+                        ~reciprocal_exact[member],
+                    )
+                )
+                retained = member[
+                    ranking[
+                        : settings.maximum_lower_correspondences_per_upper_surfel
+                    ]
+                ]
+                keep_capacity[retained] = True
+            lower_local = lower_local[keep_capacity]
+            upper_local = upper_local[keep_capacity]
+        stage_count["upperSurfelCapacity"] += len(lower_local)
         if not len(lower_local):
             continue
         lower_node = lower[lower_local]
@@ -470,6 +829,12 @@ def pair_physical_boundary_faces(
         thickness_result.append(distance.astype(np.float32))
     empty_int = np.empty(0, dtype=np.int32)
     empty_float = np.empty(0, dtype=np.float32)
+    stage_loss: dict[str, int] = {}
+    previous = total_lower_nodes
+    for name in stage_names:
+        value = stage_count[name]
+        stage_loss[name] = previous - value
+        previous = value
     return {
         "lowerNode": np.concatenate(lower_result) if lower_result else empty_int,
         "upperNode": np.concatenate(upper_result) if upper_result else empty_int,
@@ -489,6 +854,17 @@ def pair_physical_boundary_faces(
         "thicknessVoxels": (
             np.concatenate(thickness_result) if thickness_result else empty_float
         ),
+        "census": {
+            "totalLowerBoundaryNodeCount": int(total_lower_nodes),
+            "maximumOneToOnePairCount": int(maximum_one_to_one_pairs),
+            "labelsWithBothBoundarySides": int(labels_with_both_sides),
+            "labelsWithThicknessPrior": int(labels_with_thickness_prior),
+            "exactMutualOneToOneCount": int(exact_mutual_count),
+            "lowerNodesReachingStage": {
+                name: int(stage_count[name]) for name in stage_names
+            },
+            "lowerNodesLostAtStage": stage_loss,
+        },
     }
 
 
@@ -758,6 +1134,9 @@ def run_physical_mid_surface_catalog(
         },
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
+        "profileAdoptionImplementationSha256": sha256_file(
+            Path(contextual_profile_adoption.__file__)
+        ),
     }
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_path).resolve()
@@ -791,30 +1170,143 @@ def run_physical_mid_surface_catalog(
     sheet_label = np.asarray(surface_arrays["physicalSheetLabel"], dtype=np.int32)
     boundary_side = np.asarray(surface_arrays["physicalBoundarySide"], dtype=np.uint8)
     local_evidence = np.asarray(surface_arrays["localEvidenceScore"], dtype=np.float64)
-    selected = np.asarray(growth_arrays["selected"], dtype=bool)
-    selected_label = np.asarray(growth_arrays["selectedLabel"], dtype=np.int32)
+    originally_selected = np.asarray(growth_arrays["selected"], dtype=bool)
+    originally_selected_label = np.asarray(
+        growth_arrays["selectedLabel"], dtype=np.int32
+    )
     bank_thickness = np.asarray(bank_arrays["thicknessVoxels"], dtype=np.float64)
     thickness_by_label = {
-        int(value): bank_thickness[selected & (selected_label == value)]
-        for value in np.unique(selected_label[selected])
+        int(value): bank_thickness[
+            originally_selected & (originally_selected_label == value)
+        ]
+        for value in np.unique(originally_selected_label[originally_selected])
     }
     interface_identity = surface["identity"]["interfaces"]
     interface_path = Path(str(interface_identity["manifestPath"])).resolve()
     interface_manifest = json.loads(interface_path.read_text())
+    interface_arrays = _load_npz(interface_path, interface_manifest)
     stride = int(interface_manifest["identity"]["settings"]["sampling_stride_voxels"])
 
+    if resolved.adopt_contextual_profiles:
+        profile_selection = contextual_profile_adoption.adopt_contextual_profiles(
+            bank_arrays,
+            growth_arrays,
+            surface_arrays,
+            interface_arrays,
+            processing_start_xyz=np.asarray(
+                interface_manifest["geometry"]["processingVoxelBounds"]["startXYZ"],
+                dtype=np.float64,
+            ),
+            source_origin_xyz=np.asarray(
+                interface_manifest["source"]["sourceOriginXYZ"], dtype=np.float64
+            ),
+            processing_shape_sampling_xyz=tuple(
+                int(value)
+                for value in interface_manifest["geometry"][
+                    "processingShapeSamplingXYZ"
+                ]
+            ),
+            sampling_stride_voxels=stride,
+            settings=ContextualProfileAdoptionSettings(
+                maximum_endpoint_position_residual_sampling_steps=(
+                    resolved.maximum_contextual_endpoint_position_residual_sampling_steps
+                ),
+                maximum_endpoint_normal_degrees=(
+                    resolved.maximum_contextual_endpoint_normal_degrees
+                ),
+                endpoint_normal_cost_scale_degrees=(
+                    resolved.contextual_endpoint_normal_cost_scale_degrees
+                ),
+                minimum_local_evidence=(
+                    resolved.minimum_contextual_profile_evidence
+                ),
+                thickness_tolerance_sampling_steps=(
+                    resolved.contextual_thickness_tolerance_sampling_steps
+                ),
+            ),
+        )
+    else:
+        profile_selection = {
+            "selected": originally_selected,
+            "originallySelected": originally_selected,
+            "adopted": np.zeros(len(originally_selected), dtype=bool),
+            "physicalSheetLabel": originally_selected_label,
+            "canonicalOrientation": np.where(
+                originally_selected, 1, 0
+            ).astype(np.int8),
+            "endpointSupportCount": np.zeros(
+                len(originally_selected), dtype=np.uint8
+            ),
+            "summary": {
+                "candidateCount": int(len(originally_selected)),
+                "originalSelectedProfileCount": int(
+                    np.count_nonzero(originally_selected)
+                ),
+                "contextuallyAdmissibleProfileCount": 0,
+                "contextualEndpointIdentityConflictCount": 0,
+                "selectedProfileCount": int(
+                    np.count_nonzero(originally_selected)
+                ),
+                "adoptedContextualProfileCount": 0,
+                "adoptedWithTwoMatchedEndpointsCount": 0,
+                "adoptedWithOneMatchedEndpointCount": 0,
+                "adoptedCanonicalOrientationCount": 0,
+                "adoptedReversedOrientationCount": 0,
+            },
+        }
+    selected = np.asarray(profile_selection["selected"], dtype=bool)
+    selected_label = np.asarray(
+        profile_selection["physicalSheetLabel"], dtype=np.int32
+    )
+    canonical_orientation = np.asarray(
+        profile_selection["canonicalOrientation"], dtype=np.int8
+    )
+    raw_profile_lower = np.asarray(
+        bank_arrays["boundaryLowerXYZ"], dtype=np.float64
+    )
+    raw_profile_upper = np.asarray(
+        bank_arrays["boundaryUpperXYZ"], dtype=np.float64
+    )
+    raw_profile_normal = _normalized(
+        np.asarray(bank_arrays["normalXYZ"], dtype=np.float64)
+    )
+    canonical_profile_lower = np.where(
+        (canonical_orientation >= 0)[:, None],
+        raw_profile_lower,
+        raw_profile_upper,
+    )
+    canonical_profile_upper = np.where(
+        (canonical_orientation >= 0)[:, None],
+        raw_profile_upper,
+        raw_profile_lower,
+    )
+    canonical_profile_normal = (
+        raw_profile_normal * canonical_orientation[:, None]
+    )
+
     selected_candidate = np.flatnonzero(selected).astype(np.int32)
-    profile_prior = local_profile_thickness_prior(
+    direct_profile_prior = local_profile_thickness_prior(
         position,
         signed_normal,
         sheet_label,
         boundary_side,
-        np.asarray(bank_arrays["boundaryLowerXYZ"])[selected],
-        np.asarray(bank_arrays["boundaryUpperXYZ"])[selected],
-        np.asarray(bank_arrays["normalXYZ"])[selected],
+        canonical_profile_lower[selected],
+        canonical_profile_upper[selected],
+        canonical_profile_normal[selected],
         bank_thickness[selected],
         selected_label[selected],
         selected_candidate,
+        sampling_stride_voxels=stride,
+        settings=resolved,
+    )
+    profile_prior = propagate_profile_thickness_prior(
+        position,
+        signed_normal,
+        sheet_label,
+        boundary_side,
+        np.asarray(surface_arrays["edgeFirstNode"], dtype=np.int32),
+        np.asarray(surface_arrays["edgeSecondNode"], dtype=np.int32),
+        direct_profile_prior,
         sampling_stride_voxels=stride,
         settings=resolved,
     )
@@ -836,23 +1328,82 @@ def run_physical_mid_surface_catalog(
     dense_label = sheet_label[lower_node]
     if not np.array_equal(dense_label, sheet_label[upper_node]):
         raise RuntimeError("paired boundary nodes cross physical sheet identities")
-    pair_by_surface_node = np.full(len(position), -1, dtype=np.int32)
-    pair_by_surface_node[lower_node] = np.arange(len(lower_node), dtype=np.int32)
-    pair_by_surface_node[upper_node] = np.arange(len(upper_node), dtype=np.int32)
+    used_boundary_face_count = int(
+        len(np.unique(np.concatenate((lower_node, upper_node))))
+    )
+    used_by_dense_pair = np.zeros(len(position), dtype=bool)
+    used_by_dense_pair[lower_node] = True
+    used_by_dense_pair[upper_node] = True
+    proxy = one_sided_mid_surface_proxies(
+        position,
+        signed_normal,
+        np.asarray(
+            surface_arrays.get(
+                "sheetNormalXYZ",
+                surface_arrays.get("macroNormalXYZ", signed_normal),
+            ),
+            dtype=np.float64,
+        ),
+        sheet_label,
+        boundary_side,
+        profile_prior["expectedThicknessVoxels"],
+        profile_prior["profileDistanceSamplingSteps"],
+        used_by_dense_pair,
+        settings=resolved,
+        source_start_xyz=np.asarray(
+            bank["source"]["sourceOriginXYZ"], dtype=np.float64
+        ),
+        source_stop_xyz_exclusive=(
+            np.asarray(bank["source"]["sourceOriginXYZ"], dtype=np.float64)
+            + np.asarray(bank["source"]["shapeZYX"], dtype=np.float64)[::-1]
+        ),
+    )
+    proxy_midpoint = np.asarray(proxy["midpointXYZ"], dtype=np.float64)
+    proxy_normal = np.asarray(proxy["normalXYZ"], dtype=np.float64)
+    proxy_label = np.asarray(proxy["physicalSheetLabel"], dtype=np.int32)
+    proxy_source_node = np.asarray(proxy["sourceSurfaceNode"], dtype=np.int32)
+    dense_count = len(dense_midpoint)
+    proxy_count = len(proxy_midpoint)
+    support_midpoint = np.concatenate((dense_midpoint, proxy_midpoint), axis=0)
+    support_normal = np.concatenate((dense_normal, proxy_normal), axis=0)
+    support_label = np.concatenate((dense_label, proxy_label)).astype(np.int32)
+    midpoint_by_surface_node = np.full(len(position), -1, dtype=np.int32)
+    pair_index = np.arange(len(lower_node), dtype=np.int32)
+    midpoint_by_surface_node[lower_node] = pair_index
+    if len(upper_node):
+        # Lower surfels are unique, whereas reciprocal patch support permits a
+        # bounded number of staggered lower samples to share one upper surfel.
+        # Use the lowest-cost pair as that upper surfel's deterministic graph
+        # representative instead of relying on duplicate advanced assignment.
+        pair_cost = np.asarray(pairing["pairCost"], dtype=np.float64)
+        order = np.lexsort((pair_index, pair_cost, upper_node))
+        ordered_upper = upper_node[order]
+        first_for_upper = np.concatenate(
+            (
+                np.ones(1, dtype=bool),
+                ordered_upper[1:] != ordered_upper[:-1],
+            )
+        )
+        midpoint_by_surface_node[ordered_upper[first_for_upper]] = pair_index[
+            order[first_for_upper]
+        ]
+    midpoint_by_surface_node[proxy_source_node] = (
+        dense_count + np.arange(proxy_count, dtype=np.int32)
+    )
     (
-        dense_edge_first,
-        dense_edge_second,
-        dense_edge_support,
-        dense_edge_score,
+        surface_edge_first,
+        surface_edge_second,
+        surface_edge_support,
+        surface_edge_score,
         edge_summary,
     ) = _midpoint_edges(
-        pair_by_surface_node,
+        midpoint_by_surface_node,
         np.asarray(surface_arrays["edgeFirstNode"], dtype=np.int64),
         np.asarray(surface_arrays["edgeSecondNode"], dtype=np.int64),
         boundary_side,
-        dense_midpoint,
-        dense_normal,
-        dense_label,
+        support_midpoint,
+        support_normal,
+        support_label,
         sampling_stride_voxels=stride,
         settings=resolved,
     )
@@ -860,12 +1411,17 @@ def run_physical_mid_surface_catalog(
     profile_midpoint = np.asarray(bank_arrays["midpointXYZ"], dtype=np.float64)[
         selected
     ]
-    profile_normal = _normalized(
-        np.asarray(bank_arrays["normalXYZ"], dtype=np.float64)[selected]
-    )
+    profile_normal = canonical_profile_normal[selected]
     profile_label = selected_label[selected]
+    profile_adopted = np.asarray(
+        profile_selection["adopted"], dtype=bool
+    )[selected]
+    profile_endpoint_support = np.asarray(
+        profile_selection["endpointSupportCount"], dtype=np.uint8
+    )[selected]
+    profile_orientation = canonical_orientation[selected]
+    profile_node_kind = np.where(profile_adopted, 2, 0).astype(np.uint8)
     profile_count = len(profile_midpoint)
-    dense_count = len(dense_midpoint)
     candidate_to_profile_node = np.full(len(selected), -1, dtype=np.int32)
     candidate_to_profile_node[selected_candidate] = np.arange(
         profile_count, dtype=np.int32
@@ -892,16 +1448,25 @@ def run_physical_mid_surface_catalog(
     ]
     lower_profile_candidate = profile_prior["profileCandidateIndex"][lower_node]
     upper_profile_candidate = profile_prior["profileCandidateIndex"][upper_node]
+    proxy_profile_candidate = profile_prior["profileCandidateIndex"][
+        proxy_source_node
+    ]
+    support_lower_profile_candidate = np.concatenate(
+        (lower_profile_candidate, proxy_profile_candidate)
+    )
+    support_upper_profile_candidate = np.concatenate(
+        (upper_profile_candidate, proxy_profile_candidate)
+    )
     (
         attachment_profile_node,
-        attachment_dense_node,
+        attachment_support_node,
         attachment_score,
     ) = _profile_attachment_edges(
-        dense_midpoint,
-        dense_normal,
-        dense_label,
-        lower_profile_candidate,
-        upper_profile_candidate,
+        support_midpoint,
+        support_normal,
+        support_label,
+        support_lower_profile_candidate,
+        support_upper_profile_candidate,
         candidate_to_profile_node,
         profile_midpoint,
         profile_normal,
@@ -909,37 +1474,37 @@ def run_physical_mid_surface_catalog(
         sampling_stride_voxels=stride,
         settings=resolved,
     )
-    midpoint = np.concatenate((profile_midpoint, dense_midpoint), axis=0)
-    mid_normal = np.concatenate((profile_normal, dense_normal), axis=0)
-    mid_label = np.concatenate((profile_label, dense_label)).astype(np.int32)
+    midpoint = np.concatenate((profile_midpoint, support_midpoint), axis=0)
+    mid_normal = np.concatenate((profile_normal, support_normal), axis=0)
+    mid_label = np.concatenate((profile_label, support_label)).astype(np.int32)
     edge_first = np.concatenate(
         (
             profile_edge_first.astype(np.int32),
-            profile_count + dense_edge_first,
+            profile_count + surface_edge_first,
             attachment_profile_node,
         )
     )
     edge_second = np.concatenate(
         (
             profile_edge_second.astype(np.int32),
-            profile_count + dense_edge_second,
-            profile_count + attachment_dense_node,
+            profile_count + surface_edge_second,
+            profile_count + attachment_support_node,
         )
     )
     edge_support = np.concatenate(
         (
             np.zeros(len(profile_edge_first), dtype=np.uint8),
-            dense_edge_support,
+            surface_edge_support,
             np.full(len(attachment_profile_node), 3, dtype=np.uint8),
         )
     )
     edge_score = np.concatenate(
-        (profile_edge_score, dense_edge_score, attachment_score)
+        (profile_edge_score, surface_edge_score, attachment_score)
     ).astype(np.float32)
     edge_kind = np.concatenate(
         (
             np.zeros(len(profile_edge_first), dtype=np.uint8),
-            np.ones(len(dense_edge_first), dtype=np.uint8),
+            np.ones(len(surface_edge_first), dtype=np.uint8),
             np.full(len(attachment_profile_node), 2, dtype=np.uint8),
         )
     )
@@ -968,35 +1533,71 @@ def run_physical_mid_surface_catalog(
     dense_thickness_residual = (
         pairing["thicknessVoxels"] - dense_expected_thickness
     ).astype(np.float32)
+    proxy_float_fill = np.full(proxy_count, np.nan, dtype=np.float32)
+    proxy_side = np.asarray(proxy["physicalBoundarySide"], dtype=np.uint8)
+    proxy_evidence = local_evidence[proxy_source_node].astype(np.float32)
+    proxy_component = np.asarray(surface_arrays["componentId"], dtype=np.int32)[
+        proxy_source_node
+    ]
+    proxy_lower_surface = np.where(
+        proxy_side == 0, proxy_source_node, -1
+    ).astype(np.int32)
+    proxy_upper_surface = np.where(
+        proxy_side == 1, proxy_source_node, -1
+    ).astype(np.int32)
     arrays = {
         "midpointXYZ": midpoint.astype(np.float32),
         "normalXYZ": mid_normal.astype(np.float32),
         "boundaryLowerXYZ": np.concatenate(
             (
-                np.asarray(bank_arrays["boundaryLowerXYZ"])[selected],
+                canonical_profile_lower[selected],
                 position[lower_node],
+                np.asarray(proxy["boundaryLowerXYZ"], dtype=np.float32),
             )
         ).astype(np.float32),
         "boundaryUpperXYZ": np.concatenate(
             (
-                np.asarray(bank_arrays["boundaryUpperXYZ"])[selected],
+                canonical_profile_upper[selected],
                 position[upper_node],
+                np.asarray(proxy["boundaryUpperXYZ"], dtype=np.float32),
             )
         ).astype(np.float32),
         "nodeKind": np.concatenate(
             (
-                np.zeros(profile_count, dtype=np.uint8),
+                profile_node_kind,
                 np.ones(dense_count, dtype=np.uint8),
+                np.full(proxy_count, 3, dtype=np.uint8),
+            )
+        ),
+        "profileAdopted": np.concatenate(
+            (
+                profile_adopted,
+                np.zeros(dense_count + proxy_count, dtype=bool),
+            )
+        ),
+        "profileEndpointSupportCount": np.concatenate(
+            (
+                profile_endpoint_support,
+                np.zeros(dense_count + proxy_count, dtype=np.uint8),
+            )
+        ),
+        "profileCanonicalOrientation": np.concatenate(
+            (
+                profile_orientation,
+                np.zeros(dense_count + proxy_count, dtype=np.int8),
             )
         ),
         "profileCandidateIndex": np.concatenate(
-            (selected_candidate, np.full(dense_count, -1, dtype=np.int32))
+            (
+                selected_candidate,
+                np.full(dense_count + proxy_count, -1, dtype=np.int32),
+            )
         ),
         "lowerSurfaceNode": np.concatenate(
-            (profile_int_fill, lower_node.astype(np.int32))
+            (profile_int_fill, lower_node.astype(np.int32), proxy_lower_surface)
         ),
         "upperSurfaceNode": np.concatenate(
-            (profile_int_fill, upper_node.astype(np.int32))
+            (profile_int_fill, upper_node.astype(np.int32), proxy_upper_surface)
         ),
         "lowerFaceComponentId": np.concatenate(
             (
@@ -1004,6 +1605,7 @@ def run_physical_mid_surface_catalog(
                 np.asarray(surface_arrays["componentId"])[lower_node].astype(
                     np.int32
                 ),
+                np.where(proxy_side == 0, proxy_component, -1).astype(np.int32),
             )
         ),
         "upperFaceComponentId": np.concatenate(
@@ -1012,58 +1614,104 @@ def run_physical_mid_surface_catalog(
                 np.asarray(surface_arrays["componentId"])[upper_node].astype(
                     np.int32
                 ),
+                np.where(proxy_side == 1, proxy_component, -1).astype(np.int32),
             )
         ),
         "physicalSheetLabel": mid_label.astype(np.int32),
         "componentId": component.astype(np.int32),
         "thicknessVoxels": np.concatenate(
-            (bank_thickness[selected].astype(np.float32), pairing["thicknessVoxels"])
+            (
+                bank_thickness[selected].astype(np.float32),
+                pairing["thicknessVoxels"],
+                np.asarray(proxy["thicknessVoxels"], dtype=np.float32),
+            )
         ),
-        "pairCost": np.concatenate((profile_float_fill, pairing["pairCost"])),
+        "pairCost": np.concatenate(
+            (profile_float_fill, pairing["pairCost"], proxy_float_fill)
+        ),
         "thicknessResidualVoxels": np.concatenate(
-            (np.zeros(profile_count, dtype=np.float32), dense_thickness_residual)
+            (
+                np.zeros(profile_count, dtype=np.float32),
+                dense_thickness_residual,
+                proxy_float_fill,
+            )
         ),
         "tangentResidualSamplingSteps": np.concatenate(
-            (profile_float_fill, pairing["tangentResidualSamplingSteps"])
+            (
+                profile_float_fill,
+                pairing["tangentResidualSamplingSteps"],
+                proxy_float_fill,
+            )
         ),
         "lowerDirectionDegrees": np.concatenate(
-            (profile_float_fill, pairing["lowerDirectionDegrees"])
+            (profile_float_fill, pairing["lowerDirectionDegrees"], proxy_float_fill)
         ),
         "upperDirectionDegrees": np.concatenate(
-            (profile_float_fill, pairing["upperDirectionDegrees"])
+            (profile_float_fill, pairing["upperDirectionDegrees"], proxy_float_fill)
         ),
         "opposingNormalDegrees": np.concatenate(
-            (profile_float_fill, pairing["opposingNormalDegrees"])
+            (profile_float_fill, pairing["opposingNormalDegrees"], proxy_float_fill)
         ),
         "lowerLocalEvidenceScore": np.concatenate(
-            (profile_evidence, local_evidence[lower_node].astype(np.float32))
+            (
+                profile_evidence,
+                local_evidence[lower_node].astype(np.float32),
+                proxy_evidence,
+            )
         ),
         "upperLocalEvidenceScore": np.concatenate(
-            (profile_evidence, local_evidence[upper_node].astype(np.float32))
+            (
+                profile_evidence,
+                local_evidence[upper_node].astype(np.float32),
+                proxy_evidence,
+            )
         ),
         "lowerExpectedThicknessVoxels": np.concatenate(
             (
                 bank_thickness[selected].astype(np.float32),
                 profile_prior["expectedThicknessVoxels"][lower_node],
+                np.asarray(proxy["thicknessVoxels"], dtype=np.float32),
             )
         ),
         "upperExpectedThicknessVoxels": np.concatenate(
             (
                 bank_thickness[selected].astype(np.float32),
                 profile_prior["expectedThicknessVoxels"][upper_node],
+                np.asarray(proxy["thicknessVoxels"], dtype=np.float32),
             )
         ),
         "lowerProfileDistanceSamplingSteps": np.concatenate(
-            (np.zeros(profile_count, dtype=np.float32), profile_prior["profileDistanceSamplingSteps"][lower_node])
+            (
+                np.zeros(profile_count, dtype=np.float32),
+                profile_prior["profileDistanceSamplingSteps"][lower_node],
+                np.asarray(
+                    proxy["profileDistanceSamplingSteps"], dtype=np.float32
+                ),
+            )
         ),
         "upperProfileDistanceSamplingSteps": np.concatenate(
-            (np.zeros(profile_count, dtype=np.float32), profile_prior["profileDistanceSamplingSteps"][upper_node])
+            (
+                np.zeros(profile_count, dtype=np.float32),
+                profile_prior["profileDistanceSamplingSteps"][upper_node],
+                np.asarray(
+                    proxy["profileDistanceSamplingSteps"], dtype=np.float32
+                ),
+            )
         ),
         "lowerProfileCandidateIndex": np.concatenate(
-            (selected_candidate, lower_profile_candidate)
+            (selected_candidate, lower_profile_candidate, proxy_profile_candidate)
         ),
         "upperProfileCandidateIndex": np.concatenate(
-            (selected_candidate, upper_profile_candidate)
+            (selected_candidate, upper_profile_candidate, proxy_profile_candidate)
+        ),
+        "oneSidedSourceSurfaceNode": np.concatenate(
+            (profile_int_fill, np.full(dense_count, -1, dtype=np.int32), proxy_source_node)
+        ),
+        "oneSidedPhysicalBoundarySide": np.concatenate(
+            (
+                np.full(profile_count + dense_count, 255, dtype=np.uint8),
+                proxy_side,
+            )
         ),
         "edgeFirstNode": edge_first.astype(np.int32),
         "edgeSecondNode": edge_second.astype(np.int32),
@@ -1091,13 +1739,25 @@ def run_physical_mid_surface_catalog(
     )
     labels_with_pairs = np.unique(dense_label)
     substantial = component_size >= 8
+    dense_dense_surface_edge = (
+        (surface_edge_first < dense_count)
+        & (surface_edge_second < dense_count)
+    )
+    proxy_proxy_surface_edge = (
+        (surface_edge_first >= dense_count)
+        & (surface_edge_second >= dense_count)
+    )
+    mixed_surface_edge = ~(dense_dense_surface_edge | proxy_proxy_surface_edge)
     payload: dict[str, Any] = {
         "schema": PHYSICAL_MID_SURFACE_SCHEMA,
         "version": PHYSICAL_MID_SURFACE_VERSION,
         "state": "complete",
         "identity": identity,
         "source": bank["source"],
-        "geometry": bank["geometry"],
+        "geometry": {
+            **bank["geometry"],
+            "samplingStrideVoxels": int(stride),
+        },
         "counts": {
             "inputMaterialFaceNodeCount": int(len(position)),
             "physicallyLabeledFaceNodeCount": int(np.count_nonzero(sheet_label >= 0)),
@@ -1109,24 +1769,63 @@ def run_physical_mid_surface_catalog(
                     np.isfinite(profile_prior["expectedThicknessVoxels"])
                 )
             ),
+            "faceNodeWithDirectProfilePriorCount": int(
+                np.count_nonzero(profile_prior["directProfilePrior"])
+            ),
+            "faceNodeWithGeodesicallyPropagatedProfilePriorCount": int(
+                np.count_nonzero(
+                    profile_prior["geodesicallyPropagatedProfilePrior"]
+                )
+            ),
             "pairedPhysicalSheetLabelCount": int(len(labels_with_pairs)),
             "representedPhysicalSheetLabelCount": int(len(np.unique(mid_label))),
             "midSurfaceNodeCount": int(len(midpoint)),
             "directProfileNodeCount": int(profile_count),
+            "trustedSelectedProfileNodeCount": int(
+                np.count_nonzero(~profile_adopted)
+            ),
+            "contextualAdoptedProfileNodeCount": int(
+                np.count_nonzero(profile_adopted)
+            ),
             "denseBoundaryPairNodeCount": int(dense_count),
-            "usedBoundaryFaceNodeCount": int(2 * dense_count),
+            "oneSidedThicknessProxyNodeCount": int(proxy_count),
+            "usedBoundaryFaceNodeCount": used_boundary_face_count,
+            "usedBoundaryFaceIncidenceCount": int(2 * dense_count),
             "usedBoundaryFaceNodeFraction": round(
-                2 * dense_count / max(np.count_nonzero(sheet_label >= 0), 1), 6
+                used_boundary_face_count
+                / max(np.count_nonzero(sheet_label >= 0), 1),
+                6,
+            ),
+            "representedBoundaryFaceNodeCount": int(
+                used_boundary_face_count + proxy_count
+            ),
+            "representedBoundaryFaceNodeFraction": round(
+                (used_boundary_face_count + proxy_count)
+                / max(np.count_nonzero(sheet_label >= 0), 1),
+                6,
             ),
             "retainedEdgeCount": int(len(edge_first)),
             "profileContinuityEdgeCount": int(len(profile_edge_first)),
-            "denseBoundaryContinuityEdgeCount": int(len(dense_edge_first)),
+            "surfaceProjectedContinuityEdgeCount": int(len(surface_edge_first)),
+            "denseBoundaryContinuityEdgeCount": int(
+                np.count_nonzero(dense_dense_surface_edge)
+            ),
+            "oneSidedProxyContinuityEdgeCount": int(
+                np.count_nonzero(proxy_proxy_surface_edge)
+            ),
+            "denseProxyTransitionEdgeCount": int(
+                np.count_nonzero(mixed_surface_edge)
+            ),
             "profileAttachmentEdgeCount": int(len(attachment_profile_node)),
             "twoBoundarySupportedDenseEdgeCount": int(
-                np.count_nonzero(dense_edge_support == 3)
+                np.count_nonzero(
+                    dense_dense_surface_edge & (surface_edge_support == 3)
+                )
             ),
             "oneBoundarySupportedDenseEdgeCount": int(
-                np.count_nonzero(dense_edge_support != 3)
+                np.count_nonzero(
+                    dense_dense_surface_edge & (surface_edge_support != 3)
+                )
             ),
             "componentCount": int(len(component_size)),
             "crossPhysicalSheetEdgeCount": cross_label_edge_count,
@@ -1167,7 +1866,14 @@ def run_physical_mid_surface_catalog(
             "localProfileDistanceSamplingSteps": _percentiles(
                 profile_prior["profileDistanceSamplingSteps"]
             ),
+            "geodesicProfileDistanceSamplingSteps": _percentiles(
+                profile_prior["profileGeodesicDistanceSamplingSteps"][
+                    profile_prior["geodesicallyPropagatedProfilePrior"]
+                ]
+            ),
         },
+        "profileAdoption": profile_selection["summary"],
+        "pairingCensus": pairing["census"],
         "data": {
             "path": data_path.name,
             "bytes": data_path.stat().st_size,
@@ -1177,14 +1883,30 @@ def run_physical_mid_surface_catalog(
         "artifacts": {"crossSections": preview_path.name},
         "method": {
             "node": (
-                "direct selected air-papyrus-air profile or a mutual one-to-one "
-                "correspondence between propagated lower/upper boundary faces"
+                "trusted or face-supported air-papyrus-air profile, or a reciprocal "
+                "local-patch correspondence between propagated lower/upper boundary faces"
             ),
-            "identity": "both boundaries share one immutable physical sheet label",
-            "thicknessPrior": "per-sheet selected air-papyrus-air profile distribution",
+            "identity": (
+                "dense pairs require one immutable physical sheet on both faces; "
+                "contextual profiles require at least one exact signed-face match "
+                "and reject every two-face identity or side conflict"
+            ),
+            "profileAdoption": (
+                "unused two-crossing profiles may fill an unowned lattice key only "
+                "when signed endpoint support and trusted per-sheet thickness agree"
+            ),
+            "thicknessPrior": (
+                "trusted selected per-sheet profile distribution, locally augmented "
+                "only by identity-compatible contextual profiles"
+            ),
+            "thicknessTransport": (
+                "bounded multi-source geodesic propagation on one immutable "
+                "physical sheet and boundary side"
+            ),
             "pairingGates": (
                 "physical thickness, opposing signed normals, endpoint direction, "
-                "and tangent residual"
+                "tangent residual, reciprocal patch support, and bounded upper-"
+                "surfel correspondence capacity"
             ),
             "edge": (
                 "persisted physical-profile continuity, locally sheet-like dense "

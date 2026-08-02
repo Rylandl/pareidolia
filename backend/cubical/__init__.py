@@ -70,6 +70,22 @@ from .flatten import (
     tangent_atlas_chart,
 )
 from .gaps import GapCensus, GapTraceRecord, analyze_component_gaps
+from .laminar_boundary_matching import (
+    LaminarBoundaryMatchingSettings,
+    compile_laminar_boundary_problem,
+    run_laminar_boundary_matching,
+    solve_laminar_boundary_problem,
+)
+from .tifxyz_surface_audit import (
+    TifxyzSurfaceAuditSettings,
+    audit_mid_surfaces_against_truth,
+    run_tifxyz_surface_audit,
+)
+from .paired_profile_surface import (
+    PairedProfileSurfaceSettings,
+    build_direct_paired_profile_surface,
+    run_direct_paired_profile_surface,
+)
 from .geometry import (
     ClippedPatch,
     DegeneratePlaneIntersection,
@@ -184,9 +200,11 @@ __all__ = [
     "ConfigurationTable",
     "LayerModeTable",
     "JoinContinuitySettings",
+    "LaminarBoundaryMatchingSettings",
     "ConfigurationSelection",
     "configuration_options",
     "component_mesh",
+    "compile_laminar_boundary_problem",
     "FaceAlignment",
     "TraceMatch",
     "TraceMatchSettings",
@@ -255,8 +273,10 @@ __all__ = [
     "run_cell_refinement_diagnostic",
     "run_cell_refinement_materialization",
     "run_cell_refinement_target_ranking",
+    "run_laminar_boundary_matching",
     "load_cluster_cell_context",
     "score_cell_candidates",
+    "solve_laminar_boundary_problem",
     "rank_cell_refinement_targets",
     "refine_cell_neighborhood",
     "replay_neighborhood_topology",

@@ -1067,6 +1067,59 @@ dense material without a physical air--papyrus--air interval remain
 deliberately unresolved
 for a later boundary-evidence stage.
 
+### Direct paired-profile reconstruction
+
+The direct reconstruction path deliberately stops before the one-sided face
+graph. It treats every retained air--papyrus--air profile as one immutable
+physical observation, chooses at most one hypothesis at each source sampling
+key, and reconnects those observations from their two measured boundaries.
+The generic macro orientation tensor is an independent hard gate: a locally
+coherent profile family that is transverse to the visible laminar structure
+cannot become a sheet merely by supporting itself.
+
+```bash
+python3 -m backend.cubical build-direct-paired-profile-surfaces \
+  --bank /path/to/paired-surface-bank \
+  --growth /path/to/paired-surface-growth \
+  --macro-orientation /path/to/macro-sheet-orientation \
+  --output /path/to/direct-paired-profile-surfaces
+```
+
+Profile normals are axial. Before comparing the two physical faces, the
+second normal is aligned to the first and its lower/upper boundaries are
+swapped whenever that alignment changes sign. Thus an arbitrary vector-sign
+flip cannot break a real bend or silently compare opposite faces. Short gaps
+may be closed only when midpoint, both boundary heights, thickness, unsigned
+normal, and macro orientation agree. A local tangent-column guard rejects a
+transitive union that revisits a separated normal depth.
+
+On the current 384 x 384 x 320 PHerc. 358 core, the CPU stage selects 144,898
+profiles from 309,672 candidates, retains 1,280,635 within-fragment edges, and
+produces 11,335 components in about 26 seconds. On an independently unrolled
+PHerc. 1667 control, the same defaults cover 88.56% of the known surface. The
+largest recovered component covers 18.08% of that surface with 87.39% matched
+node purity and 100% closest-boundary-side consistency; the covered surface is
+split across 49 components. These figures diagnose candidate recall,
+fragmentation, and layer mixing independently and are not training labels.
+
+The optional control audit reads an official TIFXYZ surface without importing
+it into reconstruction:
+
+```bash
+python3 -m pip install -r requirements-truth.txt
+python3 -m backend.cubical audit-tifxyz-surface-control \
+  --tifxyz /path/to/known-surface.tifxyz \
+  --source-metadata /path/to/source-crop.json \
+  --mid-surfaces /path/to/direct-paired-profile-surfaces \
+  --output /path/to/control-audit
+```
+
+The alternative `frontier-bundles` component solver is persisted as an
+explicit experiment, not a production default. Its first formulation raised
+fragmentation on the independent control, so ordinary sign-correct connected
+geometry remains the selected construction until a frontier objective passes
+that control.
+
 ### Signed one-sided boundary patches
 
 The paired bank cannot represent a clear material boundary when the opposite
