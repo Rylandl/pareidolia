@@ -1088,18 +1088,37 @@ python3 -m backend.cubical build-direct-paired-profile-surfaces \
 Profile normals are axial. Before comparing the two physical faces, the
 second normal is aligned to the first and its lower/upper boundaries are
 swapped whenever that alignment changes sign. Thus an arbitrary vector-sign
-flip cannot break a real bend or silently compare opposite faces. Short gaps
-may be closed only when midpoint, both boundary heights, thickness, unsigned
-normal, and macro orientation agree. A local tangent-column guard rejects a
-transitive union that revisits a separated normal depth.
+flip cannot break a real bend or silently compare opposite faces.
+
+The current default then moves fragment identity down one level. Lower and
+upper endpoint affinities are retained independently because one physical
+boundary can remain clear while an ambiguous profile chooses a different exit
+crossing. Endpoint context chooses one paired profile per source key, but each
+selected profile contributes two separate **physical boundary observations**.
+Short endpoint links establish a local support degree. A five-sample gap link
+is usable only when both endpoint observations already have at least two
+independent short-range continuations. Maximum-affinity unions are finally
+constrained to one narrow depth interval per macro-tangent column. This lets a
+dense surface cross a missing patch without allowing a lone observation or a
+transitive shear jump to fuse adjacent layers. The older two-boundary midpoint
+components remain in the artifact for comparison, while
+`lowerFaceComponentId`, `upperFaceComponentId`, and the
+`boundaryTrack*` arrays carry the promoted physical-face representation.
 
 On the current 384 x 384 x 320 PHerc. 358 core, the CPU stage selects 144,898
-profiles from 309,672 candidates, retains 1,280,635 within-fragment edges, and
-produces 11,335 components in about 26 seconds. On an independently unrolled
-PHerc. 1667 control, the same defaults cover 88.56% of the known surface. The
-largest recovered component covers 18.08% of that surface with 87.39% matched
-node purity and 100% closest-boundary-side consistency; the covered surface is
-split across 49 components. These figures diagnose candidate recall,
+profiles from 309,672 candidates and reconstructs 289,796 boundary
+observations in 35.1 seconds. It retains 1,538,420 endpoint edges, rejects 589
+column-depth collisions, has zero tracks containing both faces of one profile,
+and produces a largest track of 5,052 observations. The compressed artifact is
+56.7 MB. The previous paired-midpoint stage took 26.2 seconds and its largest
+component contained 2,472 profiles.
+
+On an independently unrolled PHerc. 1667 control, the same defaults recover a
+largest boundary track covering 31.98% of the known surface at 75.0% matched
+endpoint purity. Its control score is 0.277, versus 0.169 for the preceding
+midpoint component, and median unsigned-normal residual improves to 8.50
+degrees. Overall endpoint-localized coverage is 87.08%; the paired-profile
+candidate audit remains 88.68%. These figures diagnose candidate recall,
 fragmentation, and layer mixing independently and are not training labels.
 
 The optional control audit reads an official TIFXYZ surface without importing
@@ -1111,6 +1130,7 @@ python3 -m backend.cubical audit-tifxyz-surface-control \
   --tifxyz /path/to/known-surface.tifxyz \
   --source-metadata /path/to/source-crop.json \
   --mid-surfaces /path/to/direct-paired-profile-surfaces \
+  --settings-json examples/tifxyz-boundary-track-audit.json \
   --output /path/to/control-audit
 ```
 
@@ -1346,6 +1366,11 @@ python3 -m unittest \
   backend.test_isolated_slab \
   backend.test_paired_surface_bank \
   backend.test_paired_surface_growth \
+  backend.test_paired_endpoint_graph \
+  backend.test_paired_boundary_tracks \
+  backend.test_paired_profile_surface \
+  backend.test_tifxyz_surface_audit \
+  backend.test_block_boundary_tracks \
   backend.test_one_sided_interface \
   backend.test_one_sided_growth \
   backend.test_clear_ribbon \
@@ -1369,3 +1394,7 @@ deferral, cross-representation seed validation, baseline-preserving ribbon
 feedback, immutable-baseline paired-profile feedback, free-component ambiguity
 deferral, spatial-key mutual exclusion, cross-representation ownership vetoes,
 monotone paired-endpoint interface refinement, and hierarchical assembly.
+The direct-profile tests additionally enforce unsigned endpoint swapping,
+one-profile-per-key endpoint selection, dense local support for long boundary
+links, zero same-profile face collisions, and boundary-track payload/audit
+round trips.

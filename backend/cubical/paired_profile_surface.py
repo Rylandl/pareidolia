@@ -30,6 +30,11 @@ from .paired_surface_growth import (
     PAIRED_SURFACE_GROWTH_SCHEMA,
     PAIRED_SURFACE_GROWTH_STEM,
 )
+from .paired_boundary_tracks import (
+    PairedBoundaryTrackSettings,
+    build_paired_boundary_tracks,
+)
+from .paired_endpoint_graph import build_paired_endpoint_continuity_graph
 from .physical_mid_surface import (
     PHYSICAL_MID_SURFACE_SCHEMA,
     PHYSICAL_MID_SURFACE_STEM,
@@ -54,7 +59,7 @@ class PairedProfileSurfaceSettings:
     transverse profile families.
     """
 
-    candidate_selection_mode: str = "coordinate-ascent"
+    candidate_selection_mode: str = "endpoint-coordinate-ascent"
     minimum_macro_confidence: float = 0.35
     maximum_profile_to_macro_normal_degrees: float = 25.0
     minimum_edge_affinity: float = 0.4
@@ -71,6 +76,24 @@ class PairedProfileSurfaceSettings:
     candidate_seed_bonus: float = 0.15
     continuity_reward: float = 1.5
     maximum_selection_sweeps: int = 20
+    endpoint_link_radius_sampling_steps: float = 5.0
+    maximum_endpoint_normal_degrees: float = 30.0
+    maximum_endpoint_distance_sampling_steps: float = 6.0
+    maximum_endpoint_height_sampling_steps: float = 1.5
+    endpoint_normal_scale_degrees: float = 20.0
+    endpoint_height_scale_sampling_steps: float = 0.75
+    endpoint_distance_scale_sampling_steps: float = 3.0
+    minimum_endpoint_affinity: float = 0.1
+    endpoint_strong_face_weight: float = 0.45
+    endpoint_weak_face_weight: float = 0.25
+    endpoint_paired_face_weight: float = 0.3
+    enable_boundary_tracks: bool = True
+    boundary_track_minimum_affinity: float = 0.45
+    boundary_track_local_support_radius_sampling_steps: float = math.sqrt(5.0)
+    boundary_track_minimum_local_support_affinity: float = 0.2
+    boundary_track_minimum_local_support_degree: int = 2
+    boundary_track_tangent_column_width_sampling_steps: float = 1.5
+    boundary_track_maximum_column_depth_range_sampling_steps: float = 2.25
     # Frontier bundling remains an explicit experimental solver.  The current
     # truth control favors sign-correct connected geometry, so production does
     # not silently opt into the more fragmented experimental partition.
@@ -88,8 +111,15 @@ class PairedProfileSurfaceSettings:
     maximum_preview_components: int = 128
 
     def __post_init__(self) -> None:
-        if self.candidate_selection_mode not in ("growth", "coordinate-ascent"):
-            raise ValueError("candidate selection mode must be growth or coordinate-ascent")
+        if self.candidate_selection_mode not in (
+            "growth",
+            "coordinate-ascent",
+            "endpoint-coordinate-ascent",
+        ):
+            raise ValueError(
+                "candidate selection mode must be growth, coordinate-ascent, "
+                "or endpoint-coordinate-ascent"
+            )
         if self.component_solver_mode not in ("connected-components", "frontier-bundles"):
             raise ValueError(
                 "component solver mode must be connected-components or frontier-bundles"
@@ -98,6 +128,15 @@ class PairedProfileSurfaceSettings:
             (self.minimum_macro_confidence, "macro confidence"),
             (self.minimum_edge_affinity, "edge affinity"),
             (self.minimum_closure_affinity, "closure affinity"),
+            (self.minimum_endpoint_affinity, "minimum endpoint affinity"),
+            (
+                self.boundary_track_minimum_affinity,
+                "boundary track affinity",
+            ),
+            (
+                self.boundary_track_minimum_local_support_affinity,
+                "boundary local support affinity",
+            ),
             (
                 self.minimum_core_edge_affinity,
                 "minimum core edge affinity",
@@ -130,11 +169,33 @@ class PairedProfileSurfaceSettings:
             self.tangent_column_width_sampling_steps,
             self.maximum_column_depth_range_sampling_steps,
             self.minimum_frontier_span_sampling_steps,
+            self.endpoint_link_radius_sampling_steps,
+            self.maximum_endpoint_distance_sampling_steps,
+            self.maximum_endpoint_height_sampling_steps,
+            self.endpoint_normal_scale_degrees,
+            self.endpoint_height_scale_sampling_steps,
+            self.endpoint_distance_scale_sampling_steps,
+            self.boundary_track_local_support_radius_sampling_steps,
+            self.boundary_track_tangent_column_width_sampling_steps,
+            self.boundary_track_maximum_column_depth_range_sampling_steps,
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError("paired-profile geometry gates must be positive")
         if self.candidate_conservative_bonus < 0.0 or self.candidate_seed_bonus < 0.0:
             raise ValueError("paired-profile candidate bonuses must be nonnegative")
+        if not 0.0 < self.maximum_endpoint_normal_degrees < 90.0:
+            raise ValueError("endpoint normal gate must lie in (0, 90)")
+        endpoint_weight = (
+            self.endpoint_strong_face_weight,
+            self.endpoint_weak_face_weight,
+            self.endpoint_paired_face_weight,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in endpoint_weight):
+            raise ValueError("endpoint selection weights must be finite and nonnegative")
+        if sum(endpoint_weight) <= 0.0:
+            raise ValueError("at least one endpoint selection weight must be positive")
+        if self.boundary_track_minimum_local_support_degree < 1:
+            raise ValueError("boundary local support degree must be positive")
         if (
             self.minimum_component_nodes_for_preview < 1
             or self.maximum_preview_components < 1
@@ -624,13 +685,100 @@ def build_direct_paired_profile_surface(
             <= resolved.maximum_thickness_difference_sampling_steps
         )
     )
+    endpoint_graph: dict[str, np.ndarray] = {
+        "firstCandidate": np.empty(0, dtype=np.int32),
+        "secondCandidate": np.empty(0, dtype=np.int32),
+        "secondOrientation": np.empty(0, dtype=np.int8),
+        "lowerAffinity": np.empty(0, dtype=np.float32),
+        "upperAffinity": np.empty(0, dtype=np.float32),
+    }
+    endpoint_summary: dict[str, Any] = {"state": "not-requested"}
+    if (
+        resolved.candidate_selection_mode == "endpoint-coordinate-ascent"
+        or resolved.enable_boundary_tracks
+    ):
+        endpoint_graph, endpoint_summary = build_paired_endpoint_continuity_graph(
+            bank,
+            macro_eligible,
+            sampling_stride_voxels=sampling_stride_voxels,
+            link_radius_sampling_steps=resolved.endpoint_link_radius_sampling_steps,
+            maximum_normal_degrees=resolved.maximum_endpoint_normal_degrees,
+            maximum_endpoint_distance_sampling_steps=(
+                resolved.maximum_endpoint_distance_sampling_steps
+            ),
+            maximum_endpoint_height_sampling_steps=(
+                resolved.maximum_endpoint_height_sampling_steps
+            ),
+            normal_scale_degrees=resolved.endpoint_normal_scale_degrees,
+            endpoint_height_scale_sampling_steps=(
+                resolved.endpoint_height_scale_sampling_steps
+            ),
+            endpoint_distance_scale_sampling_steps=(
+                resolved.endpoint_distance_scale_sampling_steps
+            ),
+        )
+    if resolved.candidate_selection_mode == "endpoint-coordinate-ascent":
+        lower_endpoint_affinity = np.where(
+            np.asarray(endpoint_graph["lowerAffinity"], dtype=np.float64)
+            >= resolved.minimum_endpoint_affinity,
+            np.asarray(endpoint_graph["lowerAffinity"], dtype=np.float64),
+            0.0,
+        )
+        upper_endpoint_affinity = np.where(
+            np.asarray(endpoint_graph["upperAffinity"], dtype=np.float64)
+            >= resolved.minimum_endpoint_affinity,
+            np.asarray(endpoint_graph["upperAffinity"], dtype=np.float64),
+            0.0,
+        )
+        strongest_endpoint = np.maximum(
+            lower_endpoint_affinity, upper_endpoint_affinity
+        )
+        weakest_endpoint = np.minimum(
+            lower_endpoint_affinity, upper_endpoint_affinity
+        )
+        endpoint_pair_weight = (
+            resolved.endpoint_strong_face_weight * strongest_endpoint
+            + resolved.endpoint_weak_face_weight * weakest_endpoint
+            + resolved.endpoint_paired_face_weight
+            * np.sqrt(lower_endpoint_affinity * upper_endpoint_affinity)
+        )
+        useful_endpoint_edge = endpoint_pair_weight > 0.0
+        selected, selection_summary = _optimize_candidate_choices(
+            bank,
+            macro_eligible,
+            np.asarray(endpoint_graph["firstCandidate"], dtype=np.int32)[
+                useful_endpoint_edge
+            ],
+            np.asarray(endpoint_graph["secondCandidate"], dtype=np.int32)[
+                useful_endpoint_edge
+            ],
+            endpoint_pair_weight[useful_endpoint_edge].astype(np.float32),
+            settings=resolved,
+        )
+        selection_summary["mode"] = "endpoint-coordinate-ascent"
+        selection_summary["endpointContinuityEdgeCount"] = int(
+            np.count_nonzero(useful_endpoint_edge)
+        )
+        selection_summary["twoEndpointContinuityEdgeCount"] = int(
+            np.count_nonzero(
+                useful_endpoint_edge
+                & (lower_endpoint_affinity > 0.0)
+                & (upper_endpoint_affinity > 0.0)
+            )
+        )
+        selection_summary["oneEndpointOnlyContinuityEdgeCount"] = int(
+            np.count_nonzero(
+                useful_endpoint_edge
+                & ((lower_endpoint_affinity > 0.0) ^ (upper_endpoint_affinity > 0.0))
+            )
+        )
     if resolved.candidate_selection_mode == "growth":
         selected = growth_selected & macro_eligible
         selection_summary: dict[str, Any] = {
             "mode": "inherited-paired-growth",
             "selectedCandidateCount": int(np.count_nonzero(selected)),
         }
-    else:
+    elif resolved.candidate_selection_mode == "coordinate-ascent":
         selected, selection_summary = _optimize_candidate_choices(
             bank,
             macro_eligible,
@@ -644,6 +792,29 @@ def build_direct_paired_profile_surface(
     candidate_to_node[retained_candidate] = np.arange(
         len(retained_candidate), dtype=np.int32
     )
+    endpoint_selected = (
+        selected[np.asarray(endpoint_graph["firstCandidate"], dtype=np.int32)]
+        & selected[np.asarray(endpoint_graph["secondCandidate"], dtype=np.int32)]
+    )
+    endpoint_first = candidate_to_node[
+        np.asarray(endpoint_graph["firstCandidate"], dtype=np.int32)[
+            endpoint_selected
+        ]
+    ]
+    endpoint_second = candidate_to_node[
+        np.asarray(endpoint_graph["secondCandidate"], dtype=np.int32)[
+            endpoint_selected
+        ]
+    ]
+    endpoint_orientation = np.asarray(
+        endpoint_graph["secondOrientation"], dtype=np.int8
+    )[endpoint_selected]
+    endpoint_lower_affinity = np.asarray(
+        endpoint_graph["lowerAffinity"], dtype=np.float32
+    )[endpoint_selected]
+    endpoint_upper_affinity = np.asarray(
+        endpoint_graph["upperAffinity"], dtype=np.float32
+    )[endpoint_selected]
     retained_edge = (
         eligible_edge & selected[source_first] & selected[source_second]
     )
@@ -668,6 +839,65 @@ def build_direct_paired_profile_surface(
         retained_candidate
     ]
     retained_key = np.asarray(bank["spatialKeyXYZ"])[retained_candidate]
+    retained_macro_index = np.asarray(
+        macro_assignment["macroBinIndex"], dtype=np.int32
+    )[retained_candidate]
+    boundary_track_arrays: dict[str, np.ndarray] = {
+        "endpointXYZ": np.empty((0, 3), dtype=np.float32),
+        "endpointProfileNode": np.empty(0, dtype=np.int32),
+        "endpointSide": np.empty(0, dtype=np.uint8),
+        "endpointComponentId": np.empty(0, dtype=np.int32),
+        "endpointLocalSupportDegree": np.empty(0, dtype=np.int32),
+        "edgeFirstEndpoint": np.empty(0, dtype=np.int32),
+        "edgeSecondEndpoint": np.empty(0, dtype=np.int32),
+        "edgeAffinity": np.empty(0, dtype=np.float32),
+        "edgeKind": np.empty(0, dtype=np.uint8),
+        "pairEdgeLowerRetained": np.zeros(len(endpoint_first), dtype=bool),
+        "pairEdgeUpperRetained": np.zeros(len(endpoint_first), dtype=bool),
+    }
+    boundary_track_summary: dict[str, Any] = {"state": "not-requested"}
+    lower_face_component = np.full(len(retained_candidate), -1, dtype=np.int32)
+    upper_face_component = np.full(len(retained_candidate), -1, dtype=np.int32)
+    if resolved.enable_boundary_tracks:
+        boundary_track_arrays, boundary_track_summary = build_paired_boundary_tracks(
+            retained_lower,
+            retained_upper,
+            retained_key,
+            retained_macro_index,
+            np.asarray(macro["centerXYZ"])[retained_macro_index],
+            np.asarray(macro["normalXYZ"])[retained_macro_index],
+            endpoint_first,
+            endpoint_second,
+            endpoint_orientation,
+            endpoint_lower_affinity,
+            endpoint_upper_affinity,
+            sampling_stride_voxels=sampling_stride_voxels,
+            settings=PairedBoundaryTrackSettings(
+                minimum_track_affinity=(
+                    resolved.boundary_track_minimum_affinity
+                ),
+                local_support_radius_sampling_steps=(
+                    resolved.boundary_track_local_support_radius_sampling_steps
+                ),
+                minimum_local_support_affinity=(
+                    resolved.boundary_track_minimum_local_support_affinity
+                ),
+                minimum_local_support_degree=(
+                    resolved.boundary_track_minimum_local_support_degree
+                ),
+                tangent_column_width_sampling_steps=(
+                    resolved.boundary_track_tangent_column_width_sampling_steps
+                ),
+                maximum_column_depth_range_sampling_steps=(
+                    resolved.boundary_track_maximum_column_depth_range_sampling_steps
+                ),
+            ),
+        )
+        endpoint_component = np.asarray(
+            boundary_track_arrays["endpointComponentId"], dtype=np.int32
+        )
+        lower_face_component = endpoint_component[0::2]
+        upper_face_component = endpoint_component[1::2]
     closure_first, closure_second, closure_score, closure_summary = (
         _direct_geometric_closures(
             retained_midpoint,
@@ -720,9 +950,6 @@ def build_direct_paired_profile_surface(
         "columnConflictRejectedEdgeCount": 0,
     }
     if resolved.enable_tangent_column_guard and len(connectivity_first):
-        retained_macro_index = np.asarray(
-            macro_assignment["macroBinIndex"], dtype=np.int32
-        )[retained_candidate]
         tangent_column, normal_depth = _tangent_columns(
             retained_midpoint,
             retained_macro_index,
@@ -787,8 +1014,8 @@ def build_direct_paired_profile_surface(
         "spatialKeyXYZ": retained_key.astype(np.int32),
         "lowerSurfaceNode": np.full(node_count, -1, dtype=np.int32),
         "upperSurfaceNode": np.full(node_count, -1, dtype=np.int32),
-        "lowerFaceComponentId": np.full(node_count, -1, dtype=np.int32),
-        "upperFaceComponentId": np.full(node_count, -1, dtype=np.int32),
+        "lowerFaceComponentId": lower_face_component,
+        "upperFaceComponentId": upper_face_component,
         "physicalSheetLabel": component.astype(np.int32),
         "componentId": component.astype(np.int32),
         "thicknessVoxels": thickness,
@@ -820,6 +1047,36 @@ def build_direct_paired_profile_surface(
         "edgeBoundarySupportMask": np.full(len(first), 3, dtype=np.uint8),
         "edgeKind": edge_kind,
         "edgeScore": score,
+        "endpointEdgeFirstNode": endpoint_first.astype(np.int32),
+        "endpointEdgeSecondNode": endpoint_second.astype(np.int32),
+        "endpointEdgeSecondOrientation": endpoint_orientation,
+        "endpointEdgeLowerAffinity": endpoint_lower_affinity,
+        "endpointEdgeUpperAffinity": endpoint_upper_affinity,
+        "endpointEdgeLowerTrackRetained": boundary_track_arrays[
+            "pairEdgeLowerRetained"
+        ],
+        "endpointEdgeUpperTrackRetained": boundary_track_arrays[
+            "pairEdgeUpperRetained"
+        ],
+        "boundaryTrackEndpointXYZ": boundary_track_arrays["endpointXYZ"],
+        "boundaryTrackEndpointProfileNode": boundary_track_arrays[
+            "endpointProfileNode"
+        ],
+        "boundaryTrackEndpointSide": boundary_track_arrays["endpointSide"],
+        "boundaryTrackComponentId": boundary_track_arrays[
+            "endpointComponentId"
+        ],
+        "boundaryTrackLocalSupportDegree": boundary_track_arrays[
+            "endpointLocalSupportDegree"
+        ],
+        "boundaryTrackEdgeFirstEndpoint": boundary_track_arrays[
+            "edgeFirstEndpoint"
+        ],
+        "boundaryTrackEdgeSecondEndpoint": boundary_track_arrays[
+            "edgeSecondEndpoint"
+        ],
+        "boundaryTrackEdgeAffinity": boundary_track_arrays["edgeAffinity"],
+        "boundaryTrackEdgeKind": boundary_track_arrays["edgeKind"],
     }
     summary = {
         "counts": {
@@ -829,6 +1086,19 @@ def build_direct_paired_profile_surface(
                 np.count_nonzero(growth_selected & macro_eligible)
             ),
             "selectedCandidateCount": int(len(retained_candidate)),
+            "selectedEndpointContinuityEdgeCount": int(len(endpoint_first)),
+            "selectedTwoEndpointContinuityEdgeCount": int(
+                np.count_nonzero(
+                    (endpoint_lower_affinity >= resolved.minimum_endpoint_affinity)
+                    & (endpoint_upper_affinity >= resolved.minimum_endpoint_affinity)
+                )
+            ),
+            "selectedOneEndpointOnlyContinuityEdgeCount": int(
+                np.count_nonzero(
+                    (endpoint_lower_affinity >= resolved.minimum_endpoint_affinity)
+                    ^ (endpoint_upper_affinity >= resolved.minimum_endpoint_affinity)
+                )
+            ),
             "macroRejectedSelectedCandidateCount": int(
                 np.count_nonzero(growth_selected & ~macro_eligible)
             ),
@@ -850,6 +1120,8 @@ def build_direct_paired_profile_surface(
             "largestComponentSizes": [int(value) for value in component_count[:32]],
         },
         "selection": selection_summary,
+        "endpointGraph": endpoint_summary,
+        "boundaryTracks": boundary_track_summary,
         "componentSolver": component_solver_summary,
         "tangentColumnGuard": column_summary,
         "distributions": {
@@ -913,6 +1185,9 @@ def run_direct_paired_profile_surface(
         },
         "settings": resolved.record(),
         "implementationSha256": sha256_file(Path(__file__)),
+        "boundaryTrackImplementationSha256": sha256_file(
+            Path(__file__).with_name("paired_boundary_tracks.py")
+        ),
     }
     identity["identitySha256"] = canonical_json_hash(identity)
     output = Path(output_root).resolve()
@@ -991,6 +1266,12 @@ def run_direct_paired_profile_surface(
             "node": "one selected immutable air-papyrus-air profile",
             "edge": "both observed profile boundaries continue geometrically",
             "identity": "connected components after discarding inherited seed labels",
+            "boundaryTrack": (
+                "independent physical faces joined by locally supported endpoint "
+                "continuity with collision-safe macro-tangent ordering"
+                if resolved.enable_boundary_tracks
+                else "not requested"
+            ),
             "macroGuard": "independent generic unsigned laminar tensor",
             "oneCandidatePerSpatialKey": True,
             "acusRole": "none",

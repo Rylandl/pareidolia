@@ -967,14 +967,16 @@ npm run dev
 Open `http://127.0.0.1:3000/`.
 
 The solved owned-core block is available at `/block-volume`. It registers the
-exact clipped polygons from the current angle-calibrated, tangent-sided
-retained graph against a stride-2 texture of the corresponding 384 × 384 ×
-320 native CT block. The viewer can orbit and trackpad-zoom the combined scene,
-select or isolate a sheet component, filter by component size, and cut the
-volume and polygons with the same X, Y, or Z plane. It reports global and
-selected-component join-angle tails plus the number of accepted/excluded
-foldback pairs. The default artifacts can be overridden without changing the
-webpage:
+current collision-safe physical boundary tracks against a stride-2 texture of
+the corresponding 384 × 384 × 320 native CT block. Boundary observations are
+colored by physical-face identity rather than by their paired-profile
+midpoint, so a clear air--papyrus interface remains continuous when the
+opposite exit crossing is ambiguous. The viewer can orbit and trackpad-zoom
+the combined scene, select or isolate a boundary track, filter by component
+size, and cut the volume and observations with the same X, Y, or Z plane. It
+also reports the number of transitive layer-crossing joins rejected by the
+macro-tangent depth guard. The default artifacts can be overridden without
+changing the webpage:
 
 ```bash
 PAREIDOLIA_BLOCK_SHEET_ROOT=/path/to/retained-graph \

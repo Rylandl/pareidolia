@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHEET_ROOT = (
     PROJECT_ROOT
     / "work/multiseam-2x2-b00c03c"
-    / "direct-paired-profile-v3"
+    / "direct-boundary-tracks-v1"
 )
 DEFAULT_VOLUME_PATH = Path(
     "/mnt/t5/acus-cross-scroll/pherc0358-z7168-d512-yfull-xfull.npy"
@@ -718,26 +718,74 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
     if not data_path.is_file() or sha256_file(data_path) != manifest["data"]["sha256"]:
         raise ValueError("physical mid-surface data is unavailable or changed")
     with np.load(data_path, allow_pickle=False) as stored:
-        position_world = _required(stored, "midpointXYZ").astype(np.float64, copy=False)
-        component = _required(stored, "componentId").astype(np.int64, copy=False)
-        node_kind = _required(stored, "nodeKind").astype(np.uint8, copy=False)
-        physical_label = _required(stored, "physicalSheetLabel").astype(
-            np.int32, copy=False
+        boundary_track = (
+            "boundaryTrackComponentId" in stored
+            and manifest.get("boundaryTracks", {}).get("state") != "not-requested"
+            and len(stored["boundaryTrackComponentId"]) > 0
         )
-        lower_evidence = _required(stored, "lowerLocalEvidenceScore").astype(
+        profile_lower_evidence = _required(
+            stored, "lowerLocalEvidenceScore"
+        ).astype(np.float64, copy=False)
+        profile_upper_evidence = _required(
+            stored, "upperLocalEvidenceScore"
+        ).astype(np.float64, copy=False)
+        profile_pair_cost = _required(stored, "pairCost").astype(
             np.float64, copy=False
         )
-        upper_evidence = _required(stored, "upperLocalEvidenceScore").astype(
+        profile_thickness = _required(stored, "thicknessVoxels").astype(
             np.float64, copy=False
         )
-        pair_cost = _required(stored, "pairCost").astype(np.float64, copy=False)
-        opposing_error = _required(stored, "opposingNormalDegrees").astype(
-            np.float64, copy=False
-        )
-        thickness = _required(stored, "thicknessVoxels").astype(
-            np.float64, copy=False
-        )
-        edge_first = _required(stored, "edgeFirstNode").astype(np.int64, copy=False)
+        if boundary_track:
+            position_world = _required(stored, "boundaryTrackEndpointXYZ").astype(
+                np.float64, copy=False
+            )
+            component = _required(stored, "boundaryTrackComponentId").astype(
+                np.int64, copy=False
+            )
+            profile_node = _required(
+                stored, "boundaryTrackEndpointProfileNode"
+            ).astype(np.int64, copy=False)
+            local_degree = _required(
+                stored, "boundaryTrackLocalSupportDegree"
+            ).astype(np.int32, copy=False)
+            if len(profile_node) != len(position_world):
+                raise ValueError("boundary-track endpoint ownership is misaligned")
+            node_kind = np.zeros(len(position_world), dtype=np.uint8)
+            physical_label = component.astype(np.int32, copy=False)
+            lower_evidence = profile_lower_evidence[profile_node]
+            upper_evidence = profile_upper_evidence[profile_node]
+            pair_cost = profile_pair_cost[profile_node]
+            thickness = profile_thickness[profile_node]
+            opposing_error = _required(
+                stored, "macroNormalResidualDegrees"
+            ).astype(np.float64, copy=False)[profile_node]
+            edge_first = _required(
+                stored, "boundaryTrackEdgeFirstEndpoint"
+            ).astype(np.int64, copy=False)
+        else:
+            position_world = _required(stored, "midpointXYZ").astype(
+                np.float64, copy=False
+            )
+            component = _required(stored, "componentId").astype(
+                np.int64, copy=False
+            )
+            node_kind = _required(stored, "nodeKind").astype(
+                np.uint8, copy=False
+            )
+            physical_label = _required(stored, "physicalSheetLabel").astype(
+                np.int32, copy=False
+            )
+            lower_evidence = profile_lower_evidence
+            upper_evidence = profile_upper_evidence
+            pair_cost = profile_pair_cost
+            opposing_error = _required(stored, "opposingNormalDegrees").astype(
+                np.float64, copy=False
+            )
+            thickness = profile_thickness
+            edge_first = _required(stored, "edgeFirstNode").astype(
+                np.int64, copy=False
+            )
+            local_degree = np.zeros(len(position_world), dtype=np.int32)
     if position_world.ndim != 2 or position_world.shape[1] != 3:
         raise ValueError("physical mid-surface positions must have shape (node, 3)")
     if any(
@@ -842,14 +890,20 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
         manifest_label = str(manifest_path)
     construction_schema = str(manifest.get("constructionSchema", ""))
     method = (
-        "direct macro-gated air-papyrus-air profile reconstruction"
+        "collision-safe physical boundary tracks from paired CT profiles"
+        if boundary_track
+        else "direct macro-gated air-papyrus-air profile reconstruction"
         if construction_schema == "pareidolia.direct-paired-profile-surface"
         else "paired air-papyrus-air physical mid-surfaces"
     )
     return {
         "schema": "pareidolia.block-interface-volume",
         "version": 1,
-        "representation": "physical-mid-surface-graph",
+        "representation": (
+            "physical-boundary-track-graph"
+            if boundary_track
+            else "physical-mid-surface-graph"
+        ),
         "variant": root.name,
         "artifact": {
             "manifestPath": manifest_label,
@@ -886,13 +940,17 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
             "medianNormalResidualDegrees": round(_percentile(opposing_error, 50), 4),
             "p90NormalResidualDegrees": round(_percentile(opposing_error, 90), 4),
             "retainedEdgeCount": int(len(edge_first)),
-            "eligibleNodeFraction": float(
-                counts.get(
-                    "selectedCandidateFraction",
+            "eligibleNodeFraction": (
+                float(np.mean(local_degree >= 2))
+                if boundary_track and len(local_degree)
+                else float(
                     counts.get(
-                        "usedBoundaryFaceNodeFraction",
-                        selected_key_fraction,
-                    ),
+                        "selectedCandidateFraction",
+                        counts.get(
+                            "usedBoundaryFaceNodeFraction",
+                            selected_key_fraction,
+                        ),
+                    )
                 )
             ),
             "seedNodeCount": direct_profile_count,
@@ -904,6 +962,15 @@ def _load_physical_mid_surface_payload(root: Path) -> dict[str, Any]:
             "grownNodeCount": 0,
             "bridgeCandidateNodeCount": 0,
             "componentMergeCount": 0,
+            "columnConflictRejectedEdgeCount": int(
+                manifest.get("boundaryTracks", {})
+                .get("collisionGuard", {})
+                .get("columnConflictRejectedEdgeCount", 0)
+                if boundary_track
+                else manifest.get("tangentColumnGuard", {}).get(
+                    "columnConflictRejectedEdgeCount", 0
+                )
+            ),
         },
         "components": components,
         "vertices": [],

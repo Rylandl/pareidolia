@@ -37,6 +37,7 @@ class PairedProfileSurfaceTests(unittest.TestCase):
         macro_manifest = {"identity": {"resolvedScale": {"supportSamplingSteps": 4}}}
         macro = {
             "binKeyXYZ": np.asarray([[0, 0, 0]], np.int32),
+            "centerXYZ": np.asarray([[0, 0, 0]], np.float32),
             "normalXYZ": np.asarray([[0, 0, 1]], np.float32),
             "orientationConfidence": np.asarray([1.0], np.float32),
             "trusted": np.asarray([True]),
@@ -135,6 +136,7 @@ class PairedProfileSurfaceTests(unittest.TestCase):
         macro_manifest = {"identity": {"resolvedScale": {"supportSamplingSteps": 4}}}
         macro = {
             "binKeyXYZ": np.asarray([[0, 0, 0]], np.int32),
+            "centerXYZ": np.asarray([[0, 0, 0]], np.float32),
             "normalXYZ": np.asarray([[0, 0, 1]], np.float32),
             "orientationConfidence": np.asarray([1.0], np.float32),
             "trusted": np.asarray([True]),

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { BlockVolumeExplorer } from "../BlockVolumeExplorer";
 
 export const metadata: Metadata = {
-  title: "Current surface components | Rectifier Lab",
-  description: "Inspect the current cubical surface components and experimental completions inside their aligned CT block.",
+  title: "Physical boundary tracks | Rectifier Lab",
+  description: "Inspect collision-safe physical papyrus boundary tracks inside their aligned CT block.",
 };
 
 export default function BlockVolumePage() {

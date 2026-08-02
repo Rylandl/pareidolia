@@ -40,6 +40,7 @@ class TifxyzSurfaceAuditSettings:
     close to the known surface.  No fitted reconstruction labels are used.
     """
 
+    component_representation: str = "paired-profiles"
     chart_window_radius_pixels: int = 96
     truth_support_margin_voxels: float = 12.0
     maximum_tangent_residual_voxels: float = 6.0
@@ -51,6 +52,14 @@ class TifxyzSurfaceAuditSettings:
     projection_size: int = 384
 
     def __post_init__(self) -> None:
+        if self.component_representation not in (
+            "paired-profiles",
+            "boundary-tracks",
+        ):
+            raise ValueError(
+                "truth-audit component representation must be paired-profiles "
+                "or boundary-tracks"
+            )
         integers = (
             self.chart_window_radius_pixels,
             self.minimum_component_nodes,
@@ -656,6 +665,29 @@ def run_tifxyz_surface_audit(
     upper = np.asarray(arrays["boundaryUpperXYZ"], dtype=np.float64) - source_origin
     normal = np.asarray(arrays["normalXYZ"], dtype=np.float64)
     component = np.asarray(arrays["componentId"], dtype=np.int32)
+    if resolved.component_representation == "boundary-tracks":
+        required = ("lowerFaceComponentId", "upperFaceComponentId")
+        if any(name not in arrays for name in required):
+            raise ValueError(
+                "boundary-track truth audit requires per-profile face components"
+            )
+        endpoint = np.empty((2 * len(midpoint), 3), dtype=np.float64)
+        endpoint[0::2] = lower
+        endpoint[1::2] = upper
+        endpoint_component = np.empty(2 * len(midpoint), dtype=np.int32)
+        endpoint_component[0::2] = np.asarray(
+            arrays["lowerFaceComponentId"], dtype=np.int32
+        )
+        endpoint_component[1::2] = np.asarray(
+            arrays["upperFaceComponentId"], dtype=np.int32
+        )
+        if not np.any(endpoint_component >= 0):
+            raise ValueError("geometry artifact contains no reconstructed boundary tracks")
+        midpoint = endpoint
+        lower = endpoint
+        upper = endpoint
+        normal = np.repeat(normal, 2, axis=0)
+        component = endpoint_component
     audit, audit_arrays = audit_mid_surfaces_against_truth(
         midpoint,
         lower,
@@ -745,7 +777,14 @@ def run_tifxyz_surface_audit(
         "artifacts": {"projection": projection_output.name},
         "method": {
             "truth": "one independently unrolled PHerc1667 TIFXYZ surface face",
-            "match": "either reconstructed physical boundary must agree with truth in tangent position, normal height, and unsigned normal",
+            "representation": resolved.component_representation,
+            "match": (
+                "one reconstructed physical boundary track must agree with truth "
+                "in tangent position, normal height, and unsigned normal"
+                if resolved.component_representation == "boundary-tracks"
+                else "either reconstructed physical boundary must agree with truth "
+                "in tangent position, normal height, and unsigned normal"
+            ),
             "labelsUsed": False,
             "fittedOffsetUsed": False,
         },
